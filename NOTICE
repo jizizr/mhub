@@ -1,0 +1,22 @@
+MHub
+Copyright (c) MHub contributors.
+
+The application is distributed under the GNU Affero General Public License,
+version 3 only (AGPL-3.0-only). See LICENSE. Third-party components retain their
+own copyright notices and licenses; this notice does not relicense them.
+
+Frontend interaction and lyric integration were developed with reference to:
+- SPlayer-Next, SPlayer-Dev contributors (AGPL-3.0)
+  https://github.com/SPlayer-Dev/SPlayer-Next
+- Apple Music-like Lyrics, AMLL contributors (AGPL-3.0-only)
+  https://github.com/amll-dev/applemusic-like-lyrics
+
+The standalone wasm/alac-decoder crate retains its MIT OR Apache-2.0 license.
+The upstream alac decoder is MIT OR Apache-2.0.
+
+Apple Music and other service names are trademarks of their respective owners.
+This project is independent and is not affiliated with those services.
+
+The Docker image includes corresponding application source at /source.tar.gz.
+Dependency versions are recorded in the Cargo and npm lockfiles. See also
+THIRD_PARTY_NOTICES.txt and web /legal/third-party-notices.txt.

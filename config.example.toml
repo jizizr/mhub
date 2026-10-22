@@ -1,0 +1,49 @@
+# Copy to config.toml (git-ignored). Empty credentials are intentional.
+# The application never sends these values to the frontend.
+[bot]
+owner = 0
+token = ""
+# Optional local Telegram Bot API; requires matching shared file storage.
+# api_url = "http://telegram-bot-api:8081"
+
+[db.mysql]
+# Optional existing music_cache database. Do not publish this URL.
+url = ""
+
+[music]
+inline_upload_chat_id = 0
+
+[music.applemusic]
+enabled = true
+media_user_token = ""
+storefront = "us"
+language = "en-US"
+timeout = 30
+# External, separately authenticated wrapper services; not bundled in this image.
+wrapper_host = ""
+wrapper_hosts = []
+wrapper_lite_enabled = false
+wrapper_lite_url = ""
+wrapper_lite_urls = []
+wrapper_lite_batch_size = 256
+wrapper_track_concurrency = 1
+wrapper_fragment_concurrency = 2
+wrapper_connection_concurrency = 2
+# Optional path to your own device file, mounted read-only. No device is bundled.
+wv_device = ""
+wv_client_id = ""
+wv_private_key = ""
+
+[music.netease]
+cookie = ""
+
+[music.tencent]
+cookie = ""
+
+[music.soda]
+cookie = ""
+
+[music.vkeys]
+enabled = true
+base_url = "https://api.vkeys.cn"
+token = ""

@@ -1,0 +1,61 @@
+name: Verify
+on:
+  push:
+  pull_request:
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libssl-dev pkg-config
+      - run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt
+      - run: cargo +1.96.0 fmt --check
+      - run: cargo +1.96.0 test --locked
+      - run: cargo +1.96.0 test --manifest-path wasm/alac-decoder/Cargo.toml --locked
+      - run: python3 scripts/publication_check.py --staged
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - run: npm run test:build
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: cp config.example.toml config.toml
+      - run: docker compose build
+      - run: docker compose up -d --wait --wait-timeout 90
+      - run: curl --fail http://localhost:8000/health && curl --fail http://localhost:8000/source.tar.gz -o /tmp/source.tar.gz
+      - run: docker compose logs --tail=100 && docker compose down -v
+        if: always()
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Scan complete published Git history
+        working-directory: ${{ runner.temp }}
+        run: |
+          version=8.30.1
+          base="https://github.com/gitleaks/gitleaks/releases/download/v$version"
+          curl --fail --silent --show-error --location "$base/gitleaks_${version}_linux_x64.tar.gz" -o "gitleaks_${version}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location "$base/gitleaks_${version}_checksums.txt" -o checksums.txt
+          sha256sum --ignore-missing --check checksums.txt
+          tar -xzf "gitleaks_${version}_linux_x64.tar.gz" gitleaks
+          ./gitleaks git "$GITHUB_WORKSPACE" --redact=100 --no-banner --log-opts=--all

@@ -1,0 +1,28 @@
+[package]
+name = "alac-decoder"
+version = "0.1.0"
+edition = "2021"
+description = "ALAC packet decoder for WebAssembly AudioWorklet pipelines"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The default `mp4` feature pulls in a seek-based MP4 reader.  Streaming callers
+# already split fMP4 samples into packets, so keep only the packet decoder.
+alac = { version = "0.5.0", default-features = false }
+wasm-bindgen = "0.2"
+
+[profile.release]
+# `z` favors binary size over throughput.  ALAC packets are decoded on a
+# fetch worker and the hot loop remains small enough that this does not change
+# realtime behaviour, while it lets LLVM fold a few more codec helpers.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false

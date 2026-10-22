@@ -1,0 +1,39 @@
+name: mhub
+services:
+  music:
+    image: mhub:local
+    build:
+      context: .
+      args:
+        CARGO_INDEX_URL: ${CARGO_INDEX_URL:-}
+        VITE_MEDIA_BASE_URL: ${MUSIC_MEDIA_BASE_URL:-}
+        VITE_LEGACY_MEDIA_BASE_URL: ${MUSIC_LEGACY_MEDIA_BASE_URL:-}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${MUSIC_BIND_ADDRESS:-127.0.0.1}:${MUSIC_PORT:-8000}:8000"
+    environment:
+      RUST_LOG: ${RUST_LOG:-music_api=info,tower_http=info}
+      MUSIC_API_MEDIA_BASE_URL: ${MUSIC_MEDIA_BASE_URL:-}
+    volumes:
+      - music-data:/app/data
+      - type: bind
+        source: ${MUSIC_CONFIG_FILE:-./config.toml}
+        target: /app/config/config.toml
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  music-data:

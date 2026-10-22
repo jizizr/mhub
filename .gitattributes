@@ -1,0 +1,11 @@
+* text=auto
+*.rs text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.vue text eol=lf
+*.sh text eol=lf
+*.wasm binary
+THIRD_PARTY_NOTICES.txt linguist-generated=true whitespace=-blank-at-eol,-blank-at-eof
+frontend/public/legal/third-party-notices.txt linguist-generated=true whitespace=-blank-at-eol,-blank-at-eof
+frontend/src/wasm/alac-decoder/*.js linguist-generated=true
+frontend/src/wasm/alac-decoder/*.d.ts linguist-generated=true

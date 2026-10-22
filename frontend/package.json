@@ -1,0 +1,38 @@
+{
+  "name": "mhub-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test tests/*.test.mjs src/utils/lyrics.test.js",
+    "test:build": "npm run build && node --test tests/*.build.mjs"
+  },
+  "dependencies": {
+    "@applemusic-like-lyrics/core": "^0.5.1",
+    "@applemusic-like-lyrics/lyric": "^1.0.1",
+    "@pixi/app": "^7.4.3",
+    "@pixi/core": "^7.4.3",
+    "@pixi/display": "^7.4.3",
+    "@pixi/filter-blur": "^7.4.3",
+    "@pixi/filter-bulge-pinch": "^5.1.1",
+    "@pixi/filter-color-matrix": "^7.4.3",
+    "@pixi/sprite": "^7.4.3",
+    "jss": "^10.10.0",
+    "jss-preset-default": "^10.10.0",
+    "lucide-vue-next": "^1.0.0",
+    "opencc-js": "^1.4.2",
+    "pinia": "^3.0.4",
+    "vue": "^3.5.39"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.7",
+    "vite": "^7.0.0"
+  },
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
