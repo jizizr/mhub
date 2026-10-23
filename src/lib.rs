@@ -2,6 +2,7 @@ pub mod api;
 pub mod audio;
 pub mod cache;
 mod loudness;
+pub mod matching;
 pub mod music;
 pub mod settings;
 pub mod telegram_cache;

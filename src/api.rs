@@ -6,6 +6,7 @@ use crate::{
     },
     cache::{MusicCache, find_music_cache, upsert_music_cache},
     loudness::{self, LoudnessResponse},
+    matching,
     music::{self, ResolveOptions},
     settings::SETTINGS,
     telegram_cache,
@@ -338,7 +339,15 @@ pub struct MatchCollectionItem {
     pub source: MatchSourceItem,
     pub status: MatchStatus,
     pub confidence: u8,
-    pub candidates: Vec<SearchItem>,
+    pub candidates: Vec<MatchCandidate>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MatchCandidate {
+    #[serde(flatten)]
+    pub item: SearchItem,
+    /// 0..=100 similarity to the source track, for the review UI.
+    pub score: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -705,19 +714,28 @@ async fn match_collection(
     }
     let items = stream::iter(request.items.into_iter().enumerate())
         .map(|(index, source)| async move {
-            let candidates = tokio::time::timeout(
-                Duration::from_secs(12),
-                music::search(
-                    target_platform,
-                    &format!("{} {}", source.song, source.singer),
-                    8,
-                ),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
-            (index, match_collection_item(source, candidates))
+            let search = |query: String| async move {
+                tokio::time::timeout(
+                    Duration::from_secs(12),
+                    music::search(target_platform, &query, 8),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default()
+            };
+            let candidates = search(format!("{} {}", source.song, source.singer)).await;
+            let mut item = match_collection_item(source.clone(), candidates.clone());
+            // Long annotated titles or several artists can hide the song from
+            // a platform's search; retry once with "title first-artist".
+            if !matches!(item.status, MatchStatus::Matched)
+                && let Some(query) = matching::fallback_query(&source.song, &source.singer)
+            {
+                let mut combined = candidates;
+                combined.extend(search(query).await);
+                item = match_collection_item(source, combined);
+            }
+            (index, item)
         })
         .buffer_unordered(6)
         .collect::<Vec<_>>()
@@ -744,7 +762,10 @@ fn direct_match_collection_item(source: MatchSourceItem, platform: &str) -> Matc
         source,
         status: MatchStatus::Matched,
         confidence: 100,
-        candidates: vec![candidate],
+        candidates: vec![MatchCandidate {
+            item: candidate,
+            score: 100,
+        }],
     }
 }
 
@@ -779,143 +800,33 @@ fn match_collection_item(
     source: MatchSourceItem,
     candidates: Vec<crate::music::MusicSearchItem>,
 ) -> MatchCollectionItem {
-    let mut scored = candidates
-        .into_iter()
-        .map(|candidate| {
-            let score = match_score(
-                &source.song,
-                &source.singer,
-                &candidate.song,
-                &candidate.singer,
-            );
-            let exact_identity = exact_match_identity(
-                &source.song,
-                &source.singer,
-                &candidate.song,
-                &candidate.singer,
-            );
-            (score, exact_identity, candidate)
-        })
-        .collect::<Vec<_>>();
-    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
-    let top_score = scored.first().map(|item| item.0).unwrap_or(0);
-    let second_score = scored.get(1).map(|item| item.0).unwrap_or(0);
-    let exact_top_match = scored.first().map(|item| item.1).unwrap_or(false);
-    let confidence = top_score.clamp(0, 100) as u8;
-    let status = if top_score >= 86 && (top_score - second_score >= 8 || exact_top_match) {
-        MatchStatus::Matched
-    } else if top_score >= 55 {
-        MatchStatus::Review
-    } else {
-        MatchStatus::Missing
-    };
+    let (decision, confidence, ranked) =
+        matching::rank(&source.song, &source.singer, candidates, |candidate| {
+            (candidate.song.as_str(), candidate.singer.as_str())
+        });
     MatchCollectionItem {
         source,
-        status,
+        status: match decision {
+            matching::Decision::Matched => MatchStatus::Matched,
+            matching::Decision::Review => MatchStatus::Review,
+            matching::Decision::Missing => MatchStatus::Missing,
+        },
         confidence,
-        candidates: scored
+        candidates: ranked
             .into_iter()
             .take(5)
-            .map(|(_, _, candidate)| SearchItem {
-                platform: candidate.platform.id().to_string(),
-                id: candidate.id,
-                song: candidate.song,
-                singer: candidate.singer,
-                cover: candidate.cover,
+            .map(|ranked| MatchCandidate {
+                score: ranked.score,
+                item: SearchItem {
+                    platform: ranked.item.platform.id().to_string(),
+                    id: ranked.item.id,
+                    song: ranked.item.song,
+                    singer: ranked.item.singer,
+                    cover: ranked.item.cover,
+                },
             })
             .collect(),
     }
-}
-
-fn exact_match_identity(
-    source_song: &str,
-    source_singer: &str,
-    target_song: &str,
-    target_singer: &str,
-) -> bool {
-    let source_song = strict_match_normalize(source_song);
-    let target_song = strict_match_normalize(target_song);
-    if source_song.is_empty() || source_song != target_song {
-        return false;
-    }
-    let source_artists = match_artists(source_singer);
-    let target_artists = match_artists(target_singer);
-    !source_artists.is_empty()
-        && source_artists
-            .iter()
-            .any(|source| target_artists.iter().any(|target| source == target))
-}
-
-fn match_score(
-    source_song: &str,
-    source_singer: &str,
-    target_song: &str,
-    target_singer: &str,
-) -> i32 {
-    let source_song = match_normalize(source_song);
-    let target_song = match_normalize(target_song);
-    if source_song.is_empty() || target_song.is_empty() {
-        return 0;
-    }
-    let mut score = if source_song == target_song {
-        60
-    } else if source_song.contains(&target_song) || target_song.contains(&source_song) {
-        42
-    } else {
-        0
-    };
-    let source_artists = match_artists(source_singer);
-    let target_artists = match_artists(target_singer);
-    if !source_artists.is_empty()
-        && source_artists.iter().any(|source| {
-            target_artists.iter().any(|target| {
-                source == target || source.contains(target) || target.contains(source)
-            })
-        })
-    {
-        score += 35;
-    }
-    score
-}
-
-fn match_artists(value: &str) -> Vec<String> {
-    value
-        .split(['&', ',', '，', '、', '/', '／', '|', '＆'])
-        .map(match_normalize)
-        .filter(|value| !value.is_empty())
-        .collect()
-}
-
-fn match_normalize(value: &str) -> String {
-    let mut output = String::new();
-    let mut nesting = 0usize;
-    for character in value.trim().chars() {
-        match character {
-            '(' | '[' | '{' | '（' | '［' | '｛' => nesting += 1,
-            ')' | ']' | '}' | '）' | '］' | '｝' => nesting = nesting.saturating_sub(1),
-            _ if nesting > 0 => {}
-            character if character.is_alphanumeric() || !character.is_ascii() => {
-                output.extend(character.to_lowercase())
-            }
-            _ => {}
-        }
-    }
-    output
-}
-
-fn strict_match_normalize(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .filter(|character| {
-            !character.is_whitespace()
-                && !matches!(
-                    character,
-                    '(' | ')' | '[' | ']' | '{' | '}' | '（' | '）' | '［' | '］' | '｛' | '｝'
-                )
-        })
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 async fn lyrics(Query(params): Query<LyricsParams>) -> ApiResult<Json<LyricsResponse>> {
@@ -4275,7 +4186,7 @@ mod tests {
         assert_eq!(response.review_count + response.missing_count, 0);
         for (index, item) in response.items.iter().enumerate() {
             assert_eq!(item.source.id, (index + 1).to_string());
-            assert_eq!(item.candidates[0].id, item.source.id);
+            assert_eq!(item.candidates[0].item.id, item.source.id);
         }
     }
 
@@ -4319,9 +4230,8 @@ mod tests {
 
     #[test]
     fn matches_cross_platform_tracks_only_when_identity_is_strong() {
-        assert!(match_score("最初", "逆时针向", "最初", "逆时针向") >= 90);
-        assert!(match_score("最初", "逆时针向", "最初", "另一位歌手") < 90);
-        assert_eq!(match_normalize("Song (Live Version)"), "song");
+        assert!(matching::score("最初", "逆时针向", "最初", "逆时针向") >= 90);
+        assert!(matching::score("最初", "逆时针向", "最初", "另一位歌手") < 90);
     }
 
     #[test]
@@ -4350,7 +4260,7 @@ mod tests {
         ];
         let item = match_collection_item(source, candidates);
         assert!(matches!(item.status, MatchStatus::Matched));
-        assert_eq!(item.candidates[0].id, "exact-version");
+        assert_eq!(item.candidates[0].item.id, "exact-version");
     }
 
     #[test]
@@ -4365,7 +4275,7 @@ mod tests {
         assert!(matches!(item.status, MatchStatus::Matched));
         assert_eq!(item.confidence, 100);
         assert_eq!(item.candidates.len(), 1);
-        assert_eq!(item.candidates[0].id, "123");
-        assert_eq!(item.candidates[0].platform, "netease");
+        assert_eq!(item.candidates[0].item.id, "123");
+        assert_eq!(item.candidates[0].item.platform, "netease");
     }
 }

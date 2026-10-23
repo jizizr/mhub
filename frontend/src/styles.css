@@ -60,8 +60,56 @@
   --full-player-toolbar-height: 116px;
 }
 
+/* Dark tokens apply for an explicit choice or, unless the user picked
+   light, for the system preference. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #141416;
+  --page-bg:
+    radial-gradient(120% 80% at 0% 0%, rgba(255, 69, 96, 0.07), transparent 46%),
+    linear-gradient(180deg, #19191c 0%, #111113 100%);
+  --text: #f5f5f7;
+  --text-secondary: #d1d1d6;
+  --text-muted: #98989f;
+  --text-faint: #6c6c72;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --surface: rgba(255, 255, 255, 0.045);
+  --surface-strong: rgba(255, 255, 255, 0.09);
+  --surface-hover: rgba(255, 255, 255, 0.07);
+  --surface-muted: rgba(255, 255, 255, 0.08);
+  --surface-raised: rgba(36, 36, 40, 0.96);
+  --input-bg: rgba(255, 255, 255, 0.06);
+  --sidebar-bg: rgba(22, 22, 25, 0.78);
+  --bar-bg: rgba(24, 24, 27, 0.88);
+  --bar-solid: #18181b;
+  --placeholder: linear-gradient(145deg, #2a2a2e, #1f1f22);
+  --cover-inset: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --cover-ring: rgba(255, 255, 255, 0.1);
+  --hero-bg:
+    radial-gradient(circle at 88% 8%, rgba(255, 120, 90, 0.13), transparent 34%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025));
+  --accent: #ff4560;
+  --accent-hover: #ff5c74;
+  --accent-soft: rgba(255, 69, 96, 0.14);
+  --accent-line: rgba(255, 69, 96, 0.38);
+  --accent-ring: rgba(255, 69, 96, 0.4);
+  --inverse-bg: #f5f5f7;
+  --inverse-text: #1d1d1f;
+  --danger: #ff6b81;
+  --success: #4cc38a;
+  --scrim: rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 6px 18px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 14px 34px rgba(0, 0, 0, 0.35);
+  --shadow: 0 22px 55px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 24px 70px rgba(0, 0, 0, 0.55);
+  --bar-shadow: 0 -10px 30px rgba(0, 0, 0, 0.25);
+}
+
+:root[data-theme="light"] { color-scheme: light; }
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #141416;
     --page-bg:
       radial-gradient(120% 80% at 0% 0%, rgba(255, 69, 96, 0.07), transparent 46%),
@@ -337,6 +385,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .topbar__controls .platform-select { display: none; }
+.topbar__controls .theme-toggle { width: 42px; height: 42px; justify-content: center; padding: 0; }
 
 .topbar__controls select {
   height: 42px;
@@ -1347,31 +1396,6 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
 .dialog__head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .dialog__head h2 { margin: 0; }
 .dialog__head p { margin: 7px 0 0; color: var(--text-muted); font-size: 13px; }
-.dialog__match-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 13px; }
-.dialog__match-toolbar label { display: flex; align-items: center; gap: 8px; font-weight: 650; }
-.dialog__match-toolbar select { min-width: 140px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; background: var(--surface); color: var(--text); }
-.import-stat { color: var(--text-muted); }
-.import-match-row { justify-content: space-between; gap: 12px; padding: 4px 8px; }
-.import-match-row > span { display: grid; gap: 2px; }
-.import-review-names { min-width: 0; }
-.import-review-best { color: var(--text); }
-.import-match-row select { max-width: 52%; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: var(--surface); color: var(--text); font-size: 12px; }
-.import-status { flex: 0 0 auto; }
-.import-status.is-matched { color: var(--success); }
-.import-status.is-missing { color: var(--danger); }
-.import-hint { margin: 10px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-.dialog__options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
-.dialog__option { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
-.dialog__option h3 { margin: 0 0 6px; font-size: 16px; }
-.dialog__option p { min-height: 36px; margin: 0 0 14px; color: var(--text-muted); font-size: 13px; }
-.dialog__option input, .dialog__option select {
-  width: 100%; height: 40px; margin-bottom: 10px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: var(--input-bg);
-}
-.dialog__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
-.dialog__preview { max-height: 180px; margin-top: 14px; overflow: auto; border-top: 1px solid var(--line); }
-.dialog__preview-item { display: flex; gap: 9px; align-items: center; min-height: 42px; border-bottom: 1px solid var(--line); font-size: 13px; }
-.dialog__preview-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dialog__preview-item small { color: var(--text-muted); }
 
 .cache-meter {
   height: 8px;
@@ -1449,6 +1473,7 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
   .topbar__controls .platform-select { display: block; }
   .topbar__controls select, .topbar__controls .ghost-action { flex: 0 0 auto; height: 36px; min-height: 36px; border-radius: 999px; font-size: 13px; }
   .topbar__controls .ghost-action { padding: 0 14px; }
+  .topbar__controls .theme-toggle { width: 36px; height: 36px; }
   .page-title { align-items: flex-start; flex-direction: column; }
   .recommend-hero { grid-template-columns: 1fr; min-height: 0; padding: 22px; border-radius: 20px; }
   .recommend-hero__stack { position: absolute; top: 14px; right: -30px; width: 170px; opacity: .42; transform: scale(.82); transform-origin: top right; }
@@ -1555,9 +1580,6 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
     width: 100%;
   }
   .full-player__bottom-spacer { display: none; }
-  .dialog__options { grid-template-columns: 1fr; }
-  .dialog__match-toolbar { align-items: flex-start; flex-direction: column; }
-  .import-match-row select { max-width: 58%; }
 }
 
 @media (max-width: 560px) {

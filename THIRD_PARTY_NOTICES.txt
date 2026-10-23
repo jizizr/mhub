@@ -73991,3 +73991,14 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 
 
+
+========================================================================
+OpenCC dictionary data (Apache-2.0)
+https://github.com/BYVoid/OpenCC
+src/data/zh_fold.txt is derived from OpenCC's TSCharacters, TWVariantsRev
+and HKVariantsRev dictionaries (via opencc-js 1.4.2) by
+scripts/gen_zh_fold.mjs. It is used only to compare song titles and artist
+names when matching imported playlists.
+Copyright (c) 2010-2024 Carbo Kuo (BYVoid) and OpenCC contributors.
+Licensed under the Apache License, Version 2.0; the license text is
+reproduced earlier in this file.

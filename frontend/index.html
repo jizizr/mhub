@@ -10,6 +10,13 @@
     <meta name="apple-mobile-web-app-title" content="MHub" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>MHub</title>
+    <script>
+      // Apply a saved explicit theme before the first paint.
+      try {
+        var theme = JSON.parse(localStorage.getItem("music-web-splayer-status-v3") || "{}").theme;
+        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+      } catch (error) { /* Storage may be unavailable. */ }
+    </script>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />

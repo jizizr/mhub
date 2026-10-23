@@ -1,6 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowLeft, FolderOpen, ListMusic, ListPlus, ListStart, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, Search, Trash2, X } from "lucide-vue-next";
+import { ArrowLeft, FolderOpen, ListMusic, ListPlus, ListStart, Monitor, Moon, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, Search, Sun, Trash2, X } from "lucide-vue-next";
 import {
   audioUrl,
   createPlayback,
@@ -8,7 +8,6 @@ import {
   getPlatforms,
   getRecommendationHome,
   getContinuationRecommendations,
-  matchCollection,
   resolveCollection,
   searchTracks,
 } from "./apis/music";
@@ -75,17 +74,6 @@ const searchError = ref("");
 const cacheItems = ref([]);
 const cacheLoading = ref(false);
 const importOpen = ref(false);
-const importUrl = ref("");
-const importLoading = ref(false);
-const importError = ref("");
-const importCollection = ref(null);
-const importMatches = ref(null);
-const importTargetPlatform = ref("");
-const importTargetTouched = ref(false);
-const importSelections = ref({});
-const importName = ref("");
-const mergePlaylistId = ref("");
-let importRequestVersion = 0;
 const playlistMenu = ref({ open: false, x: 0, y: 0, playlistId: "" });
 const songMenu = ref({ open: false, x: 0, y: 0, track: null, playlistId: "" });
 const status = useStatusStore();
@@ -93,6 +81,7 @@ const media = useMediaStore();
 const queue = useQueueStore();
 const playlists = usePlaylistStore();
 const FullPlayer = defineAsyncComponent(() => import("./components/player/FullPlayer.vue"));
+const ImportDialog = defineAsyncComponent(() => import("./components/import/ImportDialog.vue"));
 // Keep the instance after its first opening so its own leave transition and
 // per-song controls survive closing. Before that, don't request its chunk.
 const fullPlayerMounted = ref(media.expanded);
@@ -222,22 +211,33 @@ const cacheSummary = computed(() => cacheStats(cacheItems.value));
 const activePlaylist = computed(() =>
   status.activePlaylistId ? playlists.getById(status.activePlaylistId) : null,
 );
-const importMatchedTracks = computed(() => {
-  const matches = importMatches.value?.items || [];
-  return matches.map((item, index) => {
-    const selectedId = importSelections.value[index];
-    const candidate = item.candidates?.find((entry) => entry.id === selectedId) ||
-      (item.status === "matched" ? item.candidates?.[0] : null);
-    return candidate ? trackFromSearch(candidate, status.quality) : null;
-  }).filter(Boolean);
-});
-const importStats = computed(() => ({
-  total: importCollection.value?.items?.length || 0,
-  matched: importMatches.value?.matched_count || 0,
-  review: importMatches.value?.review_count || 0,
-  missing: importMatches.value?.missing_count || 0,
-  selected: importMatchedTracks.value.length,
-}));
+const THEMES = [
+  { id: "system", label: "跟随系统", icon: Monitor },
+  { id: "light", label: "浅色", icon: Sun },
+  { id: "dark", label: "深色", icon: Moon },
+];
+const THEME_COLORS = { light: "#f6f5f3", dark: "#141416" };
+const currentTheme = computed(() => THEMES.find((item) => item.id === status.theme) || THEMES[0]);
+
+// An explicit theme overrides prefers-color-scheme; "system" follows it.
+function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === "light" || theme === "dark") root.dataset.theme = theme;
+  else delete root.dataset.theme;
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    const scheme = meta.media.includes("dark") ? "dark" : "light";
+    meta.content = THEME_COLORS[theme === "system" ? scheme : theme];
+  }
+}
+
+function cycleTheme() {
+  const next = THEMES[(THEMES.indexOf(currentTheme.value) + 1) % THEMES.length];
+  status.theme = next.id;
+  status.persist();
+  status.toast(`外观：${next.label}`);
+}
+
+watch(() => status.theme, applyTheme, { immediate: true });
 
 function currentQualityLabel() {
   const map = { standard: "标准", high: "高品质", lossless: "无损", hires: "Hi-Res" };
@@ -917,103 +917,14 @@ async function playAllResults() {
 }
 
 function openImportDialog() {
-  importRequestVersion += 1;
-  importLoading.value = false;
   importOpen.value = true;
-  importUrl.value = "";
-  importError.value = "";
-  importCollection.value = null;
-  importMatches.value = null;
-  importSelections.value = {};
-  importTargetTouched.value = false;
-  importTargetPlatform.value = platforms.value.find((item) => item.id === status.searchPlatform)?.id || platforms.value[0]?.id || "applemusic";
-  importName.value = "";
-  mergePlaylistId.value = playlists.items[0]?.id || "";
 }
 
-function closeImportDialog() {
-  if (importLoading.value) return;
-  importRequestVersion += 1;
+function finishImport(playlistId) {
   importOpen.value = false;
-}
-
-async function resolvePlaylist() {
-  const url = importUrl.value.trim();
-  if (!url) return;
-  const requestVersion = ++importRequestVersion;
-  importLoading.value = true;
-  importError.value = "";
-  importCollection.value = null;
-  importMatches.value = null;
-  importSelections.value = {};
-  try {
-    const platform = /music\.163\.com\//i.test(url)
-      ? "netease"
-      : /music\.apple\.com\//i.test(url)
-        ? "applemusic"
-        : status.searchPlatform;
-    if (!importTargetTouched.value) importTargetPlatform.value = platform;
-    const collection = await resolveCollection({ platform, url });
-    if (requestVersion !== importRequestVersion) return;
-    if (!collection.items?.length) throw new Error("歌单没有可导入的歌曲");
-    importCollection.value = {
-      ...collection,
-      items: collection.items,
-    };
-    importName.value = collection.title || "未命名歌单";
-    await matchImportCollection(collection.items, platform, importTargetPlatform.value, requestVersion);
-  } catch (error) {
-    if (requestVersion === importRequestVersion) importError.value = error?.message || "歌单解析失败";
-  } finally {
-    if (requestVersion === importRequestVersion) importLoading.value = false;
-  }
-}
-
-async function matchImportCollection(items = importCollection.value?.items, sourcePlatform = importCollection.value?.platform, targetPlatform = importTargetPlatform.value, requestVersion = ++importRequestVersion) {
-  if (!items?.length || !sourcePlatform || !targetPlatform) return;
-  importLoading.value = true;
-  importError.value = "";
-  importMatches.value = null;
-  importSelections.value = {};
-  try {
-    const matches = await matchCollection({ sourcePlatform, targetPlatform, items });
-    if (requestVersion !== importRequestVersion) return;
-    importMatches.value = matches;
-    importTargetPlatform.value = targetPlatform;
-  } catch (error) {
-    if (requestVersion === importRequestVersion) importError.value = error?.message || "跨平台匹配失败";
-  } finally {
-    if (requestVersion === importRequestVersion) importLoading.value = false;
-  }
-}
-
-function chooseImportCandidate(index, candidateId) {
-  importSelections.value = { ...importSelections.value, [index]: candidateId };
-}
-
-function createImportedPlaylist() {
-  if (importLoading.value || importError.value || !importCollection.value || !importMatches.value || !importMatchedTracks.value.length || !importName.value.trim()) return;
-  const playlist = playlists.create({
-    name: importName.value,
-    tracks: importMatchedTracks.value,
-    platform: importMatches.value?.target_platform || importCollection.value.platform,
-    sourceId: importCollection.value.id,
-    sourceUrl: importCollection.value.source_url,
-  });
   status.activeView = "playlists";
-  status.activePlaylistId = playlist.id;
+  status.activePlaylistId = playlistId;
   status.persist();
-  importOpen.value = false;
-}
-
-function mergeImportedPlaylist() {
-  if (importLoading.value || importError.value || !importCollection.value || !importMatches.value || !importMatchedTracks.value.length || !mergePlaylistId.value) return;
-  const playlist = playlists.merge(mergePlaylistId.value, importMatchedTracks.value);
-  if (!playlist) return;
-  status.activeView = "playlists";
-  status.activePlaylistId = playlist.id;
-  status.persist();
-  importOpen.value = false;
 }
 
 function openPlaylist(id) {
@@ -1451,6 +1362,9 @@ watch(
             <option value="simplified">简体歌词</option>
             <option value="traditional">繁體歌词</option>
           </select>
+          <button class="ghost-action theme-toggle" type="button" :title="`外观：${currentTheme.label}（点击切换）`" :aria-label="`外观：${currentTheme.label}`" @click="cycleTheme">
+            <component :is="currentTheme.icon" :size="17" />
+          </button>
           <button class="ghost-action" @click="openImportDialog">导入歌单</button>
         </div>
       </header>
@@ -1695,82 +1609,7 @@ watch(
     <audio ref="audioRef" preload="auto" crossorigin="anonymous" />
 
     <Transition name="dialog">
-    <div v-if="importOpen" class="dialog-backdrop" @click.self="closeImportDialog">
-      <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="import-title">
-        <div class="dialog__head">
-          <div>
-            <h2 id="import-title">导入歌单</h2>
-            <p>先解析源歌单，再匹配到目标平台；低置信度歌曲不会自动导入。</p>
-          </div>
-          <button class="mini-button" title="关闭" @click="closeImportDialog">×</button>
-        </div>
-        <form class="search-box dialog__search" @submit.prevent="resolvePlaylist">
-          <Search :size="18" />
-          <input v-model="importUrl" placeholder="粘贴网易云或 Apple Music 歌单链接" :disabled="importLoading" />
-          <button type="submit" :disabled="importLoading || !importUrl.trim()">{{ importLoading ? "解析中" : "解析" }}</button>
-        </form>
-        <div v-if="importError" class="error-banner">{{ importError }}</div>
-        <template v-if="importCollection">
-          <div class="dialog__match-toolbar">
-            <label>
-              导入到
-              <select v-model="importTargetPlatform" :disabled="importLoading" @change="importTargetTouched = true; matchImportCollection()">
-                <option v-for="item in platforms" :key="item.id" :value="item.id">{{ item.label }}</option>
-              </select>
-            </label>
-            <span class="import-stat">共 {{ importStats.total }} 首 · 已匹配 {{ importStats.matched }} · 待确认 {{ importStats.review }} · 不存在 {{ importStats.missing }}</span>
-          </div>
-          <div class="dialog__preview">
-            <div class="dialog__preview-item">
-              <strong>{{ importCollection.title }}</strong>
-              <small>{{ importStats.selected }} 首将被导入</small>
-            </div>
-            <div v-for="(item, index) in importMatches?.items || []" :key="`${item.source.id}:${index}`" class="dialog__preview-item import-match-row">
-              <span>
-                <strong>{{ item.source.song }}</strong>
-                <small>{{ item.source.singer }}</small>
-              </span>
-              <template v-if="item.status === 'missing'">
-                <small class="import-status is-missing">目标平台不存在</small>
-              </template>
-              <template v-else-if="item.status === 'matched'">
-                <small class="import-status is-matched">自动匹配 {{ item.confidence }}%</small>
-              </template>
-              <template v-else>
-                <span class="import-review-names">
-                  <small class="import-review-best">
-                    目标平台最佳：{{ item.candidates?.[0]?.song || "无候选" }}
-                    <template v-if="item.candidates?.[0]?.singer"> · {{ item.candidates[0].singer }}</template>
-                  </small>
-                </span>
-                <select :value="importSelections[index] || ''" @change="chooseImportCandidate(index, $event.target.value)">
-                  <option value="">待确认（不导入）</option>
-                  <option v-for="candidate in item.candidates" :key="candidate.id" :value="candidate.id">{{ candidate.song }} · {{ candidate.singer }}</option>
-                </select>
-              </template>
-            </div>
-          </div>
-          <p class="import-hint">自动匹配要求歌名和歌手同时可信；“待确认”需要手动选择，“目标平台不存在”会保留在统计中但不会误导入。</p>
-          <div class="dialog__options">
-            <div class="dialog__option">
-              <h3>创建新歌单</h3>
-              <p>保留导入歌单的独立曲目和来源。</p>
-              <input v-model="importName" aria-label="新歌单名称" placeholder="歌单名称" />
-              <button class="primary-action" :disabled="importLoading || !!importError || !importMatchedTracks.length || !importName.trim()" @click="createImportedPlaylist">导入 {{ importStats.selected }} 首</button>
-            </div>
-            <div class="dialog__option">
-              <h3>合并到已有歌单</h3>
-              <p>自动去重后追加到本地歌单末尾。</p>
-              <select v-model="mergePlaylistId" aria-label="选择歌单" :disabled="!playlists.items.length">
-                <option value="" disabled>{{ playlists.items.length ? "选择歌单" : "暂无已有歌单" }}</option>
-                <option v-for="playlist in playlists.items" :key="playlist.id" :value="playlist.id">{{ playlist.name }}</option>
-              </select>
-              <button class="primary-action" :disabled="importLoading || !!importError || !mergePlaylistId || !importMatchedTracks.length" @click="mergeImportedPlaylist">合并 {{ importStats.selected }} 首</button>
-            </div>
-          </div>
-        </template>
-      </section>
-    </div>
+      <ImportDialog v-if="importOpen" :platforms="platforms" @close="importOpen = false" @imported="finishImport" />
     </Transition>
   </div>
 </template>

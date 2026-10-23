@@ -15,6 +15,7 @@ function restore() {
     delete data.soundCheckState;
     delete data.transitionState;
     data.crossfadeEnabled = data.crossfadeEnabled === true;
+    if (!["system", "light", "dark"].includes(data.theme)) data.theme = "system";
     data.soundCheckEnabled = data.soundCheckEnabled === true;
     const crossfadeSeconds = Number(data.crossfadeSeconds ?? 4);
     data.crossfadeSeconds = Number.isFinite(crossfadeSeconds)
@@ -50,6 +51,7 @@ export const useStatusStore = defineStore("status", {
     searchPlatform: "applemusic",
     quality: "high",
     lyricScript: "original",
+    theme: "system",
     activeView: "discover",
     activePlaylistId: null,
     searchOpen: false,
@@ -98,6 +100,7 @@ export const useStatusStore = defineStore("status", {
           searchPlatform: this.searchPlatform,
           quality: this.quality,
           lyricScript: this.lyricScript,
+          theme: this.theme,
           activeView: this.activeView,
           activePlaylistId: this.activePlaylistId,
         }),
