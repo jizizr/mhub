@@ -62,6 +62,13 @@ const PREFETCH_BUFFER_TARGET_SECONDS = 20;
 const PREFETCH_RETRY_DELAYS_MS = [5000, 15000, 30000];
 const PROGRESS_STORAGE_KEY = "music-web-splayer-progress-v1";
 
+// Visible on every screen size; stores without toast keep the notice only.
+function toast(message) {
+  const status = useStatusStore();
+  if (status.toast) status.toast(message);
+  else status.setNotice(message);
+}
+
 function stores() {
   return {
     media: useMediaStore(),
@@ -192,6 +199,17 @@ function nextTransitionTrack() {
   return track && trackIdentity(track) !== trackIdentity(status.currentTrack) ? track : null;
 }
 
+// The decoder chunk is loaded on demand. Factories without `load` (tests and
+// eager callers) create synchronously.
+function createAlacPlayer() {
+  return alacPlayerFactory.create?.() || alacPlayerFactory();
+}
+
+async function loadAlacPlayer() {
+  await alacPlayerFactory.load?.();
+  return createAlacPlayer();
+}
+
 function candidateStillValid(candidate) {
   return candidate && candidate.generation === transitionGeneration && candidate.token === trackToken &&
     prefetchKey(nextTransitionTrack()) === candidate.key && !candidate.controller.signal.aborted;
@@ -313,7 +331,7 @@ async function prepareTransition(myToken = trackToken) {
     if (!candidateStillValid(candidate)) throw new DOMException("过渡已取消", "AbortError");
     candidate.loudnessGain = cachedLoudnessGain(candidate.track);
     if (candidate.usingAlac) {
-      candidate.alac ||= alacPlayerFactory.create?.() || alacPlayerFactory();
+      candidate.alac ||= await loadAlacPlayer();
       // Reused decks may still remember the previous quality's context.
       // prepareAudio() already unlocked this shared rate in the user gesture.
       candidate.alac.prepare?.(["hires", "hi-res"].includes(candidate.track.quality) ? 192000 : 48000);
@@ -999,7 +1017,7 @@ function attachAudioEvents(element = audio) {
     playback.setPlaying(false);
     status.state = "idle";
     status.trackLoading = false;
-    status.setNotice("当前音频流暂时无法播放，正在尝试下一首");
+    toast("当前音频流暂时无法播放，正在尝试下一首");
     updateMediaSession();
     void skipOnFailure(trackToken, () => trackToken);
   });
@@ -1047,9 +1065,16 @@ export function prepareAudio(quality = useStatusStore().quality) {
   }
   const track = { platform: "applemusic", quality };
   if (!alacPlayerFactory?.canRequest?.(track)) return;
+  const sampleRate = ["hires", "hi-res"].includes(quality) ? 192000 : 48000;
   try {
-    if (!alacPlayer) alacPlayer = alacPlayerFactory.create?.() || alacPlayerFactory();
-    alacPlayer.prepare?.(["hires", "hi-res"].includes(quality) ? 192000 : 48000);
+    if (!alacPlayer && alacPlayerFactory.isLoaded?.() === false) {
+      // Unlock this rate's shared context inside the gesture. The decoder
+      // module downloads in parallel and later reuses that same context.
+      alacPlayerFactory.warm?.(sampleRate);
+      return;
+    }
+    if (!alacPlayer) alacPlayer = createAlacPlayer();
+    alacPlayer.prepare?.(sampleRate);
   } catch (error) {
     // A browser context/resource limit must not abort the click handler. The
     // normal load path can report a recoverable error if creation still fails.
@@ -1131,7 +1156,7 @@ function setupAlacWorkletCallbacks(myToken) {
     usingAlacWorklet = false;
     status.state = "paused";
     playback.setPlaying(false);
-    status.setNotice(error?.message || "ALAC 解码失败，请稍后重试");
+    toast(error?.message || "ALAC 解码失败，请稍后重试");
     updateMediaSession();
   };
 }
@@ -1145,7 +1170,22 @@ async function tryLoadAlacWorklet(source, autoPlay, track, myToken) {
     console.warn("[player] ALAC capability check failed", error);
   }
   if (!canUse || myToken !== trackToken) return null;
-  if (!alacPlayer) alacPlayer = alacPlayerFactory.create?.() || alacPlayerFactory();
+  if (!alacPlayer) {
+    try {
+      await alacPlayerFactory.load?.();
+    } catch (error) {
+      if (myToken !== trackToken) return { ok: false };
+      toast("ALAC 解码器加载失败，请检查网络后重试");
+      return { ok: false, error };
+    }
+    if (myToken !== trackToken) return { ok: false };
+    if (!alacPlayer) {
+      alacPlayer = createAlacPlayer();
+      // Reuse the context unlocked by the gesture and fetch the codec and
+      // worklet processor in parallel, as an eagerly created player would.
+      alacPlayer.prepare?.(["hires", "hi-res"].includes(track.quality) ? 192000 : 48000);
+    }
+  }
   setupAlacWorkletCallbacks(myToken);
   try {
     usingAlacWorklet = true;
@@ -1188,7 +1228,7 @@ async function tryLoadAlacWorklet(source, autoPlay, track, myToken) {
     // the original full-download path.
     usingAlacWorklet = false;
     await alacPlayer.stop?.();
-    useStatusStore().setNotice("ALAC 流暂不可用，请稍后重试");
+    toast("ALAC 流暂不可用，请稍后重试");
     console.warn("[player] ALAC worklet fallback", error);
     return { ok: false, error };
   }
@@ -1234,7 +1274,7 @@ export async function load(source, autoPlay = true, track = useMediaStore().trac
     if (token === loadToken) {
       clearPendingSeek();
       status.state = "idle";
-      status.setNotice(error?.message || "加载音频失败");
+      toast(error?.message || "加载音频失败");
     }
     return { ok: false, error };
   } finally {
@@ -1275,7 +1315,7 @@ async function loadTrack(track, autoPlay = true) {
       status.state = "idle";
       status.trackLoading = false;
       media.clearLyric();
-      status.setNotice(error?.message || "音频准备失败");
+      toast(error?.message || "音频准备失败");
       updateMediaSession();
     }
     return false;
@@ -1567,13 +1607,13 @@ export async function play(options = {}) {
     }
     if (error?.name === "NotSupportedError") {
       status.state = "paused";
-      status.setNotice("浏览器暂时无法解码该音频流，请稍后重试");
+      toast("浏览器暂时无法解码该音频流，请稍后重试");
       return false;
     }
     // A failed play request must never restore the optimistic buffering or
     // playing state. The media element is not producing audio at this point.
     status.state = "paused";
-    status.setNotice(error?.message || "播放失败");
+    toast(error?.message || "播放失败");
     return false;
   } finally {
     if (requestToken === loadToken && controlToken === playControlToken) updateMediaSession();
@@ -1721,7 +1761,7 @@ function applyPendingSeek() {
     }).catch((error) => {
       if (request.id !== seekGeneration || request.token !== trackToken) return;
       playback.setSeeking(false);
-      if (error?.name !== "AbortError") status.setNotice(error?.message || "跳转失败");
+      if (error?.name !== "AbortError") toast(error?.message || "跳转失败");
     }).finally(() => {
       if (request.id === seekGeneration && request.token === trackToken) refreshTransitionPreparation();
     });
@@ -1884,7 +1924,7 @@ export async function nextTrack(manual = false) {
           return loadTrack(status.currentTrack);
         }
         await onQueueEnded();
-        status.setNotice(status.autoplayError || "暂时没有更多新歌曲，可以重试");
+        toast(status.autoplayError || "暂时没有更多新歌曲，可以重试");
         return false;
       })();
       autoplayAdvance = advance;
@@ -2124,6 +2164,9 @@ export async function clearQueue() {
 
 export function tickPlaybackTime() {
   checkTransition();
+  // A hidden page shows no clock. Media events keep the store and Media
+  // Session current, so skip these 4 Hz reactive updates in the background.
+  if (typeof document !== "undefined" && document.hidden) return;
   const status = useStatusStore();
   const nextPosition = Math.round(playback.getCurrentTime());
   const nextDuration = Math.round(playback.getDuration());

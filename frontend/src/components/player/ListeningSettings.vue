@@ -157,7 +157,7 @@ onBeforeUnmount(() => {
 .listening-settings--compact { margin: 0; border: 0; border-radius: 50%; background: transparent; }
 .listening-settings--compact .listening-settings__trigger { justify-content: center; width: 34px; min-height: 34px; padding: 0; border-radius: 50%; color: var(--text-muted); }
 .listening-settings__indicator { position: absolute; top: 3px; right: 2px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
-.listening-settings--compact .listening-settings__panel { position: absolute; z-index: 1; bottom: calc(50% + var(--player-bar-height) * .5 + 12px); right: 0; width: min(320px, calc(100vw - 32px)); max-height: calc(100dvh - var(--player-dock-height) - 48px); padding: 14px 16px 16px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface-strong, #fff); box-shadow: var(--shadow); }
+.listening-settings--compact .listening-settings__panel { position: absolute; z-index: 1; bottom: calc(50% + var(--player-bar-height) * .5 + 12px); right: 0; width: min(320px, calc(100vw - 32px)); max-height: calc(100dvh - var(--player-dock-height) - 48px); padding: 14px 16px 16px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface-raised); box-shadow: var(--shadow); }
 .listening-settings--compact .listening-settings__heading { display: flex; }
 .listening-settings-enter-active, .listening-settings-leave-active { transition: opacity var(--motion-fast), transform var(--motion-fast) var(--ease-standard); }
 .listening-settings-enter-from, .listening-settings-leave-to { opacity: 0; transform: translateY(5px); }

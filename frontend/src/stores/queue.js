@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 
 const STORAGE_KEY = "music-web-splayer-queue-v3";
+let saveScheduled = false;
 
 function restore() {
   try {
@@ -63,11 +64,18 @@ export const useQueueStore = defineStore("queue", {
     queueLength: (state) => state.queue.length,
   },
   actions: {
+    // Bulk edits call save() once per item. Serialize the whole queue once
+    // per task instead; the microtask still runs before any unload handler.
     save() {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ queue: this.queue, originalQueue: this.originalQueue, sourcePlaylist: this.sourcePlaylist }),
-      );
+      if (saveScheduled) return;
+      saveScheduled = true;
+      queueMicrotask(() => {
+        saveScheduled = false;
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({ queue: this.queue, originalQueue: this.originalQueue, sourcePlaylist: this.sourcePlaylist }),
+        );
+      });
     },
     setQueue(items, sourcePlaylist = null) {
       this.queue = uniqueTracks(items);

@@ -1,8 +1,57 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { brotliCompress, constants, gzip } from "node:zlib";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+
+const brotli = promisify(brotliCompress);
+const gzipAsync = promisify(gzip);
+const backgroundStub = fileURLToPath(new URL("./src/vendor/amll-background-stub.js", import.meta.url));
+const COMPRESSIBLE = /\.(?:js|mjs|css|html|wasm|svg|json|txt|webmanifest)$/;
+
+// The Rust server serves `.br` / `.gz` siblings through ServeDir's
+// precompressed support, so compression happens once per build instead of
+// per request (and also works without a compressing reverse proxy).
+function precompress() {
+  let outDir = "";
+  return {
+    name: "mhub-precompress",
+    apply: "build",
+    configResolved(config) { outDir = config.build.outDir; },
+    async closeBundle() {
+      const files = [];
+      const walk = async (dir) => {
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+          const path = join(dir, entry.name);
+          if (entry.isDirectory()) await walk(path);
+          else if (COMPRESSIBLE.test(entry.name)) files.push(path);
+        }
+      };
+      await walk(outDir);
+      await Promise.all(files.map(async (path) => {
+        if ((await stat(path)).size < 1024) return;
+        const source = await readFile(path);
+        const [br, gz] = await Promise.all([
+          brotli(source, { params: { [constants.BROTLI_PARAM_QUALITY]: 11, [constants.BROTLI_PARAM_SIZE_HINT]: source.length } }),
+          gzipAsync(source, { level: 9 }),
+        ]);
+        if (br.length < source.length * 0.95) await writeFile(`${path}.br`, br);
+        if (gz.length < source.length * 0.95) await writeFile(`${path}.gz`, gz);
+      }));
+    },
+  };
+}
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), precompress()],
+  resolve: {
+    alias: [
+      { find: /^@pixi\/.+$/, replacement: backgroundStub },
+      { find: /^gl-matrix$/, replacement: backgroundStub },
+    ],
+  },
   server: {
     host: "127.0.0.1",
     port: 5173,

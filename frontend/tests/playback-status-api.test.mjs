@@ -150,3 +150,16 @@ for (const succeeds of [true, false]) {
     assert.equal(h.requests[0].options.signal.aborted, false, "settled caller no longer controls the shared request");
   });
 }
+
+test("long-poll reads name the known status and never share a plain status read", async (t) => {
+  const h = await fixture(t);
+  const held = h.getPlayback(task.id, { since: "processing", waitMs: 8000 });
+  const plain = h.getPlayback(task.id);
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.requests[0].url, "/api/v1/playbacks/task%2Fhires?since=processing&wait_ms=8000");
+  assert.equal(h.requests[1].url, "/api/v1/playbacks/task%2Fhires");
+  h.respond(1, { ...task, status: "processing" });
+  h.respond(0, task);
+  assert.equal((await plain).status, "processing");
+  assert.equal((await held).status, "streaming");
+});

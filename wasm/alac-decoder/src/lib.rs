@@ -15,8 +15,10 @@ const F32_SCALE: f32 = 1.0 / 2_147_483_648.0;
 // cannot force an unbounded allocation in WebAssembly.
 const MAX_FRAME_LENGTH: u32 = 4096 * 16;
 
-fn js_error(message: impl std::fmt::Display) -> JsValue {
-    JsValue::from_str(&message.to_string())
+// Static messages keep `core::fmt` (and its Display/formatting tables) out of
+// the WebAssembly module; the JS caller already knows which value it passed.
+fn js_error(message: &'static str) -> JsValue {
+    JsValue::from_str(message)
 }
 
 /// Stateful ALAC packet decoder.
@@ -46,30 +48,22 @@ impl AlacDecoder {
     /// `alac` atom wrappers used by some MP4 writers.
     #[wasm_bindgen(constructor)]
     pub fn new(cookie: &[u8]) -> Result<AlacDecoder, JsValue> {
-        let info = StreamInfo::from_cookie(cookie).map_err(js_error)?;
+        let info = StreamInfo::from_cookie(cookie).map_err(|_| js_error("invalid ALAC magic cookie"))?;
         let sample_rate = info.sample_rate();
         let bit_depth = info.bit_depth();
         let channels = info.channels();
         let frame_length = info.max_frames_per_packet();
         if !(1..=MAX_FRAME_LENGTH).contains(&frame_length) {
-            return Err(js_error(format!(
-                "ALAC frame length is outside the supported range: {frame_length}"
-            )));
+            return Err(js_error("ALAC frame length is outside the supported range"));
         }
         if !(1..=8).contains(&channels) {
-            return Err(js_error(format!(
-                "ALAC channel count is outside the supported range: {channels}"
-            )));
+            return Err(js_error("ALAC channel count is outside the supported range"));
         }
         if !(1..=32).contains(&bit_depth) {
-            return Err(js_error(format!(
-                "ALAC bit depth is outside the supported range: {bit_depth}"
-            )));
+            return Err(js_error("ALAC bit depth is outside the supported range"));
         }
         if !(1..=768_000).contains(&sample_rate) {
-            return Err(js_error(format!(
-                "ALAC sample rate is outside the supported range: {sample_rate}"
-            )));
+            return Err(js_error("ALAC sample rate is outside the supported range"));
         }
         let max_samples = info.max_samples_per_packet() as usize;
 
@@ -113,33 +107,6 @@ impl AlacDecoder {
         self.scratch.len()
     }
 
-    /// Decode one complete ALAC packet into interleaved signed 32-bit PCM.
-    ///
-    /// The decoded values are left-aligned in i32, matching the `alac` crate's
-    /// `Sample for i32` contract.  The returned count is the number of values
-    /// written, not the number of audio frames.  The caller should divide by
-    /// `channels` when advancing its playback clock.
-    #[wasm_bindgen(js_name = decodePacketI32)]
-    pub fn decode_packet_i32(
-        &mut self,
-        packet: &[u8],
-        output: &mut [i32],
-    ) -> Result<usize, JsValue> {
-        if output.len() < self.scratch.len() {
-            return Err(js_error(format!(
-                "output buffer is too small: need {}, got {}",
-                self.scratch.len(),
-                output.len()
-            )));
-        }
-
-        let decoded = self
-            .decoder
-            .decode_packet(packet, &mut output[..self.scratch.len()])
-            .map_err(js_error)?;
-        Ok(decoded.len())
-    }
-
     /// Decode one complete ALAC packet into interleaved normalized Float32 PCM.
     ///
     /// Values are in the range expected by Web Audio (`[-1, 1)`).  The
@@ -152,17 +119,13 @@ impl AlacDecoder {
         output: &mut [f32],
     ) -> Result<usize, JsValue> {
         if output.len() < self.scratch.len() {
-            return Err(js_error(format!(
-                "output buffer is too small: need {}, got {}",
-                self.scratch.len(),
-                output.len()
-            )));
+            return Err(js_error("output buffer is too small"));
         }
 
         let decoded = self
             .decoder
             .decode_packet(packet, &mut self.scratch)
-            .map_err(js_error)?;
+            .map_err(|_| js_error("invalid ALAC packet"))?;
         for (dst, &sample) in output.iter_mut().zip(decoded.iter()) {
             *dst = sample as f32 * F32_SCALE;
         }

@@ -66,36 +66,6 @@ export class AlacDecoder {
         }
     }
     /**
-     * Decode one complete ALAC packet into interleaved signed 32-bit PCM.
-     *
-     * The decoded values are left-aligned in i32, matching the `alac` crate's
-     * `Sample for i32` contract.  The returned count is the number of values
-     * written, not the number of audio frames.  The caller should divide by
-     * `channels` when advancing its playback clock.
-     * @param {Uint8Array} packet
-     * @param {Int32Array} output
-     * @returns {number}
-     */
-    decodePacketI32(packet, output) {
-        try {
-            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_export);
-            const len0 = WASM_VECTOR_LEN;
-            var ptr1 = passArray32ToWasm0(output, wasm.__wbindgen_export);
-            var len1 = WASM_VECTOR_LEN;
-            wasm.alacdecoder_decodePacketI32(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, addHeapObject(output));
-            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-            if (r2) {
-                throw takeObject(r1);
-            }
-            return r0 >>> 0;
-        } finally {
-            wasm.__wbindgen_add_to_stack_pointer(16);
-        }
-    }
-    /**
      * Maximum decoded frames in one ALAC packet.
      * @returns {number}
      */
@@ -216,14 +186,6 @@ function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
 }
 
-let cachedUint32ArrayMemory0 = null;
-function getUint32ArrayMemory0() {
-    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
-        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
-    }
-    return cachedUint32ArrayMemory0;
-}
-
 let cachedUint8ArrayMemory0 = null;
 function getUint8ArrayMemory0() {
     if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
@@ -238,13 +200,6 @@ let heap = new Array(1024).fill(undefined);
 heap.push(undefined, null, true, false);
 
 let heap_next = heap.length;
-
-function passArray32ToWasm0(arg, malloc) {
-    const ptr = malloc(arg.length * 4, 4) >>> 0;
-    getUint32ArrayMemory0().set(arg, ptr / 4);
-    WASM_VECTOR_LEN = arg.length;
-    return ptr;
-}
 
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
@@ -289,7 +244,6 @@ function __wbg_finalize_init(instance, module) {
     wasmModule = module;
     cachedDataViewMemory0 = null;
     cachedFloat32ArrayMemory0 = null;
-    cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     return wasm;
 }

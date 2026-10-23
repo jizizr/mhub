@@ -12,8 +12,8 @@
     "browser"
   ],
   "orientation": "any",
-  "background_color": "#f5f3f1",
-  "theme_color": "#fa304b",
+  "background_color": "#f6f5f3",
+  "theme_color": "#f6f5f3",
   "categories": [
     "music",
     "entertainment"

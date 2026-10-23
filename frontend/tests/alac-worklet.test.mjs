@@ -55,7 +55,7 @@ globalThis.__alacTestDecoder = Decoder;
 const source = (await readFile(new URL("../src/core/player/alac-worklet.js", import.meta.url), "utf8"))
   .replace('import processorUrl from "./alac-processor.js?url";', 'const processorUrl = "test:processor";')
   .replace('from "./audio-output.js";', `from ${JSON.stringify(new URL("../src/core/player/audio-output.js", import.meta.url).href)};`)
-  .replace('from "./playback-platform.js";', `from ${JSON.stringify(new URL("../src/core/player/playback-platform.js", import.meta.url).href)};`)
+  .replace('from "./alac-support.js";', `from ${JSON.stringify(new URL("../src/core/player/alac-support.js", import.meta.url).href)};`)
   .replace('import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.js";', 'const initAlacWasm = async () => {}; const AlacDecoder = globalThis.__alacTestDecoder;');
 const { AlacWorkletPlayer } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 const tick = () => new Promise((resolve) => setImmediate(resolve));

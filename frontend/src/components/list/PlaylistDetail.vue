@@ -17,7 +17,7 @@ const props = defineProps({
   showQueue: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "open", "delete", "show-queue"]);
+const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "open", "menu", "delete", "show-queue"]);
 const tracks = computed(() => props.playlist?.tracks || []);
 const title = computed(() => props.playlist?.name || (props.playlist?.resource_type === "albums" ? "推荐专辑" : "推荐歌单"));
 const cover = computed(() => props.playlist?.cover || props.playlist?.cover_url || tracks.value.find((track) => track.cover)?.cover || "");
@@ -78,15 +78,15 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
       >
         <Shuffle v-if="shuffle" :size="20" aria-hidden="true" />
         <Play v-else :size="20" aria-hidden="true" />
-        <span><strong>替换队列并播放</strong><small>{{ replaceHint }}</small></span>
+        <span><strong><span class="playlist-detail__label-full">替换队列并播放</span><span class="playlist-detail__label-short">{{ shuffle ? "随机播放" : "播放" }}</span></strong><small>{{ replaceHint }}</small></span>
       </button>
-      <button type="button" class="playlist-detail__action" :disabled="unavailable" @click="emit('append')">
+      <button type="button" class="playlist-detail__action" :disabled="unavailable" title="追加到队列末尾，保留当前播放" @click="emit('append')">
         <ListPlus :size="20" aria-hidden="true" />
-        <span><strong>加入播放队列</strong><small>追加到队列末尾，保留当前播放</small></span>
+        <span><strong><span class="playlist-detail__label-full">加入播放队列</span><span class="playlist-detail__label-short">加入队列</span></strong><small>追加到队列末尾，保留当前播放</small></span>
       </button>
-      <button type="button" class="playlist-detail__action" :disabled="unavailable" @click="emit('next')">
+      <button type="button" class="playlist-detail__action" :disabled="unavailable" :title="nextHint" @click="emit('next')">
         <ListStart :size="20" aria-hidden="true" />
-        <span><strong>下一首播放</strong><small>{{ nextHint }}</small></span>
+        <span><strong><span class="playlist-detail__label-full">下一首播放</span><span class="playlist-detail__label-short">下一首</span></strong><small>{{ nextHint }}</small></span>
       </button>
     </div>
 
@@ -121,6 +121,7 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
         @play="emit('play', $event)"
         @queue="emit('queue', $event)"
         @open="emit('open', $event)"
+        @menu="emit('menu', $event)"
       />
     </Transition>
   </div>
@@ -134,9 +135,9 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
 .playlist-detail__delete { color: var(--text-muted); }
 .playlist-detail__delete:hover { color: var(--accent); }
 .playlist-detail__header { display: grid; grid-template-columns: 152px minmax(0, 1fr); align-items: center; gap: 26px; }
-.playlist-detail__cover { aspect-ratio: 1; overflow: hidden; border-radius: 20px; background: var(--surface-muted); box-shadow: 0 12px 30px rgba(49, 42, 40, .12); }
+.playlist-detail__cover { aspect-ratio: 1; overflow: hidden; border-radius: 20px; background: var(--placeholder); box-shadow: var(--shadow-md); }
 .playlist-detail__cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.playlist-detail__cover--empty { display: grid; place-items: center; color: var(--text-muted); background: linear-gradient(135deg, rgba(250, 48, 75, .12), var(--surface)); }
+.playlist-detail__cover--empty { display: grid; place-items: center; color: var(--text-muted); background: linear-gradient(135deg, var(--accent-soft), var(--surface)); }
 .playlist-detail__heading { min-width: 0; }
 .playlist-detail__source { margin: 0 0 10px; font-size: 13px; font-weight: 700; color: var(--text-muted); }
 .playlist-detail__heading h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); line-height: 1.15; letter-spacing: -.025em; overflow-wrap: anywhere; }
@@ -150,10 +151,11 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
 .playlist-detail__action strong, .playlist-detail__action small { display: block; overflow-wrap: anywhere; }
 .playlist-detail__action strong { font-size: 14px; line-height: 1.4; }
 .playlist-detail__action small { margin-top: 5px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
-.playlist-detail__action:hover:not(:disabled) { background: var(--surface-strong); border-color: rgba(250, 48, 75, .3); transform: translateY(-1px); }
-.playlist-detail__action--primary { color: white; background: var(--accent); border-color: transparent; }
+.playlist-detail__action:hover:not(:disabled) { background: var(--surface-strong); border-color: var(--accent-line); transform: translateY(-1px); }
+.playlist-detail__action--primary { color: var(--on-accent); background: var(--accent); border-color: transparent; }
 .playlist-detail__action--primary small { color: rgba(255, 255, 255, .88); }
-.playlist-detail__action--primary:hover:not(:disabled) { background: #e82541; border-color: transparent; box-shadow: 0 5px 14px rgba(250, 48, 75, .16); }
+.playlist-detail__action--primary:hover:not(:disabled) { background: var(--accent-hover); border-color: transparent; box-shadow: 0 5px 14px var(--accent-soft); }
+.playlist-detail__label-short { display: none; }
 .playlist-detail__feedback { display: flex; align-items: center; gap: 7px; min-height: 24px; margin: -14px 0 12px; color: var(--text-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .playlist-detail__spinner { flex: 0 0 auto; animation: playlist-detail-spin .9s linear infinite; }
 .playlist-detail__loading { padding: 12px 0; }
@@ -165,7 +167,7 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
 .playlist-detail__skeleton-cover, .playlist-detail__skeleton-lines i { background: var(--surface-muted); animation: playlist-detail-pulse 1.7s ease-in-out infinite alternate; }
 .playlist-detail__skeleton:nth-child(2n) .playlist-detail__skeleton-cover, .playlist-detail__skeleton:nth-child(2n) .playlist-detail__skeleton-lines i { animation-delay: .12s; }
 .playlist-detail__state { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 48px 20px; text-align: center; color: var(--text-muted); }
-.playlist-detail__state strong { color: #2d3137; }
+.playlist-detail__state strong { color: var(--text); }
 .playlist-detail__state p { max-width: 480px; margin: 0 0 5px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .playlist-detail-state-enter-active, .playlist-detail-state-leave-active { transition: opacity 180ms var(--ease-standard), transform 220ms var(--ease-standard); }
 .playlist-detail-state-enter-from { opacity: 0; transform: translateY(6px); }
@@ -183,10 +185,14 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
   .playlist-detail__heading h1 { font-size: clamp(25px, 5.6vw, 34px); }
   .playlist-detail__source { margin-bottom: 7px; font-size: 11px; }
   .playlist-detail__meta { margin-top: 9px; gap: 6px 8px; }
-  .playlist-detail__actions { grid-template-columns: 1fr; gap: 8px; margin: 22px 0 16px; }
-  .playlist-detail__action { align-items: center; min-height: 68px; padding: 12px 16px; gap: 14px; }
-  .playlist-detail__action small { margin-top: 3px; }
-  .playlist-detail__feedback { min-height: 36px; margin: -6px 0 10px; }
+  /* One compact row keeps the track list above the fold on phones. */
+  .playlist-detail__actions { grid-template-columns: 1.3fr 1fr 1fr; gap: 8px; margin: 20px 0 14px; }
+  .playlist-detail__action { justify-content: center; align-items: center; min-height: 46px; padding: 0 10px; gap: 6px; border-radius: 999px; }
+  .playlist-detail__action > svg { width: 17px; height: 17px; }
+  .playlist-detail__action small, .playlist-detail__label-full { display: none; }
+  .playlist-detail__label-short { display: inline; white-space: nowrap; }
+  .playlist-detail__action strong { font-size: 13px; }
+  .playlist-detail__feedback { min-height: 18px; margin: -6px 0 6px; }
   .playlist-detail__tools .ghost-action, .playlist-detail__back { min-height: 40px; padding: 0 10px; font-size: 12px; }
 }
 @media (max-width: 360px) {

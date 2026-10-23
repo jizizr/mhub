@@ -36,7 +36,15 @@ use tokio::{
     sync::{Notify, RwLock},
 };
 use tokio_util::io::ReaderStream;
-use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    compression::{
+        CompressionLayer,
+        predicate::{DefaultPredicate, Predicate},
+    },
+    cors::CorsLayer,
+    services::ServeDir,
+    trace::TraceLayer,
+};
 
 const AUDIO_STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -71,6 +79,8 @@ fn audio_stream_identity(metadata: &std::fs::Metadata) -> Option<String> {
 #[derive(Clone)]
 pub struct AppState {
     downloads: Arc<RwLock<HashMap<String, DownloadTask>>>,
+    /// Wakes long-polling status requests after a task changes state.
+    task_events: Arc<Notify>,
     inflight: Arc<RwLock<HashMap<String, Arc<InflightDownload>>>>,
     data_dir: PathBuf,
     media_base_url: Option<url::Url>,
@@ -168,6 +178,32 @@ pub enum DownloadStatus {
     Completed,
     Failed,
 }
+
+impl DownloadStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Processing => "processing",
+            Self::Streaming => "streaming",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Optional long-poll for `GET /api/v1/playbacks/:id`: with `since` set to
+/// the status a client already knows, the response waits (up to `wait_ms`)
+/// until the task leaves that status. Without it the request returns at once.
+#[derive(Debug, Default, Deserialize)]
+pub struct PlaybackStatusQuery {
+    since: Option<String>,
+    wait_ms: Option<u64>,
+}
+
+const PLAYBACK_WAIT_MAX: Duration = Duration::from_secs(15);
+// Every production transition notifies waiters; the periodic re-check only
+// bounds latency if a future status write forgets to.
+const PLAYBACK_WAIT_RECHECK: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Deserialize)]
 pub struct SearchParams {
@@ -341,6 +377,7 @@ pub fn app() -> Router {
     let data_dir = env::var("MUSIC_API_DATA_DIR").unwrap_or_else(|_| "data".to_string());
     let state = AppState {
         downloads: Arc::new(RwLock::new(HashMap::new())),
+        task_events: Arc::new(Notify::new()),
         inflight: Arc::new(RwLock::new(HashMap::new())),
         data_dir: PathBuf::from(data_dir),
         media_base_url: media_base_url(env::var("MUSIC_API_MEDIA_BASE_URL").ok().as_deref())
@@ -374,7 +411,14 @@ fn app_with_state(state: AppState, serve_web: bool) -> Router {
         .with_state(state);
 
     let router = if serve_web {
-        router.fallback_service(ServeDir::new("web").append_index_html_on_directories(true))
+        // The frontend build writes `.br`/`.gz` siblings; serve them directly
+        // instead of compressing static assets on every request.
+        router.fallback_service(
+            ServeDir::new("web")
+                .append_index_html_on_directories(true)
+                .precompressed_br()
+                .precompressed_gzip(),
+        )
     } else {
         router
     };
@@ -394,6 +438,21 @@ fn app_with_state(state: AppState, serve_web: bool) -> Router {
         ]))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(response_cache_policy))
+        // Search, recommendation and collection payloads are verbose JSON.
+        // Media, packet streams and precompressed files are never touched.
+        .layer(
+            CompressionLayer::new().compress_when(DefaultPredicate::new().and(
+                |_: StatusCode,
+                 _: axum::http::Version,
+                 headers: &HeaderMap,
+                 _: &axum::http::Extensions| {
+                    headers
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.starts_with("application/json"))
+                },
+            )),
+        )
 }
 
 fn media_base_url(value: Option<&str>) -> Result<Option<url::Url>, &'static str> {
@@ -447,6 +506,14 @@ async fn response_cache_policy(request: Request, next: Next) -> Response {
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, policy.parse().unwrap());
+    }
+    // Static files are negotiated between `.br`, `.gz` and identity; shared
+    // caches must key them by the request encoding.
+    if response.headers().contains_key(header::CONTENT_ENCODING) && !path.starts_with("/api/") {
+        response.headers_mut().append(
+            header::VARY,
+            header::HeaderValue::from_static("accept-encoding"),
+        );
     }
     response
 }
@@ -1050,9 +1117,31 @@ async fn register_download_task(state: &AppState, task: &DownloadTask) -> Option
 async fn get_download(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(wait): Query<PlaybackStatusQuery>,
 ) -> ApiResult<Json<PlaybackTask>> {
-    let task = load_task(&state, &id).await?;
-    Ok(Json(public_task(&state, &task)))
+    let wait_for = Duration::from_millis(wait.wait_ms.unwrap_or(0)).min(PLAYBACK_WAIT_MAX);
+    let deadline = tokio::time::Instant::now() + wait_for;
+    loop {
+        // Register before reading so a transition between the read and the
+        // wait cannot be missed.
+        let changed = state.task_events.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let task = load_task(&state, &id).await?;
+        let unchanged = wait
+            .since
+            .as_deref()
+            .is_some_and(|since| since.eq_ignore_ascii_case(task.status.as_str()));
+        let now = tokio::time::Instant::now();
+        if !unchanged || now >= deadline {
+            return Ok(Json(public_task(&state, &task)));
+        }
+        let _ = tokio::time::timeout((deadline - now).min(PLAYBACK_WAIT_RECHECK), changed).await;
+    }
+}
+
+fn notify_task_change(state: &AppState) {
+    state.task_events.notify_waiters();
 }
 
 async fn playback_loudness(
@@ -1387,6 +1476,8 @@ async fn run_download(state: AppState, id: String) {
             task.status = DownloadStatus::Failed;
             task.error = Some(err.to_string());
         }
+        drop(downloads);
+        notify_task_change(&state);
     }
 }
 
@@ -1399,19 +1490,18 @@ async fn run_download_inner(state: AppState, id: String) -> ApiResult<()> {
         task.status = DownloadStatus::Processing;
         task.clone()
     };
+    notify_task_change(&state);
 
     let platform = music::parse_platform(&task.platform)?;
-    if let Some(selected_id) = task
+    // create_download looked up the Telegram cache for this exact
+    // platform/track/quality immediately before spawning this worker, so a
+    // repeated lookup here would only add a database round trip.
+    let checked_track_id = task
         .selected_id
         .as_deref()
         .map(str::trim)
-        .filter(|id| !id.is_empty())
-        && let Some(cache) = find_music_cache(platform.id(), selected_id, &task.quality).await?
-        && !cache.file_id.trim().is_empty()
-    {
-        complete_task_from_cache(&state, &id, selected_id, &cache).await?;
-        return Ok(());
-    }
+        .unwrap_or_default()
+        .to_string();
     if let Some(selected_id) = task
         .selected_id
         .as_deref()
@@ -1431,7 +1521,8 @@ async fn run_download_inner(state: AppState, id: String) -> ApiResult<()> {
         quality: Some(task.quality.clone()),
     })
     .await?;
-    if let Some(cache) = find_music_cache(track.platform.id(), &track.id, &task.quality).await?
+    if track.id != checked_track_id
+        && let Some(cache) = find_music_cache(track.platform.id(), &track.id, &task.quality).await?
         && !cache.file_id.trim().is_empty()
     {
         complete_task_from_cache(&state, &id, &track.id, &cache).await?;
@@ -1568,6 +1659,7 @@ async fn download_provider_track(
     task.error = None;
     let completed_task = task.clone();
     drop(downloads);
+    notify_task_change(&state);
     mark_inflight_ready(&inflight, completed_task).await;
     Ok(())
 }
@@ -1608,6 +1700,7 @@ async fn download_provider_track_streaming(
         current.format = Some("m4a".to_string());
         current.error = None;
     }
+    notify_task_change(&state);
 
     let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let ready_state = state.clone();
@@ -1618,6 +1711,7 @@ async fn download_provider_track_streaming(
         {
             task.status = DownloadStatus::Streaming;
         }
+        notify_task_change(&ready_state);
     });
     let mut on_ready = || {
         let _ = ready_tx.send(());
@@ -1743,6 +1837,7 @@ async fn download_provider_track_streaming(
     current.error = None;
     let completed_task = current.clone();
     drop(downloads);
+    notify_task_change(&state);
     mark_inflight_ready(&inflight, completed_task).await;
     Ok(())
 }
@@ -1796,6 +1891,8 @@ async fn complete_task_from_cache(
     // avoiding a full FLAC transcode. Native clients retain their file endpoint.
     task.streaming_mode = None;
     upgrade_completed_alac_transport(task, requested_mode.as_deref());
+    drop(downloads);
+    notify_task_change(state);
     Ok(())
 }
 
@@ -1826,6 +1923,7 @@ async fn complete_task_from_inflight(
                     upgrade_completed_alac_transport(&mut task, Some("wasm_alac"));
                 }
                 state.downloads.write().await.insert(id.to_string(), task);
+                notify_task_change(state);
                 return Ok(());
             }
             if let Some(error) = &inner.error {
@@ -2769,6 +2867,7 @@ mod tests {
         let task = task_from_cache(&id, "applemusic", &cache.track_id, "hires", &cache);
         let state = AppState {
             downloads: Arc::new(RwLock::new(HashMap::new())),
+            task_events: Arc::new(Notify::new()),
             inflight: Arc::new(RwLock::new(HashMap::new())),
             data_dir: directory.to_path_buf(),
             media_base_url: None,
@@ -3107,6 +3206,86 @@ mod tests {
             );
             assert_eq!(existing.as_ref().unwrap().work_id, winner.work_id);
         }
+    }
+
+    #[tokio::test]
+    async fn status_long_poll_returns_on_transition_and_never_waits_for_a_changed_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let (state, mut task) = test_cache_state(directory.path());
+        task.status = DownloadStatus::Processing;
+        state
+            .downloads
+            .write()
+            .await
+            .insert(task.id.clone(), task.clone());
+        let wait = |since: &str| PlaybackStatusQuery {
+            since: Some(since.to_string()),
+            wait_ms: Some(10_000),
+        };
+
+        let started = tokio::time::Instant::now();
+        let stale = get_download(
+            State(state.clone()),
+            Path(task.id.clone()),
+            Query(wait("queued")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale.0.status, DownloadStatus::Processing);
+        assert!(started.elapsed() < Duration::from_millis(200));
+
+        let poll = tokio::spawn(get_download(
+            State(state.clone()),
+            Path(task.id.clone()),
+            Query(wait("processing")),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!poll.is_finished(), "an unchanged status must wait");
+        let started = tokio::time::Instant::now();
+        state
+            .downloads
+            .write()
+            .await
+            .get_mut(&task.id)
+            .unwrap()
+            .status = DownloadStatus::Streaming;
+        notify_task_change(&state);
+        let changed = tokio::time::timeout(Duration::from_secs(1), poll)
+            .await
+            .expect("transition must wake the long poll")
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.0.status, DownloadStatus::Streaming);
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn json_responses_are_compressed_for_clients_that_accept_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let (state, _) = test_cache_state(directory.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app_with_state(state, false))
+                .await
+                .unwrap()
+        });
+        let client = reqwest::Client::new();
+        let compressed = client
+            .get(format!("{base}/api/v1/platforms"))
+            .header(header::ACCEPT_ENCODING, "br")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(compressed.headers()[header::CONTENT_ENCODING], "br");
+        let plain = client
+            .get(format!("{base}/api/v1/platforms"))
+            .send()
+            .await
+            .unwrap();
+        assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
+        assert!(plain.json::<serde_json::Value>().await.unwrap().is_array());
+        server.abort();
     }
 
     #[tokio::test]
@@ -3787,6 +3966,7 @@ mod tests {
         };
         let state = AppState {
             downloads: Arc::new(RwLock::new(HashMap::new())),
+            task_events: Arc::new(Notify::new()),
             inflight: Arc::new(RwLock::new(HashMap::new())),
             data_dir: directory.path().to_path_buf(),
             media_base_url: None,

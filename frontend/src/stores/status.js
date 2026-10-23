@@ -2,6 +2,9 @@ import { defineStore } from "pinia";
 import { useQueueStore } from "./queue";
 
 const STORAGE_KEY = "music-web-splayer-status-v3";
+// Player actions persist several times per gesture; write once per task.
+let persistScheduled = false;
+let toastTimer = 0;
 
 function restore() {
   try {
@@ -52,6 +55,10 @@ export const useStatusStore = defineStore("status", {
     searchOpen: false,
     queueOpen: false,
     notice: "搜索或选择一首音乐",
+    // Transient feedback shown on every screen size (the sidebar notice is
+    // hidden on phones). `toastId` restarts the animation for repeats.
+    toastMessage: "",
+    toastId: 0,
     ...restore(),
   }),
   getters: {
@@ -68,6 +75,14 @@ export const useStatusStore = defineStore("status", {
   },
   actions: {
     persist() {
+      if (persistScheduled) return;
+      persistScheduled = true;
+      queueMicrotask(() => {
+        persistScheduled = false;
+        this.writePersisted();
+      });
+    },
+    writePersisted() {
       localStorage.setItem(
         STORAGE_KEY,
         JSON.stringify({
@@ -90,6 +105,19 @@ export const useStatusStore = defineStore("status", {
     },
     setNotice(notice) {
       this.notice = notice;
+    },
+    toast(message) {
+      this.notice = message;
+      this.toastMessage = message;
+      const id = ++this.toastId;
+      globalThis.clearTimeout?.(toastTimer);
+      toastTimer = globalThis.setTimeout?.(() => {
+        if (this.toastId === id) this.toastMessage = "";
+      }, 2600);
+    },
+    dismissToast() {
+      globalThis.clearTimeout?.(toastTimer);
+      this.toastMessage = "";
     },
   },
 });

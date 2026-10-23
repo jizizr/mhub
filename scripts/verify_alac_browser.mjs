@@ -134,9 +134,10 @@ try {
       let packets = 0;
       while (offset < source.length) {
         const length = view.getUint32(offset);
-        const buffer = new Int32Array(decoder.maxSamplesPerPacket());
-        const count = decoder.decodePacketI32(source.subarray(offset + 8, offset + 8 + length), buffer);
-        for (let i = 0; i < count; i += 1) maxPcmError = Math.max(maxPcmError, Math.abs(buffer[i] - expected[samples + i]));
+        const buffer = new Float32Array(decoder.maxSamplesPerPacket());
+        const count = decoder.decodePacketF32(source.subarray(offset + 8, offset + 8 + length), buffer);
+        // Float32 PCM is the left-aligned i32 sample * 2^-31, exact for <=24-bit ALAC.
+        for (let i = 0; i < count; i += 1) maxPcmError = Math.max(maxPcmError, Math.abs(Math.round(buffer[i] * 2147483648) - expected[samples + i]));
         samples += count;
         offset += 8 + length;
         packets += 1;

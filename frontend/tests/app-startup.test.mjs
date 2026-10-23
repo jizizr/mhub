@@ -45,7 +45,7 @@ function harness() {
     "trustedMediaOrigins", "resolveTrackSource", "resolveCachedTrackSource", "prepareOutput", "preparePlaybackSession",
     "createNativeOutput", "createMediaSessionController", "createPlaybackLifecycle", "getCachedLoudness", "warmLoudness",
     "waitForCompletedSource", "prefetchTrackSource", "cacheActiveTrackSource", "loadLyricsForTrack", "getContinuationRecommendations",
-    "canUseAlacWorklet", "canRequestAlacWorklet", "createAlacWorkletPlayer"]) context[name] = () => {};
+    "canUseAlacWorklet", "canRequestAlacWorklet", "loadAlacModule"]) context[name] = () => {};
   vm.createContext(context);
   vm.runInContext(`let appUnmounted = false, uiSyncTimer = 0;
     let searchAbort = null, recommendationAbort = null, recommendationRequestId = 0, recommendationDetailVersion = 0;

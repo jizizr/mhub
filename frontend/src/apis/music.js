@@ -121,11 +121,21 @@ export function createPlayback({ platform, query, selectedId, quality, includeCo
   }).then((res) => res.json());
 }
 
-export function getPlayback(id, { signal } = {}) {
+/**
+ * Read a playback task. With `since` (the status the caller already knows),
+ * the server holds the request for up to `waitMs` until the task leaves that
+ * status, so callers learn about a transition without polling. Servers that
+ * do not support it simply answer immediately.
+ */
+export function getPlayback(id, { signal, since, waitMs = 0 } = {}) {
   const abortReason = () => signal?.reason ?? new DOMException("Playback status request aborted", "AbortError");
   if (signal?.aborted) return Promise.reject(abortReason());
 
-  const key = String(id);
+  const path = `${API}/playbacks/${encodeURIComponent(String(id))}`;
+  const query = since && waitMs > 0
+    ? `?${new URLSearchParams({ since: String(since), wait_ms: String(Math.round(waitMs)) })}`
+    : "";
+  const key = `${id}${query}`;
   let pending = playbackStatusRequests.get(key);
   if (!pending) {
     pending = { controller: new AbortController(), subscribers: new Set() };
@@ -136,7 +146,7 @@ export function getPlayback(id, { signal } = {}) {
       if (playbackStatusRequests.get(key) === entry) playbackStatusRequests.delete(key);
       for (const subscriber of [...entry.subscribers]) subscriber(ok, value);
     };
-    void request(`${API}/playbacks/${encodeURIComponent(key)}`, {
+    void request(`${path}${query}`, {
       signal: entry.controller.signal,
       cache: "no-store",
     }).then((res) => res.json()).then(

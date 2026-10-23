@@ -13,9 +13,9 @@ The streaming pipeline should perform these steps outside the module:
 3. Call `decodePacketF32(packet, output)` and transfer the written
    `Float32Array` to an `AudioWorkletNode` ring buffer.
 
-`decodePacketI32` is available when an application needs lossless integer PCM.
-The Float32 method maps the left-aligned i32 samples to Web Audio's `[-1, 1)`
-range without changing the source ALAC file or its cache.
+The Float32 method maps the decoder's left-aligned i32 samples to Web Audio's
+`[-1, 1)` range without changing the source ALAC file or its cache. Errors are
+static strings so the module does not link Rust's formatting machinery.
 
 The default `alac` MP4/CAF reader features are disabled. Those readers require
 seekable input and are not appropriate for an append-only HTTP stream; the

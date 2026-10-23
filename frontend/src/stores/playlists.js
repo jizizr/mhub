@@ -87,6 +87,20 @@ export const usePlaylistStore = defineStore("playlists", {
       this.save();
       return playlist;
     },
+    removeTrack(id, track) {
+      const playlist = this.getById(id);
+      const key = trackIdentity(track);
+      if (!playlist || !key) return null;
+      const before = playlist.tracks.length;
+      playlist.tracks = playlist.tracks.filter((item) => trackIdentity(item) !== key);
+      if (playlist.tracks.length === before) return null;
+      // Keep an imported collection cover; only a cover borrowed from the
+      // removed song moves on to the new first track.
+      if (playlist.cover && playlist.cover === track.cover) playlist.cover = playlist.tracks[0]?.cover || "";
+      playlist.updated_at = Date.now();
+      this.save();
+      return playlist;
+    },
     remove(id) {
       this.items = this.items.filter((item) => item.id !== id);
       this.save();

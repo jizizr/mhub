@@ -1,7 +1,7 @@
 import processorUrl from "./alac-processor.js?url";
 import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.js";
 import { createAlacOutput, getOutputContext, prepareOutput } from "./audio-output.js";
-import { shouldPreferNativeBackgroundPlayback } from "./playback-platform.js";
+import { canRequestAlacWorklet, canUseAlacWorklet, isAlacWorkletSupported, isLosslessTrack } from "./alac-support.js";
 
 const PCM_QUEUE_SECONDS = 2;
 const BACKGROUND_PCM_QUEUE_SECONDS = 15;
@@ -27,12 +27,6 @@ function prepareModule(context) {
     contextModules.set(context, pending);
   }
   return pending;
-}
-
-function isLosslessTrack(track) {
-  const quality = String(track?.quality || "").toLowerCase();
-  const format = String(track?.format || track?.content_type || "").toLowerCase();
-  return quality === "lossless" || quality === "hires" || quality === "hi-res" || format.includes("alac");
 }
 
 function toError(error, fallback) {
@@ -148,45 +142,54 @@ function resampleInterleaved(input, channels, sourceRate, targetRate) {
 class AlacPacketStreamParser {
   constructor() {
     this.buffer = new Uint8Array(0);
+    this.offset = 0;
     this.header = null;
   }
 
+  // Parse with a read offset. Re-slicing the remaining buffer after every
+  // packet copied each network chunk once per packet it contained. Packets
+  // are read-only views; only an incomplete tail is copied into the next push.
   push(chunk) {
-    if (chunk?.byteLength) this.buffer = concatBytes(this.buffer, chunk);
+    if (chunk?.byteLength) {
+      this.buffer = concatBytes(this.buffer.subarray(this.offset), chunk);
+      this.offset = 0;
+    }
     const packets = [];
-    if (!this.header && this.buffer.byteLength >= HEADER_BYTES) {
-      const magic = new TextDecoder().decode(this.buffer.subarray(0, 8));
-      const version = readU32(this.buffer, 8);
-      const cookieLength = readU16(this.buffer, 18);
+    if (!this.header && this.buffer.byteLength - this.offset >= HEADER_BYTES) {
+      const start = this.offset;
+      const magic = new TextDecoder().decode(this.buffer.subarray(start, start + 8));
+      const version = readU32(this.buffer, start + 8);
+      const cookieLength = readU16(this.buffer, start + 18);
       if (magic !== STREAM_MAGIC || version !== STREAM_VERSION || cookieLength < 24 || cookieLength > 64) {
         throw new Error("ALAC 流协议版本或配置无效");
       }
       const headerLength = HEADER_BYTES + cookieLength;
-      if (this.buffer.byteLength < headerLength) return packets;
-      this.headerBytes = this.buffer.slice(0, headerLength);
+      if (this.buffer.byteLength - start < headerLength) return packets;
+      this.headerBytes = this.buffer.slice(start, start + headerLength);
       this.header = {
-        sampleRate: readU32(this.buffer, 12),
-        channels: this.buffer[16],
-        bits: this.buffer[17],
-        maxSamples: readU32(this.buffer, 20),
-        cookie: this.buffer.slice(HEADER_BYTES, headerLength),
+        sampleRate: readU32(this.buffer, start + 12),
+        channels: this.buffer[start + 16],
+        bits: this.buffer[start + 17],
+        maxSamples: readU32(this.buffer, start + 20),
+        cookie: this.buffer.slice(start + HEADER_BYTES, start + headerLength),
       };
-      this.buffer = this.buffer.slice(headerLength);
+      this.offset += headerLength;
     }
     if (!this.header) return packets;
-    while (this.buffer.byteLength >= 8) {
-      const packetLength = readU32(this.buffer, 0);
-      const duration = readU32(this.buffer, 4);
+    while (this.buffer.byteLength - this.offset >= 8) {
+      const start = this.offset;
+      const packetLength = readU32(this.buffer, start);
+      const duration = readU32(this.buffer, start + 4);
       if (!packetLength || packetLength > 16 * 1024 * 1024) throw new Error("ALAC 流包含非法 packet 长度");
-      if (this.buffer.byteLength < 8 + packetLength) break;
-      packets.push({ duration, bytes: this.buffer.slice(8, 8 + packetLength) });
-      this.buffer = this.buffer.slice(8 + packetLength);
+      if (this.buffer.byteLength - start < 8 + packetLength) break;
+      packets.push({ duration, bytes: this.buffer.subarray(start + 8, start + 8 + packetLength) });
+      this.offset = start + 8 + packetLength;
     }
     return packets;
   }
 
   finish() {
-    if (!this.header || this.buffer.byteLength) throw new Error("ALAC 流在完整 packet 边界前结束");
+    if (!this.header || this.buffer.byteLength > this.offset) throw new Error("ALAC 流在完整 packet 边界前结束");
   }
 }
 
@@ -251,19 +254,12 @@ export class AlacWorkletPlayer {
     this.removeVisibilityListener = () => owner.removeEventListener("visibilitychange", changed);
   }
 
-  static isSupported() {
-    const Context = typeof window !== "undefined" ? (window.AudioContext || window.webkitAudioContext) : null;
-    return typeof WebAssembly !== "undefined" && typeof Context === "function" &&
-      Boolean(Context.prototype && "audioWorklet" in Context.prototype) && typeof AudioWorkletNode !== "undefined";
-  }
+  static isSupported() { return isAlacWorkletSupported(); }
 
-  static canHandle(track) {
-    return AlacWorkletPlayer.isSupported() && track?.platform === "applemusic" && isLosslessTrack(track) &&
-      track?.streaming_mode === "wasm_alac";
-  }
+  static canHandle(track) { return canUseAlacWorklet(track); }
 
   static canRequest(track) {
-    return AlacWorkletPlayer.isSupported() && track?.platform === "applemusic" && isLosslessTrack(track);
+    return isAlacWorkletSupported() && track?.platform === "applemusic" && isLosslessTrack(track);
   }
 
   // Must be called synchronously by a trusted click/change/key handler. WebKit
@@ -431,9 +427,8 @@ export class AlacWorkletPlayer {
         if (!this.track && this.parser.header) {
           const header = this.parser.header;
           if (!header.sampleRate || !header.channels || header.channels > 2) throw new Error("当前 AudioWorklet 仅支持单声道或立体声 ALAC");
-          await ensureWasm();
-          if (generation !== this.generation) return;
-          await this.ensureContext(header.sampleRate, generation);
+          // Codec and worklet module are independent; fetch them together.
+          await Promise.all([ensureWasm(), this.ensureContext(header.sampleRate, generation)]);
           if (generation !== this.generation) return;
           this.decoder = new AlacDecoder(header.cookie);
           this.track = header;
@@ -846,7 +841,4 @@ export class AlacWorkletPlayer {
 }
 
 export function createAlacWorkletPlayer(options) { return new AlacWorkletPlayer(options); }
-export function canUseAlacWorklet(track) { return AlacWorkletPlayer.canHandle(track); }
-export function canRequestAlacWorklet(track) {
-  return AlacWorkletPlayer.canRequest(track) && !shouldPreferNativeBackgroundPlayback();
-}
+export { canRequestAlacWorklet, canUseAlacWorklet };

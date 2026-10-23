@@ -1,6 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowLeft, FolderOpen, ListMusic, ListPlus, ListStart, MoreHorizontal, Pencil, Play, RefreshCcw, Search, Trash2, X } from "lucide-vue-next";
+import { ArrowLeft, FolderOpen, ListMusic, ListPlus, ListStart, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, Search, Trash2, X } from "lucide-vue-next";
 import {
   audioUrl,
   createPlayback,
@@ -25,7 +25,7 @@ import { createMediaSessionController } from "./core/player/media-session";
 import { createPlaybackLifecycle } from "./core/player/playback-lifecycle";
 import { getCachedLoudness, warmLoudness } from "./services/loudness";
 import { loadTrackLyrics, lyricIdentity } from "./services/lyrics";
-import { canRequestAlacWorklet, canUseAlacWorklet, createAlacWorkletPlayer } from "./core/player/alac-worklet";
+import { canRequestAlacWorklet, canUseAlacWorklet } from "./core/player/alac-support";
 import {
   cacheAudioBlob,
   cachedAudioUrl,
@@ -87,6 +87,7 @@ const importName = ref("");
 const mergePlaylistId = ref("");
 let importRequestVersion = 0;
 const playlistMenu = ref({ open: false, x: 0, y: 0, playlistId: "" });
+const songMenu = ref({ open: false, x: 0, y: 0, track: null, playlistId: "" });
 const status = useStatusStore();
 const media = useMediaStore();
 const queue = useQueueStore();
@@ -150,6 +151,22 @@ function loadRecommendationKeys(key) {
   }
 }
 
+// The ALAC decoder (worklet transport + WebAssembly glue) is a separate chunk.
+// It is preloaded at idle for lossless listeners and on the first lossless
+// play otherwise, so the first screen never waits for it.
+let alacModule = null;
+let alacModuleRequest = null;
+function loadAlacModule() {
+  alacModuleRequest ||= import("./core/player/alac-worklet").then((module) => {
+    alacModule = module;
+    return module;
+  }, (error) => {
+    alacModuleRequest = null;
+    throw error;
+  });
+  return alacModuleRequest;
+}
+
 // Resolve the transport before looking up IndexedDB.  The same Apple Music
 // lossless track can exist as a legacy FLAC/fMP4 blob and as the packet based
 // WASM ALAC stream; those representations must never share a cache key.
@@ -194,6 +211,10 @@ function publicRecommendationPlaylists(items) {
     }));
 }
 
+// The sidebar lists platforms on desktop; phones pick from the top bar.
+const platformOptions = computed(() => platforms.value.length
+  ? platforms.value
+  : [{ id: status.searchPlatform, label: status.searchPlatform }]);
 const platformLabel = computed(
   () => platforms.value.find((item) => item.id === status.searchPlatform)?.label || status.searchPlatform,
 );
@@ -286,7 +307,8 @@ function handleSearchInput() {
 async function waitForReady(task, { allowAlacStream = false } = {}) {
   let current = task;
   let delay = 120;
-  for (let i = 0; i < 240; i += 1) {
+  const deadline = Date.now() + 240_000;
+  while (Date.now() < deadline) {
     if (current.status === "failed") throw new Error(current.error || "音频准备失败");
     // Stable playback IDs are shared between browsers. A native client can
     // join a task started by a WASM-capable client; later polls may expose the
@@ -307,12 +329,17 @@ async function waitForReady(task, { allowAlacStream = false } = {}) {
         streaming_protocol: null,
       };
     }
-    // The task can complete between two polls, so the first few checks stay
-    // tight to reduce cold-start latency while the later checks back off to
-    // avoid hammering the API during a long provider decrypt.
-    await new Promise((resolve) => window.setTimeout(resolve, delay));
-    current = await getPlayback(current.id);
-    delay = Math.min(900, Math.round(delay * 1.32));
+    // Long-poll: the server answers as soon as the task leaves its current
+    // status. A server or proxy that answers at once falls back to the
+    // tight-then-backing-off polling interval.
+    const started = Date.now();
+    const next = await getPlayback(current.id, { since: current.status, waitMs: 8000 });
+    if (next.status === current.status) {
+      const remaining = delay - (Date.now() - started);
+      if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
+      delay = Math.min(900, Math.round(delay * 1.32));
+    }
+    current = next;
   }
   throw new Error("音频准备超时");
 }
@@ -333,8 +360,9 @@ async function waitForCompletedSource(track, { signal } = {}) {
   // again. EOF cancels this wait; native seek recovery still checks at once.
   if (track.streaming_mode === "wasm_alac") await waitForPoll();
   for (let attempt = 0; attempt < 240 && !signal?.aborted; attempt += 1) {
+    const started = Date.now();
     try {
-      const task = await getPlayback(id, { signal });
+      const task = await getPlayback(id, { signal, since: "streaming", waitMs: 15000 });
       if (signal?.aborted) return null;
       if (task.status === "completed") {
         if (track.streaming_mode === "wasm_alac") return task.streaming_mode === "wasm_alac" ? audioUrl(task) : null;
@@ -345,7 +373,8 @@ async function waitForCompletedSource(track, { signal } = {}) {
       if (signal?.aborted) return null;
       // The original audio stream remains usable when a status poll fails.
     }
-    await waitForPoll();
+    // A held long-poll already waited; only an immediate answer needs a pause.
+    if (Date.now() - started < 900) await waitForPoll();
   }
   return null;
 }
@@ -560,7 +589,7 @@ async function openQueueTrack(track) {
 
 function queueTrack(track) {
   const added = player.insertManyToQueue([trackForCurrentQuality(track)], queue.queueLength);
-  status.setNotice(added ? `${track.title} 已加入播放队列末尾` : `${track.title} 已在播放队列中`);
+  status.toast(added ? `${track.title} 已加入播放队列末尾` : `${track.title} 已在播放队列中`);
 }
 
 function trackForCurrentQuality(track) {
@@ -801,7 +830,7 @@ async function loadRecommendationPlaylist(playlist) {
     const tracks = await resolveRecommendationPlaylist(playlist, { preview: true });
     if (requestId === recommendationRequestId) recommendationTracks.value = uniqueTracks(tracks).slice(0, 24);
   } catch (error) {
-    if (requestId === recommendationRequestId) status.setNotice(error?.message || "推荐歌单暂时无法打开");
+    if (requestId === recommendationRequestId) status.toast(error?.message || "推荐歌单暂时无法打开");
   } finally {
     if (requestId === recommendationRequestId) recommendationLoading.value = false;
   }
@@ -832,7 +861,7 @@ function appendPlaylistQueue(playlist) {
   if (!playlist?.tracks?.length) return;
   const added = player.insertManyToQueue(playlist.tracks.map(trackForCurrentQuality), queue.queueLength);
   playlistActionNotice.value = added ? `已将“${playlist.name}”的 ${added} 首歌曲加入队列末尾` : "歌单中的歌曲已在当前队列";
-  status.setNotice(playlistActionNotice.value);
+  status.toast(playlistActionNotice.value);
 }
 
 function nextPlaylistQueue(playlist) {
@@ -842,14 +871,14 @@ function nextPlaylistQueue(playlist) {
   playlistActionNotice.value = arranged
     ? `已安排 ${arranged} 首歌曲${status.playIndex >= 0 ? "接下来播放" : "到队列最前"}${wasRepeatingOne ? "，已关闭单曲循环" : ""}`
     : "歌单中只有当前歌曲，无需重复加入";
-  status.setNotice(playlistActionNotice.value);
+  status.toast(playlistActionNotice.value);
 }
 
 function queueRecommendations() {
   const tracks = recommendationTracks.value.map(trackForCurrentQuality);
   if (!tracks.length) return;
   const added = player.insertManyToQueue(tracks, queue.queueLength);
-  status.setNotice(added ? `已将 ${added} 首推荐加入播放队列末尾` : "这些推荐歌曲已在播放队列中");
+  status.toast(added ? `已将 ${added} 首推荐加入播放队列末尾` : "这些推荐歌曲已在播放队列中");
 }
 
 function likeRecommendation(track) {
@@ -858,7 +887,7 @@ function likeRecommendation(track) {
   recommendationLikedKeys.value = [key, ...recommendationLikedKeys.value.filter((item) => item !== key)].slice(0, 80);
   saveRecommendationKeys("music-web-splayer-recommendation-liked-v1", recommendationLikedKeys.value);
   recordRecentTrack(track);
-  status.setNotice(`已记录喜欢，之后会更多保留类似音乐：${track.title}`);
+  status.toast(`已记录喜欢，之后会更多保留类似音乐：${track.title}`);
 }
 
 function suggestLessRecommendation(track) {
@@ -867,7 +896,7 @@ function suggestLessRecommendation(track) {
   recommendationLessKeys.value = [key, ...recommendationLessKeys.value.filter((item) => item !== key)].slice(0, 80);
   saveRecommendationKeys("music-web-splayer-recommendation-less-v1", recommendationLessKeys.value);
   recommendationTracks.value = recommendationTracks.value.filter((item) => trackIdentity(item) !== key);
-  status.setNotice("会减少类似推荐");
+  status.toast("会减少类似推荐");
 }
 
 function saveResultsAsPlaylist() {
@@ -997,19 +1026,67 @@ function openPlaylist(id) {
 
 function closePlaylistMenu() {
   playlistMenu.value = { open: false, x: 0, y: 0, playlistId: "" };
+  songMenu.value = { open: false, x: 0, y: 0, track: null, playlistId: "" };
+}
+
+function menuPosition(event, width, height) {
+  return {
+    x: Math.max(8, Math.min(event?.clientX || 8, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(event?.clientY || 8, window.innerHeight - height - 8)),
+  };
+}
+
+// One menu for every song row: right-click on desktop, the "⋯" button
+// everywhere (iOS has no long-press contextmenu).
+function openSongMenu({ event, track }, playlistId = "") {
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  if (!track) return;
+  const targets = playlists.items.filter((item) => item.id !== playlistId).length;
+  closePlaylistMenu();
+  songMenu.value = {
+    open: true,
+    ...menuPosition(event, 230, 190 + Math.min(targets, 6) * 38 + (playlistId ? 44 : 0)),
+    track,
+    playlistId,
+  };
+}
+
+const songMenuPlaylists = computed(() => playlists.items
+  .filter((item) => item.id !== songMenu.value.playlistId)
+  .slice(0, 6));
+
+function runSongMenu(action, targetId = "") {
+  const { track, playlistId } = songMenu.value;
+  closePlaylistMenu();
+  if (!track) return;
+  if (action === "play") void playTrack(track);
+  if (action === "next") {
+    const arranged = player.queueNextMany([trackForCurrentQuality(track)]);
+    status.toast(arranged ? `${track.title} 将在下一首播放` : `${track.title} 正在播放`);
+  }
+  if (action === "queue") queueTrack(track);
+  if (action === "add") {
+    const playlist = playlists.getById(targetId);
+    const before = playlist?.tracks.length || 0;
+    const merged = playlists.merge(targetId, [trackForCurrentQuality(track)]);
+    if (merged) status.toast(merged.tracks.length > before ? `已添加到“${merged.name}”` : `“${merged.name}”中已有这首歌`);
+  }
+  if (action === "create") {
+    const playlist = playlists.create({ name: track.title, tracks: [trackForCurrentQuality(track)], platform: track.platform });
+    status.toast(`已创建歌单“${playlist.name}”`);
+  }
+  if (action === "remove" && playlistId) {
+    const playlist = playlists.removeTrack(playlistId, track);
+    if (playlist) status.toast(`已从“${playlist.name}”移除`);
+  }
 }
 
 function openPlaylistMenu(event, playlist) {
   event?.preventDefault?.();
   event?.stopPropagation?.();
-  const menuWidth = 210;
-  const menuHeight = 270;
-  playlistMenu.value = {
-    open: true,
-    x: Math.max(8, Math.min(event?.clientX || 8, window.innerWidth - menuWidth - 8)),
-    y: Math.max(8, Math.min(event?.clientY || 8, window.innerHeight - menuHeight - 8)),
-    playlistId: playlist.id,
-  };
+  closePlaylistMenu();
+  playlistMenu.value = { open: true, ...menuPosition(event, 210, 270), playlistId: playlist.id };
 }
 
 function renamePlaylist(id) {
@@ -1018,7 +1095,7 @@ function renamePlaylist(id) {
   const name = window.prompt("重命名歌单", playlist.name)?.trim();
   if (name && name !== playlist.name) {
     playlists.rename(id, name);
-    status.setNotice(`已将歌单重命名为“${name}”`);
+    status.toast(`已将歌单重命名为“${name}”`);
   }
 }
 
@@ -1028,7 +1105,7 @@ function deletePlaylist(id) {
   if (!window.confirm(`确定删除歌单“${playlist.name}”吗？歌单中的歌曲不会被删除。`)) return;
   playlists.remove(id);
   if (status.activePlaylistId === id) leavePlaylist();
-  status.setNotice(`已删除歌单“${playlist.name}”`);
+  status.toast(`已删除歌单“${playlist.name}”`);
 }
 
 async function playPlaylist(id) {
@@ -1061,6 +1138,18 @@ function handleAudioGesture() {
 
 function handleDocumentKeydown(event) {
   if (event.key === "Escape") closePlaylistMenu();
+  if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || importOpen.value) return;
+  // Leave keys alone wherever they already mean something (typing, buttons,
+  // the seek slider, menus).
+  const interactive = event.target?.closest?.("input, textarea, select, button, a, [contenteditable], [role='menu'], [role='slider']");
+  if (interactive) return;
+  if (event.code === "Space") {
+    event.preventDefault();
+    if (!event.repeat) player.togglePlay();
+  } else if (event.key === "/") {
+    event.preventDefault();
+    document.querySelector(".search-box--main input")?.focus();
+  }
 }
 
 function leavePlaylist() {
@@ -1275,8 +1364,14 @@ onMounted(() => {
     alacPlayerFactory: {
       canHandle: (track) => canUseAlacWorklet(track),
       canRequest: (track) => canRequestAlacWorklet(track),
-      create: () => createAlacWorkletPlayer({
-        onError: (error) => status.setNotice(error?.message || "ALAC 解码失败"),
+      isLoaded: () => Boolean(alacModule),
+      load: loadAlacModule,
+      warm: (sampleRate) => {
+        prepareOutput(sampleRate);
+        void loadAlacModule().catch(() => {});
+      },
+      create: () => alacModule.createAlacWorkletPlayer({
+        onError: (error) => status.toast(error?.message || "ALAC 解码失败"),
       }),
     },
   });
@@ -1292,6 +1387,11 @@ onMounted(() => {
     { id: "netease", label: "网易云音乐" },
   ]).then((items) => { if (!appUnmounted) platforms.value = items; });
   void loadRecommendations();
+  if (canRequestAlacWorklet({ platform: "applemusic", quality: status.quality })) {
+    const preload = () => void loadAlacModule().catch(() => {});
+    if ("requestIdleCallback" in window) window.requestIdleCallback(preload, { timeout: 4000 });
+    else window.setTimeout(preload, 2000);
+  }
   void refreshLocalCache().catch((error) => {
     if (!appUnmounted) console.warn("[cache] local cache listing unavailable", error);
   });
@@ -1337,13 +1437,16 @@ watch(
           <button type="submit" :disabled="searchLoading">搜索</button>
         </form>
         <div class="topbar__controls">
-          <select v-model="status.quality" title="音质" @change="player.prepareAudio($event.target.value)">
+          <select v-model="status.searchPlatform" class="platform-select" title="音乐平台" aria-label="音乐平台" @change="status.persist()">
+            <option v-for="item in platformOptions" :key="item.id" :value="item.id">{{ item.label }}</option>
+          </select>
+          <select v-model="status.quality" title="音质" aria-label="音质" @change="player.prepareAudio($event.target.value)">
             <option value="standard">标准</option>
             <option value="high">高品质</option>
             <option value="lossless">无损</option>
             <option value="hires">Hi-Res</option>
           </select>
-          <select v-model="status.lyricScript" title="歌词文字" @change="status.persist()">
+          <select v-model="status.lyricScript" title="歌词文字" aria-label="歌词文字" @change="status.persist()">
             <option value="original">歌词原文</option>
             <option value="simplified">简体歌词</option>
             <option value="traditional">繁體歌词</option>
@@ -1398,6 +1501,7 @@ watch(
           @play="playTrack"
           @queue="queueTrack"
           @open="openTrack"
+          @menu="openSongMenu"
         />
       </section>
 
@@ -1421,6 +1525,7 @@ watch(
           @play="playTrack"
           @queue="queueTrack"
           @open="openTrack"
+          @menu="openSongMenu"
         />
       </section>
 
@@ -1454,6 +1559,7 @@ watch(
           @play="playTrack"
           @queue="queueTrack"
           @open="openTrack"
+          @menu="openSongMenu($event, activePlaylist.id)"
         />
         <template v-else>
           <div class="page-title">
@@ -1551,11 +1657,41 @@ watch(
       </div>
     </Transition>
 
+    <Transition name="context">
+      <div
+        v-if="songMenu.open"
+        class="context-menu song-context-menu"
+        :style="{ left: `${songMenu.x}px`, top: `${songMenu.y}px` }"
+        role="menu"
+        :aria-label="songMenu.track?.title"
+        @pointerdown.stop
+        @contextmenu.prevent
+      >
+        <p class="context-menu__title">{{ songMenu.track?.title }}</p>
+        <button type="button" role="menuitem" @click="runSongMenu('play')"><Play :size="16" />立即播放</button>
+        <button type="button" role="menuitem" @click="runSongMenu('next')"><ListStart :size="16" />下一首播放</button>
+        <button type="button" role="menuitem" @click="runSongMenu('queue')"><ListPlus :size="16" />加入播放队列</button>
+        <div class="context-menu__divider"></div>
+        <p class="context-menu__label">添加到歌单</p>
+        <button v-for="item in songMenuPlaylists" :key="item.id" type="button" role="menuitem" @click="runSongMenu('add', item.id)"><ListMusic :size="16" /><span>{{ item.name }}</span></button>
+        <button type="button" role="menuitem" @click="runSongMenu('create')"><Plus :size="16" />新建歌单</button>
+        <template v-if="songMenu.playlistId">
+          <div class="context-menu__divider"></div>
+          <button type="button" role="menuitem" class="is-danger" @click="runSongMenu('remove')"><Trash2 :size="16" />从此歌单移除</button>
+        </template>
+      </div>
+    </Transition>
+
     <Transition name="drawer">
       <QueuePanel v-if="status.queueOpen && !media.expanded && status.activeView !== 'queue'" />
     </Transition>
     <PlayerBar />
     <FullPlayer v-if="fullPlayerMounted" />
+    <Transition name="toast">
+      <div v-if="status.toastMessage" :key="status.toastId" class="toast" role="status" aria-live="polite" @click="status.dismissToast()">
+        {{ status.toastMessage }}
+      </div>
+    </Transition>
     <audio ref="audioRef" preload="auto" crossorigin="anonymous" />
 
     <Transition name="dialog">

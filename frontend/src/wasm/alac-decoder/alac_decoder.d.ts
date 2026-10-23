@@ -22,15 +22,6 @@ export class AlacDecoder {
      */
     decodePacketF32(packet: Uint8Array, output: Float32Array): number;
     /**
-     * Decode one complete ALAC packet into interleaved signed 32-bit PCM.
-     *
-     * The decoded values are left-aligned in i32, matching the `alac` crate's
-     * `Sample for i32` contract.  The returned count is the number of values
-     * written, not the number of audio frames.  The caller should divide by
-     * `channels` when advancing its playback clock.
-     */
-    decodePacketI32(packet: Uint8Array, output: Int32Array): number;
-    /**
      * Maximum number of interleaved samples in one packet.
      */
     maxSamplesPerPacket(): number;
@@ -68,7 +59,6 @@ export interface InitOutput {
     readonly alacdecoder_bitDepth: (a: number) => number;
     readonly alacdecoder_channels: (a: number) => number;
     readonly alacdecoder_decodePacketF32: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
-    readonly alacdecoder_decodePacketI32: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly alacdecoder_frameLength: (a: number) => number;
     readonly alacdecoder_maxSamplesPerPacket: (a: number) => number;
     readonly alacdecoder_new: (a: number, b: number, c: number) => void;
