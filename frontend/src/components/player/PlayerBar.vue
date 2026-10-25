@@ -1,10 +1,11 @@
 <script setup>
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { Volume2 } from "lucide-vue-next";
 import * as player from "../../core/player";
 import { useMediaStore } from "../../stores/media";
 import { useStatusStore } from "../../stores/status";
 import { formatTime } from "../../utils/format";
+import { attachLiquidGlass } from "../../utils/liquid-glass";
 import PlayerControls from "./PlayerControls.vue";
 import TrackInfo from "./TrackInfo.vue";
 import ListeningSettings from "./ListeningSettings.vue";
@@ -13,6 +14,10 @@ import SeekSlider from "./SeekSlider.vue";
 const status = useStatusStore();
 const media = useMediaStore();
 const draft = ref(null);
+const root = ref(null);
+let detachGlass = () => {};
+onMounted(() => { detachGlass = attachLiquidGlass(root.value); });
+onBeforeUnmount(() => detachGlass());
 const sliderValue = computed(() => draft.value ?? status.position);
 const duration = computed(() => Math.max(status.duration || media.track?.duration || 0, 0));
 const progress = computed(() => duration.value > 0
@@ -21,7 +26,7 @@ const progress = computed(() => duration.value > 0
 </script>
 
 <template>
-  <footer class="player-bar" :class="{ 'player-bar--empty': !media.track }" aria-label="当前播放">
+  <footer ref="root" class="player-bar" :class="{ 'player-bar--empty': !media.track }" aria-label="当前播放">
     <div class="progress-rail">
       <SeekSlider
         class="progress-input"

@@ -1,12 +1,19 @@
 <script setup>
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import { Disc3, HardDrive, House, LibraryBig, ListMusic, Search } from "lucide-vue-next";
 import { useStatusStore } from "../../stores/status";
 import { usePlaylistStore } from "../../stores/playlists";
 import AccountButton from "../account/AccountButton.vue";
+import { attachLiquidGlass } from "../../utils/liquid-glass";
 
 const status = useStatusStore();
 const playlists = usePlaylistStore();
 const emit = defineEmits(["playlist-contextmenu", "navigate"]);
+// Only the phone tab bar is glass; the filter is built when CSS opts in.
+const root = ref(null);
+let detachGlass = () => {};
+onMounted(() => { detachGlass = attachLiquidGlass(root.value, { bezel: 16, shift: 10 }); });
+onBeforeUnmount(() => detachGlass());
 
 // Phones show the first group as a tab bar (主页 · 资料库 · 搜索); the
 // desktop sidebar shows 搜索 · 主页 and lists the library sections instead.
@@ -26,7 +33,7 @@ const isActive = (item) => (item.active || [item.key]).includes(status.activeVie
 </script>
 
 <template>
-  <aside class="sidebar">
+  <aside ref="root" class="sidebar">
     <div class="brand">
       <div class="brand__mark" aria-hidden="true">
         <!-- Same sound-bar "M" as the app icon. -->
