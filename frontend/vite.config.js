@@ -45,6 +45,9 @@ function precompress() {
   };
 }
 
+const apiTarget = process.env.MHUB_API_PROXY || "http://127.0.0.1:8000";
+const apiProxy = { target: apiTarget, changeOrigin: !apiTarget.includes("127.0.0.1") };
+
 export default defineConfig({
   plugins: [vue(), precompress()],
   resolve: {
@@ -56,9 +59,11 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 5173,
+    // MHUB_API_PROXY points the dev server at another backend, e.g. a
+    // deployed instance, to try UI changes against real data.
     proxy: {
-      "/api": "http://127.0.0.1:8000",
-      "/health": "http://127.0.0.1:8000",
+      "/api": apiProxy,
+      "/health": apiProxy,
     },
   },
   build: {

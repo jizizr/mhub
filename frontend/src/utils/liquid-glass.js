@@ -87,11 +87,27 @@ function element(doc, name, attributes) {
   return node;
 }
 
-function mapUrl(doc, map) {
+/**
+ * One grey image per axis. On wide-gamut displays (Display P3 Macs) Chromium
+ * keeps filter results in the display colour space, so a map that mixes red
+ * and green has its channels blended: the vertical stretch at the top edge
+ * leaked into a sideways shear. Grey and alpha are unaffected by that
+ * conversion, so each axis is displaced in its own pass, reading the shift
+ * from grey and the other (neutral) axis from a constant alpha.
+ */
+function axisUrl(doc, map, channel) {
   const canvas = doc.createElement("canvas");
   canvas.width = map.width;
   canvas.height = map.height;
-  canvas.getContext("2d").putImageData(new ImageData(map.data, map.width, map.height), 0, 0);
+  const grey = new Uint8ClampedArray(map.data.length);
+  for (let index = 0; index < grey.length; index += 4) {
+    const value = map.data[index + channel];
+    grey[index] = value;
+    grey[index + 1] = value;
+    grey[index + 2] = value;
+    grey[index + 3] = 255;
+  }
+  canvas.getContext("2d").putImageData(new ImageData(grey, map.width, map.height), 0, 0);
   return canvas.toDataURL("image/png");
 }
 
@@ -101,7 +117,7 @@ function mapUrl(doc, map) {
  * not glass, never builds a map) and reads the filter from
  * `--glass-refraction`. Returns a cleanup function.
  */
-export function attachLiquidGlass(target, { bezel = 30, shift = 28, blur = 1.6, saturate = 1.8 } = {}) {
+export function attachLiquidGlass(target, { bezel = 18, shift = 18, blur = 1.2, saturate = 1.5 } = {}) {
   const doc = target?.ownerDocument;
   if (!doc || !supportsLiquidGlass(doc.defaultView?.navigator)) return () => {};
   doc.documentElement.classList.add(ENABLED_CLASS);
@@ -109,20 +125,30 @@ export function attachLiquidGlass(target, { bezel = 30, shift = 28, blur = 1.6, 
   const filter = element(doc, "filter", {
     id, x: 0, y: 0, width: 1, height: 1, filterUnits: "userSpaceOnUse", "color-interpolation-filters": "sRGB",
   });
-  const image = element(doc, "feImage", { x: 0, y: 0, preserveAspectRatio: "none", result: "map" });
+  const imageX = element(doc, "feImage", { x: 0, y: 0, preserveAspectRatio: "none", result: "greyX" });
+  const imageY = element(doc, "feImage", { x: 0, y: 0, preserveAspectRatio: "none", result: "greyY" });
   // Tone mapping from the theme (CSS --glass-transfer: "slope intercept"):
   // dark glass lifts dark backdrops and dims bright ones, so light glyphs stay
   // legible over white artwork, as Apple's vibrancy does.
   const transfer = element(doc, "feComponentTransfer", { in: "vivid" });
   const channels = ["feFuncR", "feFuncG", "feFuncB"].map((name) => element(doc, name, { type: "linear", slope: 1, intercept: 0 }));
   transfer.append(...channels);
-  const displace = element(doc, "feDisplacementMap", {
-    in: "soft", in2: "map", scale: shift * 2, xChannelSelector: "R", yChannelSelector: "G", result: "bent",
+  // Grey shift in RGB, neutral 0.5 in alpha (premultiplication keeps grey grey).
+  const neutralAlpha = "1 0 0 0 0  1 0 0 0 0  1 0 0 0 0  0 0 0 0 0.5";
+  const displaceY = element(doc, "feDisplacementMap", {
+    in: "soft", in2: "mapY", scale: shift * 2, xChannelSelector: "A", yChannelSelector: "R", result: "bentY",
+  });
+  const displaceX = element(doc, "feDisplacementMap", {
+    in: "bentY", in2: "mapX", scale: shift * 2, xChannelSelector: "R", yChannelSelector: "A", result: "bent",
   });
   filter.append(
     element(doc, "feGaussianBlur", { in: "SourceGraphic", stdDeviation: blur, edgeMode: "duplicate", result: "soft" }),
-    image,
-    displace,
+    imageX,
+    imageY,
+    element(doc, "feColorMatrix", { in: "greyX", type: "matrix", values: neutralAlpha, result: "mapX" }),
+    element(doc, "feColorMatrix", { in: "greyY", type: "matrix", values: neutralAlpha, result: "mapY" }),
+    displaceY,
+    displaceX,
     element(doc, "feColorMatrix", { in: "bent", type: "saturate", values: saturate, result: "vivid" }),
     transfer,
   );
@@ -140,7 +166,8 @@ export function attachLiquidGlass(target, { bezel = 30, shift = 28, blur = 1.6, 
       return;
     }
     const radius = parseFloat(style.borderTopLeftRadius) || 0;
-    const [slope = 1, intercept = 0] = style.getPropertyValue("--glass-transfer").trim().split(/\s+/).map(Number);
+    const tone = style.getPropertyValue("--glass-transfer").trim();
+    const [slope = 1, intercept = 0] = tone ? tone.split(/\s+/).map(Number) : [];
     for (const node of channels) {
       node.setAttribute("slope", Number.isFinite(slope) ? slope : 1);
       node.setAttribute("intercept", Number.isFinite(intercept) ? intercept : 0);
@@ -148,15 +175,18 @@ export function attachLiquidGlass(target, { bezel = 30, shift = 28, blur = 1.6, 
     const key = `${Math.round(rect.width)}x${Math.round(rect.height)}r${radius}`;
     if (key === size) return;
     size = key;
-    // Short bars (the phone mini player) keep a flat middle band.
-    const fit = Math.min(1, (rect.height * 0.46) / bezel);
+    // The lens stays in a band along the edge; the middle is left nearly
+    // undistorted so text behind is only slightly disturbed, as on Apple's.
+    const fit = Math.min(1, (rect.height * 0.3) / bezel);
     const map = displacementMap(rect.width, rect.height, { radius, bezel: bezel * fit, shift: shift * fit });
-    for (const node of [filter, image]) {
+    for (const node of [filter, imageX, imageY]) {
       node.setAttribute("width", map.width);
       node.setAttribute("height", map.height);
     }
-    image.setAttribute("href", mapUrl(doc, map));
-    displace.setAttribute("scale", map.scale);
+    imageX.setAttribute("href", axisUrl(doc, map, 0));
+    imageY.setAttribute("href", axisUrl(doc, map, 1));
+    displaceY.setAttribute("scale", map.scale);
+    displaceX.setAttribute("scale", map.scale);
     target.style.setProperty("--glass-refraction", `url(#${id})`);
   };
   const schedule = () => {
