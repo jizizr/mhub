@@ -27,6 +27,13 @@
   --sidebar-bg: rgba(248, 247, 245, 0.72);
   --bar-bg: rgba(250, 249, 248, 0.86);
   --bar-solid: #faf9f8;
+  /* Liquid glass for the floating functional layer (player, phone tab bar). */
+  --glass-bg: rgba(252, 251, 250, 0.58);
+  --glass-tint: rgba(255, 255, 255, 0.42);
+  --glass-border: rgba(0, 0, 0, 0.07);
+  --glass-highlight: rgba(255, 255, 255, 0.85);
+  --glass-lowlight: rgba(0, 0, 0, 0.04);
+  --glass-shadow: 0 12px 36px rgba(40, 32, 30, 0.14), 0 2px 6px rgba(40, 32, 30, 0.06);
   --placeholder: linear-gradient(145deg, #eceae7, #f8f7f5);
   --cover-inset: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
   --cover-ring: rgba(255, 255, 255, 0.82);
@@ -55,8 +62,11 @@
   --motion-base: 240ms;
   --motion-slow: 360ms;
   --bottom-nav-height: 0px;
-  --player-bar-height: 92px;
-  --player-dock-height: calc(var(--bottom-nav-height) + var(--player-bar-height));
+  --player-bar-height: 76px;
+  /* The desktop player floats 16px above the window edge; content keeps the
+     same clearance above it. */
+  --player-float-gap: 16px;
+  --player-dock-height: calc(var(--bottom-nav-height) + var(--player-bar-height) + var(--player-float-gap) * 2);
   --full-player-toolbar-height: 116px;
 }
 
@@ -83,6 +93,12 @@
   --sidebar-bg: rgba(22, 22, 25, 0.78);
   --bar-bg: rgba(24, 24, 27, 0.88);
   --bar-solid: #18181b;
+  --glass-bg: rgba(32, 32, 36, 0.62);
+  --glass-tint: rgba(255, 255, 255, 0.07);
+  --glass-border: rgba(255, 255, 255, 0.11);
+  --glass-highlight: rgba(255, 255, 255, 0.16);
+  --glass-lowlight: rgba(0, 0, 0, 0.28);
+  --glass-shadow: 0 16px 44px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
   --placeholder: linear-gradient(145deg, #2a2a2e, #1f1f22);
   --cover-inset: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
   --cover-ring: rgba(255, 255, 255, 0.1);
@@ -129,6 +145,12 @@
     --sidebar-bg: rgba(22, 22, 25, 0.78);
     --bar-bg: rgba(24, 24, 27, 0.88);
     --bar-solid: #18181b;
+    --glass-bg: rgba(32, 32, 36, 0.62);
+    --glass-tint: rgba(255, 255, 255, 0.07);
+    --glass-border: rgba(255, 255, 255, 0.11);
+    --glass-highlight: rgba(255, 255, 255, 0.16);
+    --glass-lowlight: rgba(0, 0, 0, 0.28);
+    --glass-shadow: 0 16px 44px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
     --placeholder: linear-gradient(145deg, #2a2a2e, #1f1f22);
     --cover-inset: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
     --cover-ring: rgba(255, 255, 255, 0.1);
@@ -191,7 +213,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 244px minmax(0, 1fr);
-  padding-bottom: var(--player-dock-height);
 }
 
 .sidebar {
@@ -201,7 +222,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   padding: 16px 12px 112px;
   border-right: 1px solid var(--line);
   background: var(--sidebar-bg);
-  backdrop-filter: blur(18px);
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -209,7 +229,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   scrollbar-width: none;
 }
 
-.brand, .sidebar__footer, .nav-item, .platform-chip, .search-box, .player-bar, .queue-panel, .full-player__bottom {
+.queue-panel, .full-player__bottom {
   backdrop-filter: blur(18px);
 }
 
@@ -310,7 +330,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   z-index: 0;
   isolation: isolate;
   min-width: 0;
-  padding: 20px 30px 30px;
+  padding: 20px 30px calc(30px + var(--player-dock-height));
 }
 
 .page-header {
@@ -660,17 +680,34 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   to { transform: rotate(360deg); }
 }
 
+/* Liquid glass, CSS only: blur + saturation of what scrolls beneath, a light
+   top sheen, hairline edge, inner highlight/lowlight and a soft float shadow.
+   Kept to the few floating controls (player, phone tab bar) because each
+   backdrop-filter region is re-composited while content scrolls. */
+.player-bar, .glass-surface {
+  border: 1px solid var(--glass-border);
+  background:
+    linear-gradient(180deg, var(--glass-tint), transparent 60%),
+    var(--glass-bg);
+  -webkit-backdrop-filter: blur(28px) saturate(1.8);
+  backdrop-filter: blur(28px) saturate(1.8);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    inset 0 -1px 0 var(--glass-lowlight),
+    var(--glass-shadow);
+}
+
 .player-bar {
+  --player-inline-gap: max(24px, calc((100vw - 244px - 1120px) / 2));
   position: fixed;
-  left: 244px;
-  right: 0;
-  bottom: var(--bottom-nav-height);
+  left: calc(244px + var(--player-inline-gap));
+  right: var(--player-inline-gap);
+  bottom: calc(var(--bottom-nav-height) + var(--player-float-gap));
   height: var(--player-bar-height);
   z-index: 20;
-  border-top: 1px solid var(--line);
-  background: var(--bar-bg);
-  box-shadow: var(--bar-shadow);
+  border-radius: 24px;
 }
+.player-bar .progress-rail { left: 24px; right: 24px; }
 
 .progress-rail {
   position: absolute;
@@ -1430,18 +1467,18 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
   .sidebar {
     position: fixed;
     z-index: 25;
-    background: var(--bar-bg);
     left: var(--mobile-dock-left);
     right: var(--mobile-dock-right);
     bottom: var(--mobile-dock-bottom);
     top: auto;
     height: var(--bottom-nav-height);
     padding: 4px 6px;
-    border: 1px solid var(--line-strong);
+    border: 1px solid var(--glass-border);
     border-radius: 28px;
-    box-shadow: var(--shadow-md), inset 0 1px 0 var(--line);
-    -webkit-backdrop-filter: blur(24px) saturate(1.6);
-    backdrop-filter: blur(24px) saturate(1.6);
+    background: linear-gradient(180deg, var(--glass-tint), transparent 60%), var(--glass-bg);
+    box-shadow: inset 0 1px 0 var(--glass-highlight), inset 0 -1px 0 var(--glass-lowlight), var(--glass-shadow);
+    -webkit-backdrop-filter: blur(28px) saturate(1.8);
+    backdrop-filter: blur(28px) saturate(1.8);
     flex-direction: row;
     align-items: center;
     gap: 0;
@@ -1490,12 +1527,7 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
     left: var(--mobile-dock-left);
     right: var(--mobile-dock-right);
     bottom: calc(var(--mobile-dock-bottom) + var(--bottom-nav-height) + var(--mobile-player-gap));
-    border: 1px solid var(--line-strong);
     border-radius: 22px;
-    background: var(--bar-bg);
-    box-shadow: var(--shadow-md), inset 0 1px 0 var(--line);
-    -webkit-backdrop-filter: blur(24px) saturate(1.6);
-    backdrop-filter: blur(24px) saturate(1.6);
     animation: mobile-player-reveal var(--motion-base) var(--ease-emphasized) both;
   }
   .player-bar--empty { display: none; }
@@ -1611,10 +1643,24 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* Glass falls back to an opaque bar without backdrop support and when people
+   ask for less transparency or more contrast. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .player-bar, .glass-surface { background: var(--bar-solid); }
   @media (max-width: 880px) {
-    .sidebar, .player-bar { background: var(--bar-solid); }
+    .sidebar { background: var(--bar-solid); }
   }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .player-bar, .glass-surface, .app .sidebar {
+    background: var(--bar-solid);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+@media (prefers-contrast: more) {
+  .player-bar, .glass-surface { border-color: var(--line-strong); }
+  @media (max-width: 880px) { .app .sidebar { border-color: var(--line-strong); } }
 }
 
 @media (max-width: 560px) {
