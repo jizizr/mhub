@@ -27,29 +27,38 @@ const progress = computed(() => duration.value > 0
 
 <template>
   <footer ref="root" class="player-bar" :class="{ 'player-bar--empty': !media.track }" aria-label="当前播放">
-    <div class="progress-rail">
-      <SeekSlider
-        class="progress-input"
-        :position="status.position"
-        :duration="duration"
-        :track-key="media.track?.id || ''"
-        :disabled="!media.track"
-        @preview="draft = $event"
-        @seek="player.seek"
-      />
-    </div>
     <div class="player-bar__grid">
-      <TrackInfo />
       <PlayerControls />
+      <!-- Apple Music-style "now playing" well: cover and title with a thin
+           progress line; hovering swaps the title for the elapsed and
+           remaining time. -->
+      <div class="player-bar__now">
+        <TrackInfo />
+        <div class="player-bar__times" aria-hidden="true">
+          <span>{{ formatTime(sliderValue) }}</span>
+          <span>-{{ formatTime(Math.max(0, duration - sliderValue)) }}</span>
+        </div>
+        <div class="progress-rail" :style="{ '--progress': `${progress * 100}%` }">
+          <SeekSlider
+            class="progress-input"
+            :position="status.position"
+            :duration="duration"
+            :track-key="media.track?.id || ''"
+            :disabled="!media.track"
+            @preview="draft = $event"
+            @seek="player.seek"
+          />
+        </div>
+      </div>
       <div class="player-toolbar">
-        <span class="time-readout">{{ formatTime(sliderValue) }} / {{ formatTime(duration) }}</span>
         <label class="volume-control" title="音量">
-          <Volume2 :size="17" />
+          <Volume2 :size="20" />
           <input
             type="range"
             min="0"
             max="1"
             step="0.01"
+            aria-label="音量"
             :value="status.volume"
             @input="player.setVolume(Number($event.target.value))"
           />
@@ -64,12 +73,3 @@ const progress = computed(() => duration.value > 0
     </div>
   </footer>
 </template>
-
-<style scoped>
-.progress-rail { top: -12px; height: 24px; z-index: 1; }
-.player-toolbar { gap: 12px; }
-@media (min-width: 881px) and (max-width: 1180px) {
-  .player-toolbar .time-readout { display: none; }
-  .volume-control input { width: 70px; }
-}
-</style>

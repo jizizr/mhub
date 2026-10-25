@@ -31,10 +31,14 @@
   --glass-bg: rgba(252, 251, 250, 0.58);
   --glass-tint: rgba(255, 255, 255, 0.42);
   --glass-border: rgba(0, 0, 0, 0.07);
-  --glass-highlight: rgba(255, 255, 255, 0.85);
-  --glass-lowlight: rgba(0, 0, 0, 0.04);
+  --glass-highlight: rgba(255, 255, 255, 0.95);
+  --glass-lowlight: rgba(0, 0, 0, 0.08);
   --glass-shadow: 0 12px 36px rgba(40, 32, 30, 0.14), 0 2px 6px rgba(40, 32, 30, 0.06);
-  --glass-bg-clear: rgba(255, 255, 255, 0.4);
+  --glass-bg-clear: rgba(255, 255, 255, 0.24);
+  --glass-bg-dense: rgba(255, 255, 255, 0.7);
+  --glass-glow: rgba(255, 255, 255, 0.5);
+  --glass-legibility: rgba(255, 255, 255, 0.55);
+  --glass-transfer: 0.9 0.1;
   --glass-rim: linear-gradient(155deg, rgba(255, 255, 255, 1), rgba(255, 255, 255, 0.45) 28%, rgba(0, 0, 0, 0.05) 52%, rgba(255, 255, 255, 0.5) 78%, rgba(255, 255, 255, 0.95));
   --placeholder: linear-gradient(145deg, #eceae7, #f8f7f5);
   --cover-inset: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
@@ -64,7 +68,7 @@
   --motion-base: 240ms;
   --motion-slow: 360ms;
   --bottom-nav-height: 0px;
-  --player-bar-height: 76px;
+  --player-bar-height: 62px;
   /* The desktop player floats 16px above the window edge; content keeps the
      same clearance above it. */
   --player-float-gap: 16px;
@@ -95,13 +99,17 @@
   --sidebar-bg: rgba(22, 22, 25, 0.78);
   --bar-bg: rgba(24, 24, 27, 0.88);
   --bar-solid: #18181b;
-  --glass-bg: rgba(32, 32, 36, 0.62);
-  --glass-tint: rgba(255, 255, 255, 0.07);
+  --glass-bg: rgba(58, 58, 62, 0.55);
+  --glass-tint: rgba(255, 255, 255, 0.05);
   --glass-border: rgba(255, 255, 255, 0.11);
-  --glass-highlight: rgba(255, 255, 255, 0.16);
-  --glass-lowlight: rgba(0, 0, 0, 0.28);
+  --glass-highlight: rgba(255, 255, 255, 0.24);
+  --glass-lowlight: rgba(0, 0, 0, 0.38);
   --glass-shadow: 0 16px 44px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
-  --glass-bg-clear: rgba(28, 28, 31, 0.3);
+  --glass-bg-clear: rgba(255, 255, 255, 0.1);
+  --glass-bg-dense: rgba(24, 24, 27, 0.52);
+  --glass-glow: rgba(255, 255, 255, 0.07);
+  --glass-legibility: rgba(0, 0, 0, 0.28);
+  --glass-transfer: 0.72 0.12;
   --glass-rim: linear-gradient(155deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.12) 26%, rgba(255, 255, 255, 0.03) 50%, rgba(255, 255, 255, 0.1) 76%, rgba(255, 255, 255, 0.36));
   --placeholder: linear-gradient(145deg, #2a2a2e, #1f1f22);
   --cover-inset: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
@@ -149,13 +157,17 @@
     --sidebar-bg: rgba(22, 22, 25, 0.78);
     --bar-bg: rgba(24, 24, 27, 0.88);
     --bar-solid: #18181b;
-    --glass-bg: rgba(32, 32, 36, 0.62);
-    --glass-tint: rgba(255, 255, 255, 0.07);
+    --glass-bg: rgba(58, 58, 62, 0.55);
+    --glass-tint: rgba(255, 255, 255, 0.05);
     --glass-border: rgba(255, 255, 255, 0.11);
-    --glass-highlight: rgba(255, 255, 255, 0.16);
-    --glass-lowlight: rgba(0, 0, 0, 0.28);
+    --glass-highlight: rgba(255, 255, 255, 0.24);
+    --glass-lowlight: rgba(0, 0, 0, 0.38);
     --glass-shadow: 0 16px 44px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
-    --glass-bg-clear: rgba(28, 28, 31, 0.3);
+    --glass-bg-clear: rgba(255, 255, 255, 0.1);
+    --glass-bg-dense: rgba(24, 24, 27, 0.52);
+    --glass-glow: rgba(255, 255, 255, 0.07);
+    --glass-legibility: rgba(0, 0, 0, 0.28);
+    --glass-transfer: 0.72 0.12;
     --glass-rim: linear-gradient(155deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.12) 26%, rgba(255, 255, 255, 0.03) 50%, rgba(255, 255, 255, 0.1) 76%, rgba(255, 255, 255, 0.36));
     --placeholder: linear-gradient(145deg, #2a2a2e, #1f1f22);
     --cover-inset: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
@@ -708,10 +720,16 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
    heavy CSS blur, so the tint can be much clearer, as on Apple's glass. */
 .has-liquid-glass .player-bar, .has-liquid-glass .glass-surface {
   background:
-    linear-gradient(180deg, var(--glass-tint), transparent 55%),
+    linear-gradient(180deg, var(--glass-tint), transparent 70%),
     var(--glass-bg-clear);
   -webkit-backdrop-filter: var(--glass-refraction, blur(28px) saturate(1.8));
   backdrop-filter: var(--glass-refraction, blur(28px) saturate(1.8));
+  /* A brighter top edge and a dark inner bottom edge read as a thick slab. */
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    inset 0 -1.5px 2px var(--glass-lowlight),
+    inset 0 0 16px var(--glass-glow),
+    var(--glass-shadow);
 }
 
 /* Specular rim: a bright edge strongest at the top-left and bottom-right
@@ -738,9 +756,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   bottom: calc(var(--bottom-nav-height) + var(--player-float-gap));
   height: var(--player-bar-height);
   z-index: 20;
-  border-radius: 24px;
+  /* A true capsule: the radius is half the height, like Apple Music's bar. */
+  border-radius: 999px;
 }
-.player-bar .progress-rail { left: 24px; right: 24px; }
+/* Glyph-only transport on glass (no white disc), as in Apple Music. */
+.player-bar .icon-button--lg { background: transparent; color: var(--text); box-shadow: none; }
+.player-bar .icon-button--lg:hover, .player-bar .icon-button--lg.is-active { background: var(--surface-muted); color: var(--accent); }
+.player-bar .icon-button--lg svg { width: 30px; height: 30px; }
+.player-bar .player-controls .icon-button:not(.is-active):not(:hover) { color: color-mix(in srgb, var(--text) 82%, transparent); }
 
 .progress-rail {
   position: absolute;
@@ -834,6 +857,76 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .time-readout { font-variant-numeric: tabular-nums; }
 .volume-control { display: flex; align-items: center; gap: 8px; }
 .volume-control input { width: 96px; accent-color: var(--accent); }
+
+/* Desktop capsule, laid out like Apple Music: transport on the left, the
+   now-playing well in the middle, lyrics/queue/volume/settings on the right.
+   PlayerControls' buttons join the bar grid directly (display: contents) so
+   lyrics and queue can sit on the right without changing the component. */
+@media (min-width: 881px) {
+  .player-bar__grid {
+    grid-template-columns: repeat(5, auto) minmax(200px, 1fr) repeat(3, auto);
+    gap: 2px;
+    padding: 0 16px 0 18px;
+  }
+  .player-bar .player-controls { display: contents; }
+  .player-bar__now { order: 1; }
+  .player-bar .player-control--lyrics, .player-bar .player-control--queue { order: 2; }
+  .player-bar .player-toolbar { order: 3; gap: 2px; color: color-mix(in srgb, var(--text) 82%, transparent); }
+  .player-bar .icon-button { width: 40px; height: 40px; }
+  .player-bar .icon-button--lg { width: 46px; height: 46px; }
+  .player-bar .icon-button.is-active { background: transparent; }
+  .player-bar .icon-button svg { width: 22px; height: 22px; }
+  .player-bar .icon-button--lg svg { width: 30px; height: 30px; }
+  .player-bar svg { stroke-width: 2.3; }
+  .player-bar .icon-button .transport-glyph { width: 27px; height: 27px; }
+  /* The glass is clear, so glyphs and text carry a soft halo that keeps them
+     legible over bright or busy artwork, as vibrancy does on macOS. */
+  .player-bar .icon-button svg, .player-bar .volume-control svg, .player-bar .listening-settings__trigger svg { filter: drop-shadow(0 0 3px var(--glass-legibility)); }
+  .player-bar__now, .player-bar__times { text-shadow: 0 0 3px var(--glass-legibility); }
+
+  .player-bar__now { position: relative; display: grid; align-items: center; min-width: 0; height: 48px; margin: 0 12px; padding: 0 10px 6px; }
+  .player-bar__now .track-info { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 0; transition: opacity var(--motion-fast); }
+  .player-bar__now .track-info__cover { width: 34px; height: 34px; border-radius: 6px; }
+  .player-bar__now .track-info__cover { width: 38px; height: 38px; }
+  .player-bar__now .track-info__title { font-size: 15px; font-weight: 650; line-height: 19px; }
+  .player-bar__now .track-info__artist { color: var(--text-secondary); font-size: 14px; line-height: 18px; }
+  .player-bar__times { position: absolute; inset: 0 10px 12px; display: flex; align-items: center; justify-content: space-between; color: var(--text); font-size: 16px; font-weight: 550; font-variant-numeric: tabular-nums; opacity: 0; pointer-events: none; transition: opacity var(--motion-fast); }
+  .player-bar__now:hover .track-info, .player-bar__now:focus-within .track-info { opacity: 0; }
+  .player-bar__now:hover .player-bar__times, .player-bar__now:focus-within .player-bar__times { opacity: 1; }
+  .player-bar--empty .player-bar__now:hover .track-info { opacity: 1; }
+  .player-bar--empty .player-bar__times { display: none; }
+
+  /* Thin progress line along the bottom of the well; it thickens and shows a
+     thumb on hover. --progress is set by PlayerBar. */
+  .player-bar__now .progress-rail { left: 10px; right: 10px; top: auto; bottom: -1px; height: 12px; }
+  .player-bar .player-bar__now .seek-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 12px; min-height: 12px; background: transparent; }
+  .player-bar__now .seek-slider::-webkit-slider-runnable-track {
+    height: 3px;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--text-secondary) var(--progress, 0%), color-mix(in srgb, var(--text) 16%, transparent) var(--progress, 0%));
+    transition: height var(--motion-fast);
+  }
+  .player-bar__now .seek-slider::-moz-range-track { height: 3px; border-radius: 3px; background: color-mix(in srgb, var(--text) 16%, transparent); }
+  .player-bar__now .seek-slider::-moz-range-progress { height: 3px; border-radius: 3px; background: var(--text-secondary); }
+  .player-bar__now .seek-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 0; height: 0; border: 0; }
+  .player-bar__now .seek-slider::-moz-range-thumb { width: 0; height: 0; border: 0; }
+  /* Hover: a thick translucent pill with the played part filled, no thumb. */
+  .player-bar__now:hover .progress-rail, .player-bar__now:focus-within .progress-rail { bottom: 2px; height: 16px; }
+  .player-bar__now:hover .seek-slider::-webkit-slider-runnable-track, .player-bar__now:focus-within .seek-slider::-webkit-slider-runnable-track {
+    height: 8px;
+    border-radius: 8px;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--text) 78%, transparent) var(--progress, 0%), color-mix(in srgb, var(--text) 22%, transparent) var(--progress, 0%));
+  }
+
+  /* Volume: a speaker glyph that opens a slider on hover or focus. */
+  .player-bar .volume-control { gap: 0; padding: 0 6px; }
+  .player-bar .volume-control input { width: 0; margin: 0; opacity: 0; transition: width var(--motion-fast), opacity var(--motion-fast), margin var(--motion-fast); }
+  .player-bar .volume-control:hover input, .player-bar .volume-control:focus-within input { width: 84px; margin-left: 8px; opacity: 1; }
+}
+@media (min-width: 881px) and (max-width: 1180px) {
+  .player-bar .player-control--autoplay { display: none; }
+  .player-bar__grid { grid-template-columns: repeat(4, auto) minmax(160px, 1fr) repeat(3, auto); }
+}
 
 .queue-panel {
   position: fixed;
@@ -1517,8 +1610,11 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
     gap: 0;
     --liquid-glass: 1;
   }
+  /* Phone bars carry labels over full-bleed artwork: a denser tint keeps the
+     tab labels and the mini player's title legible over any cover. */
+  .has-liquid-glass .player-bar { background: linear-gradient(180deg, var(--glass-tint), transparent 70%), var(--glass-bg-dense); }
   .has-liquid-glass .app .sidebar {
-    background: linear-gradient(180deg, var(--glass-tint), transparent 55%), var(--glass-bg-clear);
+    background: linear-gradient(180deg, var(--glass-tint), transparent 55%), var(--glass-bg-dense);
     -webkit-backdrop-filter: var(--glass-refraction, blur(28px) saturate(1.8));
     backdrop-filter: var(--glass-refraction, blur(28px) saturate(1.8));
   }
@@ -1578,11 +1674,13 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
     left: var(--mobile-dock-left);
     right: var(--mobile-dock-right);
     bottom: calc(var(--mobile-dock-bottom) + var(--bottom-nav-height) + var(--mobile-player-gap));
-    border-radius: 22px;
+    border-radius: 999px;
     animation: mobile-player-reveal var(--motion-base) var(--ease-emphasized) both;
   }
   .player-bar--empty { display: none; }
-  .player-bar .progress-rail { display: none; }
+  .player-bar .progress-rail, .player-bar__times { display: none; }
+  .player-bar__now { order: -1; display: flex; min-width: 0; }
+  .player-bar__now .track-info { flex: 1; width: 100%; }
   .player-bar__compact-progress { display: block; position: absolute; left: 24px; right: 24px; bottom: 0; height: 2px; border-radius: 2px; overflow: hidden; background: var(--line); pointer-events: none; }
   .player-bar__compact-progress span { display: block; width: 100%; height: 100%; background: var(--text-muted); transform-origin: left; transition: transform 250ms linear; }
   .player-bar__grid {

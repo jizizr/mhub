@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Check, Infinity as InfinityIcon, ListMusic, ListOrdered, LoaderCircle, Mic2, Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward } from "lucide-vue-next";
+import { Check, Infinity as InfinityIcon, ListMusic, ListOrdered, LoaderCircle, Mic2, Pause, Play, Repeat, Repeat1, Shuffle } from "lucide-vue-next";
 import * as player from "../../core/player";
 import { useMediaStore } from "../../stores/media";
 import { useStatusStore } from "../../stores/status";
@@ -68,7 +68,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <IconButton
-      class="player-control--secondary"
+      class="player-control--secondary player-control--autoplay"
       :title="status.autoplayEnabled ? '关闭自动续播' : '开启自动续播：队列结束后推荐新歌曲'"
       :active="status.autoplayEnabled"
       :aria-pressed="status.autoplayEnabled"
@@ -77,17 +77,18 @@ onBeforeUnmount(() => {
       <InfinityIcon :size="20" />
     </IconButton>
     <IconButton class="player-control--secondary" title="上一首" @click="player.prevTrack()">
-      <SkipBack :size="20" />
+      <!-- Solid double triangles, like SF Symbols backward.fill. -->
+      <svg class="transport-glyph" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.5 5v14L1.8 12zM22.2 5v14L12.5 12z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" /></svg>
     </IconButton>
     <IconButton size="lg" :title="status.isBuffering ? '正在缓冲，点击暂停' : status.isPlaying ? '暂停' : '播放'" :active="status.isBuffering" @click="player.togglePlay()">
       <LoaderCircle v-if="status.isBuffering" class="is-spinning" :size="24" />
-      <Pause v-else-if="status.isPlaying" :size="24" />
+      <Pause v-else-if="status.isPlaying" :size="24" fill="currentColor" />
       <Play v-else :size="24" fill="currentColor" />
     </IconButton>
     <IconButton title="下一首" @click="player.nextTrack(true)">
-      <SkipForward :size="20" />
+      <svg class="transport-glyph" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M1.8 5v14l9.7-7zM12.5 5v14l9.7-7z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" /></svg>
     </IconButton>
-    <IconButton class="player-control--secondary" title="歌词" :active="media.expanded" :disabled="!media.track" @click="media.expanded = true">
+    <IconButton class="player-control--secondary player-control--lyrics" title="歌词" :active="media.expanded" :disabled="!media.track" @click="media.expanded = true">
       <Mic2 :size="18" />
     </IconButton>
     <IconButton class="player-control--queue" title="队列" :active="status.queueOpen" @click="status.queueOpen = !status.queueOpen">

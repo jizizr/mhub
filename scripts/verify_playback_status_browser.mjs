@@ -60,6 +60,7 @@ try {
       if (url.pathname === "/health") return json({ status: "ok" });
       if (url.pathname.startsWith("/api/")) {
         fixture.requests.push({ method: request.method, path: url.pathname, elapsed: Date.now() - fixture.started });
+        if (url.pathname === "/api/v1/auth/config") return json({ enabled: false });
         if (url.pathname === "/api/v1/platforms") return json([{ id: "applemusic", label: "Apple Music" }]);
         if (url.pathname === "/api/v1/recommendations/home") return json({ tracks: [], playlists: [], tags: [] });
         if (url.pathname === "/api/v1/recommendations" || url.pathname === "/api/v1/search") return json([]);

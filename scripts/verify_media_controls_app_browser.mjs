@@ -66,6 +66,7 @@ try {
             return route.fulfill({ status: 200, contentType: 'audio/flac', headers: { 'accept-ranges': 'bytes', 'content-length': String(audio.length) }, body: audio });
           }
           if (/\/playbacks\/[^/]+$/.test(url.pathname)) return json(tasks.get(decodeURIComponent(url.pathname.split('/').at(-1))) || {});
+          if (url.pathname === '/api/v1/auth/config') return json({ enabled: false });
           unexpected.push(url.pathname); return route.abort();
         }
         if (['data:', 'blob:'].includes(url.protocol) || url.origin === new URL(base).origin) return route.continue();

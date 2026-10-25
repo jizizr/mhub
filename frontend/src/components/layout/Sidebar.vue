@@ -12,7 +12,7 @@ const emit = defineEmits(["playlist-contextmenu", "navigate"]);
 // Only the phone tab bar is glass; the filter is built when CSS opts in.
 const root = ref(null);
 let detachGlass = () => {};
-onMounted(() => { detachGlass = attachLiquidGlass(root.value, { bezel: 16, shift: 10 }); });
+onMounted(() => { detachGlass = attachLiquidGlass(root.value, { bezel: 22, shift: 20, blur: 8, saturate: 1.6 }); });
 onBeforeUnmount(() => detachGlass());
 
 // Phones show the first group as a tab bar (主页 · 资料库 · 搜索); the
