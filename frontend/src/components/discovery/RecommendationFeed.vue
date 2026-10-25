@@ -1,9 +1,11 @@
 <script setup>
 import { computed } from "vue";
-import { Ban, ChevronLeft, ChevronRight, Heart, ListPlus, ListStart, Play, RefreshCcw, Shuffle, Sparkles } from "lucide-vue-next";
+import { ChevronLeft, ChevronRight, Ellipsis, ListMusic, Play, RefreshCcw, Shuffle, Sparkles } from "lucide-vue-next";
 import { trackIdentity } from "../../stores/queue";
 
-const emit = defineEmits(["play", "queue", "queue-next", "open", "refresh", "mood", "play-all", "queue-all", "queue-next-all", "playlist", "like", "less"]);
+// Per-song actions (next, queue, like, less, add to playlist) live in the
+// song menu: `menu` opens it, `more` opens the batch menu for the whole pool.
+const emit = defineEmits(["play", "open", "menu", "more", "refresh", "mood", "play-all", "playlist"]);
 
 const moods = [
   { id: "relax", label: "放松一下", query: "chill" },
@@ -167,14 +169,18 @@ function handleRailWheel(event) {
 }
 
 function scrollRail(button, direction) {
-  const rail = button?.parentElement?.querySelector(".recommend-personal-rail");
+  const rail = button?.parentElement?.querySelector(".artwork-rail");
   if (!rail) return;
   rail.scrollBy({ left: direction * Math.max(rail.clientWidth * 0.72, 220), behavior: "smooth" });
 }
 
+const GENERIC_TAG = /^(为你精选|精选推荐\s*\d+)$/;
+
 const dynamicMoods = computed(() => {
   if (props.platform === "applemusic") {
-    return props.recommendationTags.filter((item) => item.playlist_ids?.length);
+    // Apple shelf titles are never copied (they can carry account names), so
+    // numbered placeholders say nothing; show only tags with a real name.
+    return props.recommendationTags.filter((item) => item.playlist_ids?.length && !GENERIC_TAG.test(item.label || ""));
   }
   return moods;
 });
@@ -194,40 +200,16 @@ function keyFor(track, index) {
 
 <template>
   <section class="recommend-feed" aria-label="个性推荐">
-    <div class="recommend-hero">
-      <div class="recommend-hero__copy">
-        <span class="recommend-kicker"><Sparkles :size="15" /> 随便听一点</span>
-        <h2>{{ recentTracks.length ? "接着听，也留一点新鲜感" : "给你挑一段现在就能听的音乐" }}</h2>
-        <p>
-          {{ recentTracks.length
-            ? (personalized
-              ? `从 Apple Music 推荐池中发现音乐，也可以接着听此设备最近播放的歌曲。`
-              : `可以接着听此设备最近播放的歌曲，也可以从本地歌单中选择。`)
-            : (personalized
-              ? `来自 Apple Music 推荐池，适合现在不想思考时直接播放。`
-              : (platform === "applemusic" ? `发现 Apple Music 的公开歌单和新鲜歌曲，换一批继续探索。` : `先从 ${platformLabel} 的探索池开始，找一段适合现在的音乐。`)) }}
-        </p>
-        <div class="recommend-hero__actions">
-          <button class="primary-action" :disabled="loading || !tracks.length" @click="emit('play-all')">
-            <Play :size="16" />{{ loading ? "正在挑选" : "开始播放" }}
-          </button>
-          <button class="ghost-action" :disabled="loading" @click="emit('refresh')">
-            <Shuffle :size="16" />换一批
-          </button>
-          <button class="ghost-action" :disabled="!tracks.length" @click="emit('queue-next-all')">
-            <ListStart :size="16" />下一首播放
-          </button>
-          <button class="ghost-action" :disabled="!tracks.length" @click="emit('queue-all')">
-            <ListPlus :size="16" />加入播放队列
-          </button>
-        </div>
-      </div>
-      <div class="recommend-hero__stack" aria-hidden="true">
-        <span v-for="(track, index) in tracks.slice(0, 4)" :key="keyFor(track, index)" class="recommend-hero__cover" :style="{ '--i': index }">
-          <img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" />
-          <Sparkles v-else :size="22" />
-        </span>
-      </div>
+    <div class="home-actions">
+      <button class="primary-action" :disabled="loading || !tracks.length" @click="emit('play-all')">
+        <Play :size="16" />{{ loading && !tracks.length ? "正在挑选" : "播放推荐" }}
+      </button>
+      <button class="ghost-action" :disabled="loading" @click="emit('refresh')">
+        <Shuffle :size="16" />换一批
+      </button>
+      <button class="ghost-action home-actions__more" type="button" title="更多" aria-label="更多推荐操作" aria-haspopup="menu" :disabled="!tracks.length" @click="emit('more', $event)">
+        <Ellipsis :size="18" />
+      </button>
     </div>
 
     <div v-if="error" class="error-banner" role="status">{{ error }}</div>
@@ -240,59 +222,17 @@ function keyFor(track, index) {
         :class="{ 'is-active': mood === item.id }"
         type="button"
         @click="emitMood(item)"
-      >
-        <span>{{ item.label }}</span>
-        <small v-if="item.subtitle">{{ item.subtitle }}</small>
-      </button>
+      >{{ item.label }}</button>
     </div>
 
-    <section v-if="recentTracks.length" class="recommend-section">
-      <div class="recommend-section__head">
-        <div><h3>继续播放</h3><p>从最近听过的音乐接上</p></div>
-        <button class="mini-button" title="刷新推荐" @click="emit('refresh')"><RefreshCcw :size="16" /></button>
-      </div>
-      <div
-        class="recommend-rail"
-        tabindex="0"
-        aria-label="最近播放，可横向滚动"
-        @pointerdown="beginRailDrag"
-        @pointermove="moveRailDrag"
-        @pointerup="endRailDrag"
-        @pointercancel="endRailDrag"
-        @pointerleave="endRailDrag"
-        @click.capture="handleRailClick"
-        @dragstart.prevent
-        @wheel="handleRailWheel"
-      >
-        <article v-for="(track, index) in recentTracks.slice(0, 6)" :key="keyFor(track, index)" class="recommend-track-card">
-          <button class="recommend-track-card__cover" type="button" @click="emit('open', track)">
-            <img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" />
-            <Play v-else :size="22" />
-          </button>
-          <button class="recommend-track-card__name" type="button" @click="emit('play', track)">
-            <strong>{{ track.title }}</strong><small>{{ track.artist || "未知艺人" }}</small>
-          </button>
-          <div class="recommend-track-card__actions">
-            <button class="mini-button is-secondary" title="喜欢" @click="emit('like', track)"><Heart :size="15" /></button>
-            <button class="mini-button" title="下一首播放" @click="emit('queue-next', track)"><ListStart :size="15" /></button>
-            <button class="mini-button" title="加入播放队列" @click="emit('queue', track)"><ListPlus :size="15" /></button>
-            <button class="mini-button is-secondary" title="少推荐类似音乐" @click="emit('less', track)"><Ban :size="15" /></button>
-          </div>
-        </article>
-      </div>
-    </section>
-
     <section v-if="recommendationPlaylists.length" class="recommend-section">
-      <div class="recommend-section__head">
-        <div><h3>专属推荐歌单</h3><p>来自 Apple Music · 点开查看曲目</p></div>
-        <span class="recommend-scroll-hint" aria-hidden="true">横向浏览 · 拖动或滚轮</span>
-      </div>
+      <h2 class="section-title">为你推荐</h2>
       <div class="recommend-rail-shell">
-        <button class="recommend-rail-control recommend-rail-control--prev" type="button" title="向左浏览" aria-label="向左浏览推荐歌单" @click="scrollRail($event.currentTarget, -1)"><ChevronLeft :size="18" /></button>
+        <button class="recommend-rail-control recommend-rail-control--prev" type="button" aria-label="向左浏览" @click="scrollRail($event.currentTarget, -1)"><ChevronLeft :size="18" /></button>
         <div
-          class="recommend-personal-rail"
+          class="artwork-rail artwork-rail--featured"
           tabindex="0"
-          aria-label="专属推荐歌单，可横向滚动"
+          aria-label="推荐歌单"
           @pointerdown="beginRailDrag"
           @pointermove="moveRailDrag"
           @pointerup="endRailDrag"
@@ -302,30 +242,25 @@ function keyFor(track, index) {
           @dragstart.prevent
           @wheel="handleRailWheel"
         >
-          <button v-for="playlist in recommendationPlaylists" :key="playlist.id" class="recommend-personal-card" :data-recommendation-id="playlist.id" type="button" :aria-label="`查看${playlist.resource_type === 'albums' ? '专辑' : '歌单'}：${playlist.name}`" @click="emit('playlist', playlist)">
-            <span class="recommend-personal-card__cover">
+          <button v-for="playlist in recommendationPlaylists" :key="playlist.id" class="artwork-card" :data-recommendation-id="playlist.id" type="button" :aria-label="`查看${playlist.resource_type === 'albums' ? '专辑' : '歌单'}：${playlist.name}`" @click="emit('playlist', playlist)">
+            <span class="artwork-card__cover">
               <img v-if="playlist.cover" :src="playlist.cover" alt="" loading="lazy" />
-              <Sparkles v-else :size="22" />
+              <Sparkles v-else :size="24" />
             </span>
-            <span class="recommend-personal-card__copy">
-              <strong>{{ playlist.name }}</strong>
-              <small>{{ playlist.resource_type === "albums" ? `Apple Music 专辑 · ${playlist.curator || "未知艺人"}` : (playlist.curator || "Apple Music") }}</small>
-              <em v-if="playlist.description">{{ playlist.description }}</em>
-            </span>
+            <strong>{{ playlist.name }}</strong>
+            <small>{{ playlist.curator || "Apple Music" }}</small>
           </button>
         </div>
-        <button class="recommend-rail-control recommend-rail-control--next" type="button" title="向右浏览" aria-label="向右浏览推荐歌单" @click="scrollRail($event.currentTarget, 1)"><ChevronRight :size="18" /></button>
+        <button class="recommend-rail-control recommend-rail-control--next" type="button" aria-label="向右浏览" @click="scrollRail($event.currentTarget, 1)"><ChevronRight :size="18" /></button>
       </div>
     </section>
 
-    <section v-if="playlists.length" class="recommend-section">
-      <div class="recommend-section__head">
-        <div><h3>从你的歌单继续</h3><p>熟悉的音乐，适合不想思考的时候</p></div>
-      </div>
+    <section v-if="recentTracks.length" class="recommend-section">
+      <h2 class="section-title">最近播放</h2>
       <div
-        class="recommend-playlist-rail"
+        class="artwork-rail"
         tabindex="0"
-        aria-label="本地歌单，可横向滚动"
+        aria-label="最近播放"
         @pointerdown="beginRailDrag"
         @pointermove="moveRailDrag"
         @pointerup="endRailDrag"
@@ -335,33 +270,63 @@ function keyFor(track, index) {
         @dragstart.prevent
         @wheel="handleRailWheel"
       >
-        <button v-for="playlist in playlists.slice(0, 4)" :key="playlist.id" class="recommend-playlist-card" type="button" @click="emit('playlist', playlist)">
-          <span class="recommend-playlist-card__cover">
+        <article v-for="(track, index) in recentTracks.slice(0, 10)" :key="keyFor(track, index)" class="artwork-card" @contextmenu.prevent="emit('menu', { event: $event, track })">
+          <button class="artwork-card__cover" type="button" :aria-label="`播放 ${track.title}`" @click="emit('play', track)">
+            <img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" />
+            <Play v-else :size="24" />
+          </button>
+          <div class="artwork-card__meta">
+            <button class="artwork-card__text" type="button" @click="emit('open', track)">
+              <strong>{{ track.title }}</strong>
+              <small>{{ track.artist || "未知艺人" }}</small>
+            </button>
+            <button class="artwork-card__more" type="button" aria-label="更多操作" aria-haspopup="menu" @click="emit('menu', { event: $event, track })"><Ellipsis :size="18" /></button>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section v-if="playlists.length" class="recommend-section">
+      <h2 class="section-title">我的歌单</h2>
+      <div
+        class="artwork-rail"
+        tabindex="0"
+        aria-label="我的歌单"
+        @pointerdown="beginRailDrag"
+        @pointermove="moveRailDrag"
+        @pointerup="endRailDrag"
+        @pointercancel="endRailDrag"
+        @pointerleave="endRailDrag"
+        @click.capture="handleRailClick"
+        @dragstart.prevent
+        @wheel="handleRailWheel"
+      >
+        <button v-for="playlist in playlists.slice(0, 10)" :key="playlist.id" class="artwork-card" type="button" @click="emit('playlist', playlist)">
+          <span class="artwork-card__cover">
             <img v-if="playlist.cover" :src="playlist.cover" alt="" loading="lazy" />
-            <Sparkles v-else :size="22" />
+            <ListMusic v-else :size="24" />
           </span>
           <strong>{{ playlist.name }}</strong>
-          <small>{{ playlist.tracks?.length || 0 }} 首 · 查看歌单</small>
+          <small>{{ playlist.tracks?.length || 0 }} 首</small>
         </button>
       </div>
     </section>
 
     <section class="recommend-section">
-      <div class="recommend-section__head">
-        <div><h3>{{ mood ? "为这个感觉挑的歌" : "探索新声音" }}</h3><p>{{ mood ? "可以随时换一个场景" : "熟悉之外，留一点偶遇" }}</p></div>
-        <button class="mini-button" title="换一批" :disabled="loading" @click="emit('refresh')"><RefreshCcw :size="16" /></button>
+      <div class="section-head">
+        <h2 class="section-title">{{ mood ? dynamicMoods.find((item) => item.id === mood)?.label || "推荐歌曲" : "推荐歌曲" }}</h2>
+        <button class="mini-button" title="换一批" aria-label="换一批推荐歌曲" :disabled="loading" @click="emit('refresh')"><RefreshCcw :size="16" /></button>
       </div>
-      <div v-if="loading && !tracks.length" class="recommend-loading">正在准备一组适合现在的音乐…</div>
-      <div v-else-if="!tracks.length" class="recommend-loading">还没有推荐曲目，可以点“换一批”重新获取。</div>
+      <div v-if="loading && !tracks.length" class="recommend-loading">正在挑选…</div>
+      <div v-else-if="!tracks.length" class="recommend-loading">暂无推荐，点“换一批”重试</div>
       <div v-else class="recommend-track-list" :aria-busy="loading">
-        <article v-for="(track, index) in tracks" :key="keyFor(track, index)" class="recommend-list-row">
-          <button class="recommend-list-row__play" type="button" title="播放" @click="emit('play', track)"><Play :size="15" /></button>
-          <span class="cover-thumb is-small"><img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" /></span>
-          <button class="recommend-list-row__text" type="button" @click="emit('open', track)"><strong>{{ track.title }}</strong><small>{{ track.artist || "未知艺人" }} · {{ track.platform || platformLabel }}</small></button>
-          <button class="mini-button" title="喜欢" @click="emit('like', track)"><Heart :size="15" /></button>
-          <button class="mini-button" title="下一首播放" @click="emit('queue-next', track)"><ListStart :size="15" /></button>
-          <button class="mini-button" title="加入播放队列" @click="emit('queue', track)"><ListPlus :size="15" /></button>
-          <button class="mini-button" title="少推荐类似音乐" @click="emit('less', track)"><Ban :size="15" /></button>
+        <article v-for="(track, index) in tracks" :key="keyFor(track, index)" class="recommend-list-row" @contextmenu.prevent="emit('menu', { event: $event, track })">
+          <button class="recommend-list-row__cover" type="button" :aria-label="`播放 ${track.title}`" @click="emit('play', track)">
+            <img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" />
+            <Play class="recommend-list-row__play" :size="16" />
+          </button>
+          <button class="recommend-list-row__text" type="button" @click="emit('open', track)"><strong>{{ track.title }}</strong><small>{{ track.artist || "未知艺人" }}</small></button>
+          <button class="mini-button" type="button" aria-label="更多操作" aria-haspopup="menu" @click="emit('menu', { event: $event, track })"><Ellipsis :size="18" /></button>
         </article>
       </div>
     </section>

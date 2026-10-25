@@ -90,9 +90,9 @@ try {
         };
         function check() {
           const now = performance.now();
-          if (probe.firstHeroAt === null && document.querySelector(".recommend-hero")) probe.firstHeroAt = now;
-          if (probe.firstRecommendationAt === null && document.querySelector(".recommend-list-row, .recommend-personal-card")) probe.firstRecommendationAt = now;
-          if (probe.firstReadyAt === null && probe.firstRecommendationAt !== null && document.querySelector(".recommend-hero__actions .primary-action:not(:disabled)")) probe.firstReadyAt = now;
+          if (probe.firstHeroAt === null && document.querySelector(".home-actions")) probe.firstHeroAt = now;
+          if (probe.firstRecommendationAt === null && document.querySelector(".recommend-list-row, .artwork-card")) probe.firstRecommendationAt = now;
+          if (probe.firstReadyAt === null && probe.firstRecommendationAt !== null && document.querySelector(".home-actions .primary-action:not(:disabled)")) probe.firstReadyAt = now;
           if (probe.firstVisibleImageAt === null && [...document.querySelectorAll(".recommend-feed img")].some(img => img.complete && img.naturalWidth > 0 && visible(img))) probe.firstVisibleImageAt = now;
           requestAnimationFrame(check);
         }
@@ -143,7 +143,7 @@ try {
               paints: performance.getEntriesByType("paint").map(entry => ({ name: entry.name, at: entry.startTime })),
               probe: window.__firstScreenProbe,
               resources: performance.getEntriesByType("resource").map(entry => entry.toJSON()),
-              counts: { cards: document.querySelectorAll(".recommend-personal-card").length, rows: document.querySelectorAll(".recommend-list-row").length, errors: document.querySelectorAll(".recommend-feed .error-banner").length },
+              counts: { cards: document.querySelectorAll(".artwork-rail--featured .artwork-card").length, rows: document.querySelectorAll(".recommend-list-row").length, errors: document.querySelectorAll(".recommend-feed .error-banner").length },
             };
           });
           await Promise.allSettled(headerReads);

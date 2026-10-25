@@ -1,6 +1,6 @@
 <script setup>
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowLeft, FolderOpen, ListMusic, ListPlus, ListStart, Monitor, Moon, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, Search, Sun, Trash2, X } from "lucide-vue-next";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Ban, ChevronLeft, ChevronRight, Disc3, FolderOpen, HardDrive, Heart, ListMusic, ListPlus, ListStart, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, Search, Trash2, X } from "lucide-vue-next";
 import {
   audioUrl,
   createPlayback,
@@ -13,6 +13,7 @@ import {
 } from "./apis/music";
 import { trustedMediaOrigins } from "./apis/media-routing.js";
 import Sidebar from "./components/layout/Sidebar.vue";
+import PageHeader from "./components/layout/PageHeader.vue";
 import SongList from "./components/list/SongList.vue";
 import PlaylistDetail from "./components/list/PlaylistDetail.vue";
 import RecommendationFeed from "./components/discovery/RecommendationFeed.vue";
@@ -44,7 +45,6 @@ import { useMediaStore } from "./stores/media";
 import { trackIdentity, useQueueStore } from "./stores/queue";
 import { usePlaylistStore } from "./stores/playlists";
 import { useAccountStore } from "./stores/account";
-import AccountButton from "./components/account/AccountButton.vue";
 import HandoffCard from "./components/account/HandoffCard.vue";
 import { useStatusStore } from "./stores/status";
 import { formatSize } from "./utils/format";
@@ -77,7 +77,8 @@ const cacheItems = ref([]);
 const cacheLoading = ref(false);
 const importOpen = ref(false);
 const playlistMenu = ref({ open: false, x: 0, y: 0, playlistId: "" });
-const songMenu = ref({ open: false, x: 0, y: 0, track: null, playlistId: "" });
+const songMenu = ref({ open: false, x: 0, y: 0, track: null, playlistId: "", recommend: false });
+const feedMenu = ref({ open: false, x: 0, y: 0 });
 const status = useStatusStore();
 const media = useMediaStore();
 const queue = useQueueStore();
@@ -94,8 +95,6 @@ const fullPlayerMounted = ref(media.expanded);
 let uiSyncTimer = 0;
 let appUnmounted = false;
 let searchAbort = null;
-let searchHistoryActive = false;
-let searchReturnScroll = 0;
 let recommendationAbort = null;
 let recommendationPoolExhausted = false;
 let fullPlayerHistoryActive = false;
@@ -201,55 +200,30 @@ const cacheSummary = computed(() => cacheStats(cacheItems.value));
 const activePlaylist = computed(() =>
   status.activePlaylistId ? playlists.getById(status.activePlaylistId) : null,
 );
-const THEMES = [
-  { id: "system", label: "跟随系统", icon: Monitor },
-  { id: "light", label: "浅色", icon: Sun },
-  { id: "dark", label: "深色", icon: Moon },
-];
-const currentTheme = computed(() => THEMES.find((item) => item.id === status.theme) || THEMES[0]);
-
 const themeController = createThemeController(() => status.theme);
 
-function cycleTheme() {
-  const next = THEMES[(THEMES.indexOf(currentTheme.value) + 1) % THEMES.length];
-  status.theme = next.id;
-  status.persist();
-  status.toast(`外观：${next.label}`);
-}
-
 watch(() => status.theme, () => themeController.sync(), { immediate: true });
-
-function currentQualityLabel() {
-  const map = { standard: "标准", high: "高品质", lossless: "无损", hires: "Hi-Res" };
-  return map[status.quality] || status.quality;
-}
 
 async function runSearch() {
   const keyword = query.value.trim();
   if (!keyword) {
-    returnToRecommendations();
+    clearSearchState();
     return;
   }
   searchAbort?.abort?.();
   const controller = new AbortController();
   searchAbort = controller;
   const platform = status.searchPlatform;
-  if (!searchedQuery.value) {
-    searchReturnScroll = status.activeView === "discover" ? window.scrollY : 0;
-    pushUiHistory("search");
-    searchHistoryActive = true;
-  }
   searchLoading.value = true;
   searchError.value = "";
   searchedQuery.value = keyword;
   results.value = [];
-  pendingPageScroll = 0;
-  status.activeView = "discover";
+  status.activeView = "search";
   status.activePlaylistId = null;
   status.persist();
   try {
     const items = await searchTracks({ platform, q: keyword, limit: 20, signal: controller.signal });
-    if (controller.signal.aborted || searchAbort !== controller || status.activeView !== "discover" || platform !== status.searchPlatform) return;
+    if (controller.signal.aborted || searchAbort !== controller || platform !== status.searchPlatform) return;
     results.value = items.map((item) => trackFromSearch(item, status.quality));
   } catch (error) {
     if (!controller.signal.aborted) searchError.value = error?.message || "搜索失败";
@@ -268,20 +242,31 @@ function clearSearchState() {
   results.value = [];
 }
 
-function returnToRecommendations() {
-  const wasSearch = Boolean(searchedQuery.value);
-  clearSearchState();
-  if (wasSearch) pendingPageScroll = searchReturnScroll;
+// Top-level destinations are tabs: switching keeps each one's state (search
+// results stay when you visit 主页 and come back), like a native tab bar.
+function goHome() {
   status.activeView = "discover";
   status.activePlaylistId = null;
   status.persist();
-  if (searchHistoryActive && !closingFromPopstate && window.history.state?.musicUi === "search") backUiHistory();
-  searchHistoryActive = false;
   if (!recommendationTracks.value.length && !recommendationLoading.value) void loadRecommendations();
 }
 
+function navigate(key, id = null) {
+  if (key === "discover") return goHome();
+  if (key === "playlist") return openPlaylist(id);
+  status.activeView = key === "library" ? "playlists" : key;
+  status.activePlaylistId = null;
+  status.queueOpen = false;
+  status.persist();
+}
+
+function focusSearch() {
+  navigate("search");
+  void nextTick(() => document.querySelector(".search-box--main input")?.focus());
+}
+
 function handleSearchInput() {
-  if (!query.value.trim() && searchedQuery.value) returnToRecommendations();
+  if (!query.value.trim() && searchedQuery.value) clearSearchState();
 }
 
 async function waitForReady(task, { allowAlacStream = false } = {}) {
@@ -781,7 +766,7 @@ function handlePageEntered(element) {
   if (pendingPageScroll == null) return;
   window.scrollTo({ top: pendingPageScroll, behavior: "instant" });
   pendingPageScroll = null;
-  if (status.activeView === "recommendation" || (status.activeView === "discover" && searchedQuery.value)) {
+  if (status.activeView === "recommendation") {
     const heading = element.querySelector("h1");
     heading?.setAttribute("tabindex", "-1");
     heading?.focus({ preventScroll: true });
@@ -932,7 +917,8 @@ function openPlaylist(id) {
 
 function closePlaylistMenu() {
   playlistMenu.value = { open: false, x: 0, y: 0, playlistId: "" };
-  songMenu.value = { open: false, x: 0, y: 0, track: null, playlistId: "" };
+  songMenu.value = { open: false, x: 0, y: 0, track: null, playlistId: "", recommend: false };
+  feedMenu.value = { open: false, x: 0, y: 0 };
 }
 
 function menuPosition(event, width, height) {
@@ -944,7 +930,7 @@ function menuPosition(event, width, height) {
 
 // One menu for every song row: right-click on desktop, the "⋯" button
 // everywhere (iOS has no long-press contextmenu).
-function openSongMenu({ event, track }, playlistId = "") {
+function openSongMenu({ event, track, recommend = false }, playlistId = "") {
   event?.preventDefault?.();
   event?.stopPropagation?.();
   if (!track) return;
@@ -952,10 +938,23 @@ function openSongMenu({ event, track }, playlistId = "") {
   closePlaylistMenu();
   songMenu.value = {
     open: true,
-    ...menuPosition(event, 230, 190 + Math.min(targets, 6) * 38 + (playlistId ? 44 : 0)),
+    ...menuPosition(event, 230, 190 + Math.min(targets, 6) * 38 + (playlistId ? 44 : 0) + (recommend ? 86 : 0)),
     track,
     playlistId,
+    recommend,
   };
+}
+
+function openFeedMenu(event) {
+  event?.stopPropagation?.();
+  closePlaylistMenu();
+  feedMenu.value = { open: true, ...menuPosition(event, 210, 100) };
+}
+
+function runFeedMenu(action) {
+  closePlaylistMenu();
+  if (action === "next") queueRecommendationsNext();
+  if (action === "queue") queueRecommendations();
 }
 
 const songMenuPlaylists = computed(() => playlists.items
@@ -969,6 +968,8 @@ function runSongMenu(action, targetId = "") {
   if (action === "play") void playTrack(track);
   if (action === "next") queueTrackNext(track);
   if (action === "queue") queueTrack(track);
+  if (action === "like") likeRecommendation(track);
+  if (action === "less") suggestLessRecommendation(track);
   if (action === "add") {
     const playlist = playlists.getById(targetId);
     const before = playlist?.tracks.length || 0;
@@ -1060,7 +1061,7 @@ function handleDocumentKeydown(event) {
     if (!event.repeat) player.togglePlay();
   } else if (event.key === "/") {
     event.preventDefault();
-    document.querySelector(".search-box--main input")?.focus();
+    focusSearch();
   }
 }
 
@@ -1068,14 +1069,6 @@ function leavePlaylist() {
   status.activePlaylistId = null;
   status.persist();
 }
-
-function openQueueView() {
-  status.activeView = "queue";
-  status.activePlaylistId = null;
-  status.queueOpen = false;
-  status.persist();
-}
-
 
 function deleteActivePlaylist() {
   if (activePlaylist.value) deletePlaylist(activePlaylist.value.id);
@@ -1158,8 +1151,6 @@ function handlePopstate(event) {
     fullPlayerHistoryActive = false;
   } else if (status.activeView === "recommendation" && event.state?.musicUi !== "recommendation") {
     leaveRecommendedPlaylist();
-  } else if (status.activeView === "discover" && searchedQuery.value && event.state?.musicUi !== "search") {
-    returnToRecommendations();
   }
   closingFromPopstate = false;
 }
@@ -1179,11 +1170,6 @@ watch(
     playlistActionVersion += 1;
     playlistActionBusy.value = false;
     playlistActionNotice.value = "";
-    if (previous === "discover" && view !== "discover" && searchedQuery.value) {
-      clearSearchState();
-      searchHistoryActive = false;
-      if (window.history.state?.musicUi === "search") window.history.replaceState({ ...window.history.state, musicUi: null }, "");
-    }
     if (previous !== "recommendation" || view === "recommendation") return;
     recommendationDetailVersion += 1;
     recommendationDetailLoading.value = false;
@@ -1231,7 +1217,7 @@ watch(
     recommendationError.value = "";
     status.persist();
     if (searchedQuery.value) void runSearch();
-    else void loadRecommendations();
+    void loadRecommendations();
   },
 );
 
@@ -1354,55 +1340,13 @@ watch(
 
 <template>
   <div class="app" :class="{ 'app--has-track': Boolean(media.track) }">
-    <Sidebar :platforms="platforms" @discover="returnToRecommendations" @playlist-contextmenu="({ event, playlist }) => openPlaylistMenu(event, playlist)" />
+    <Sidebar @navigate="navigate" @playlist-contextmenu="({ event, playlist }) => openPlaylistMenu(event, playlist)" />
     <main class="main">
-      <header class="topbar">
-        <form class="search-box search-box--main" @submit.prevent="runSearch">
-          <Search :size="20" />
-          <input v-model="query" aria-label="搜索歌曲或艺人" placeholder="搜索歌曲、艺人或粘贴音乐链接" @input="handleSearchInput" @keydown.esc.prevent="returnToRecommendations" />
-          <button v-if="query || searchedQuery" class="search-box__clear" type="button" title="清空搜索，返回推荐" aria-label="清空搜索，返回推荐" @click="returnToRecommendations"><X :size="18" /></button>
-          <button type="submit" :disabled="searchLoading">搜索</button>
-        </form>
-        <div class="topbar__controls">
-          <select v-model="status.searchPlatform" class="platform-select" title="音乐平台" aria-label="音乐平台" @change="status.persist()">
-            <option v-for="item in platformOptions" :key="item.id" :value="item.id">{{ item.label }}</option>
-          </select>
-          <select v-model="status.quality" title="音质" aria-label="音质" @change="player.prepareAudio($event.target.value)">
-            <option value="standard">标准</option>
-            <option value="high">高品质</option>
-            <option value="lossless">无损</option>
-            <option value="hires">Hi-Res</option>
-          </select>
-          <select v-model="status.lyricScript" title="歌词文字" aria-label="歌词文字" @change="status.persist()">
-            <option value="original">歌词原文</option>
-            <option value="simplified">简体歌词</option>
-            <option value="traditional">繁體歌词</option>
-          </select>
-          <AccountButton class="topbar-account" compact />
-          <button class="ghost-action theme-toggle" type="button" :title="`外观：${currentTheme.label}（点击切换）`" :aria-label="`外观：${currentTheme.label}`" @click="cycleTheme">
-            <component :is="currentTheme.icon" :size="17" />
-          </button>
-          <button class="ghost-action" @click="openImportDialog">导入歌单</button>
-        </div>
-      </header>
-
       <Transition name="page" mode="out-in" @after-enter="handlePageEntered">
-      <section v-if="status.activeView === 'discover'" class="content" :key="searchedQuery ? 'discover-search' : 'discover-home'">
-        <button v-if="searchedQuery" class="ghost-action discovery-back" type="button" @click="returnToRecommendations"><ArrowLeft :size="17" />返回推荐</button>
-        <div class="page-title">
-          <div>
-            <p>{{ platformLabel }} · {{ currentQualityLabel() }}</p>
-            <h1>{{ searchedQuery || "在线音乐" }}</h1>
-          </div>
-          <div v-if="searchedQuery" class="cache-actions">
-            <button class="ghost-action" :disabled="!results.length" @click="saveResultsAsPlaylist">保存为歌单</button>
-            <button class="primary-action" :disabled="!results.length" @click="playAllResults">播放全部</button>
-          </div>
-        </div>
-        <div v-if="searchError" class="error-banner">{{ searchError }}</div>
-        <HandoffCard v-if="!searchedQuery" />
+      <section v-if="status.activeView === 'discover'" class="content" key="discover">
+        <PageHeader title="主页" />
+        <HandoffCard />
         <RecommendationFeed
-          v-if="!searchedQuery"
           :tracks="recommendationTracks"
           :recent-tracks="recentTracks"
           :playlists="playlists.items"
@@ -1415,29 +1359,57 @@ watch(
           :mood="recommendationMood"
           :personalized="recommendationPersonal"
           @play="playTrack"
-          @queue="queueTrack"
-          @queue-next="queueTrackNext"
           @open="openTrack"
+          @menu="openSongMenu({ ...$event, recommend: true })"
+          @more="openFeedMenu"
           @refresh="refreshRecommendations"
           @mood="chooseRecommendationMood"
           @play-all="playRecommendations"
-          @queue-all="queueRecommendations"
-          @queue-next-all="queueRecommendationsNext"
           @playlist="openRecommendedPlaylist"
-          @like="likeRecommendation"
-          @less="suggestLessRecommendation"
         />
-        <SongList
-          v-else
-          :items="results"
-          :loading="searchLoading"
-          empty-text="没有找到匹配的歌曲，换个关键词试试，或返回推荐。"
-          @play="playTrack"
-          @queue="queueTrack"
-          @queue-next="queueTrackNext"
-          @open="openTrack"
-          @menu="openSongMenu"
-        />
+      </section>
+
+      <section v-else-if="status.activeView === 'search'" class="content" key="search">
+        <PageHeader title="搜索" />
+        <form class="search-box search-box--main" role="search" @submit.prevent="runSearch">
+          <Search :size="20" />
+          <input v-model="query" type="search" enterkeyhint="search" aria-label="搜索歌曲、艺人或音乐链接" placeholder="歌曲、艺人或音乐链接" @input="handleSearchInput" @keydown.esc.prevent="clearSearchState" />
+          <button v-if="query || searchedQuery" class="search-box__clear" type="button" aria-label="清空搜索" @click="clearSearchState"><X :size="18" /></button>
+          <button type="submit" :disabled="searchLoading">搜索</button>
+        </form>
+        <div class="search-scopes" role="radiogroup" aria-label="搜索平台">
+          <button
+            v-for="item in platformOptions"
+            :key="item.id"
+            type="button"
+            role="radio"
+            class="search-scope"
+            :class="{ 'is-active': status.searchPlatform === item.id }"
+            :aria-checked="status.searchPlatform === item.id"
+            @click="status.searchPlatform = item.id; status.persist()"
+          >{{ item.label }}</button>
+        </div>
+        <div v-if="searchError" class="error-banner">{{ searchError }}</div>
+        <template v-if="searchedQuery">
+          <div class="search-results__head">
+            <p>{{ searchLoading ? "正在搜索…" : `${results.length} 首` }}</p>
+            <div>
+              <button class="ghost-action" :disabled="!results.length" @click="saveResultsAsPlaylist">存为歌单</button>
+              <button class="primary-action" :disabled="!results.length" @click="playAllResults"><Play :size="15" />播放</button>
+            </div>
+          </div>
+          <SongList
+            :items="results"
+            :loading="searchLoading"
+            empty-text="没有找到匹配的歌曲"
+            @play="playTrack"
+            @queue="queueTrack"
+            @queue-next="queueTrackNext"
+            @open="openTrack"
+            @menu="openSongMenu"
+          />
+        </template>
+        <p v-else class="search-hint">在 {{ platformLabel }} 中搜索</p>
       </section>
 
       <section v-else-if="status.activeView === 'recommendation' && recommendationDetail" class="content" :key="`recommendation:${recommendationDetail.id}`">
@@ -1456,7 +1428,6 @@ watch(
           @replace="replacePlaylistQueue(recommendationDetail)"
           @append="appendPlaylistQueue(recommendationDetail)"
           @next="nextPlaylistQueue(recommendationDetail)"
-          @show-queue="openQueueView"
           @play="playTrack"
           @queue="queueTrack"
           @queue-next="queueTrackNext"
@@ -1466,12 +1437,8 @@ watch(
       </section>
 
       <section v-else-if="status.activeView === 'queue'" class="content" key="queue">
-        <div class="page-title">
-          <div>
-            <p>当前播放</p>
-            <h1>播放队列</h1>
-          </div>
-        </div>
+        <button class="page-back page-back--phone" type="button" @click="navigate('library')"><ChevronLeft :size="20" />资料库</button>
+        <PageHeader title="播放队列" />
         <HandoffCard />
         <QueuePanel embedded />
       </section>
@@ -1492,7 +1459,6 @@ watch(
           @append="appendPlaylistQueue(activePlaylist)"
           @next="nextPlaylistQueue(activePlaylist)"
           @delete="deleteActivePlaylist"
-          @show-queue="openQueueView"
           @play="playTrack"
           @queue="queueTrack"
           @queue-next="queueTrackNext"
@@ -1500,14 +1466,17 @@ watch(
           @menu="openSongMenu($event, activePlaylist.id)"
         />
         <template v-else>
-          <div class="page-title">
-            <div>
-              <p>浏览器本地保存，可随时导入新的平台歌单</p>
-              <h1>我的歌单</h1>
-            </div>
-            <button class="primary-action" @click="openImportDialog">导入歌单</button>
+          <PageHeader title="资料库">
+            <button class="ghost-action page-header__import" type="button" aria-label="导入歌单" @click="openImportDialog"><Plus :size="17" /><span>导入歌单</span></button>
+          </PageHeader>
+          <nav class="library-links" aria-label="资料库">
+            <button type="button" @click="navigate('queue')"><Disc3 :size="22" />播放队列<ChevronRight :size="18" /></button>
+            <button type="button" @click="navigate('cache')"><HardDrive :size="22" />本地缓存<ChevronRight :size="18" /></button>
+          </nav>
+          <div class="section-head library-head">
+            <h2 class="section-title">歌单</h2>
           </div>
-          <div v-if="!playlists.items.length" class="list-state">还没有歌单，粘贴 Apple Music 歌单链接开始导入</div>
+          <div v-if="!playlists.items.length" class="list-state">还没有歌单，点“导入歌单”从音乐平台导入</div>
           <TransitionGroup v-else name="playlist" tag="div" class="playlist-grid">
             <div
               v-for="playlist in playlists.items"
@@ -1521,7 +1490,7 @@ watch(
                   <ListMusic v-else :size="32" />
                 </span>
                 <strong class="playlist-card__name">{{ playlist.name }}</strong>
-                <small class="playlist-card__meta">{{ playlist.tracks.length }} 首音乐</small>
+                <small class="playlist-card__meta">{{ playlist.tracks.length }} 首</small>
               </button>
               <button
                 class="playlist-card__menu"
@@ -1538,23 +1507,16 @@ watch(
       </section>
 
       <section v-else class="content" key="cache">
-        <div class="page-title">
-          <div>
-            <p>仅浏览器本地，不代表 Telegram 后端缓存</p>
-            <h1>本地缓存</h1>
-          </div>
-          <div class="cache-actions">
-            <button class="ghost-action" @click="refreshLocalCache"><RefreshCcw :size="16" />刷新</button>
-            <button class="primary-action danger" :disabled="!cacheItems.length" @click="clearLocalCache">
-              <Trash2 :size="16" />清空
-            </button>
-          </div>
-        </div>
+        <button class="page-back page-back--phone" type="button" @click="navigate('library')"><ChevronLeft :size="20" />资料库</button>
+        <PageHeader title="本地缓存">
+          <button class="ghost-action" type="button" aria-label="刷新" title="刷新" @click="refreshLocalCache"><RefreshCcw :size="16" /></button>
+          <button class="ghost-action" type="button" :disabled="!cacheItems.length" @click="clearLocalCache"><Trash2 :size="16" />清空</button>
+        </PageHeader>
         <div class="cache-meter">
           <span :style="{ width: `${cacheSummary.ratio * 100}%` }"></span>
         </div>
-        <p class="cache-summary">{{ formatSize(cacheSummary.used) }} / {{ formatSize(cacheSummary.limit) }}</p>
-        <div v-if="cacheLoading" class="list-state">正在读取本地缓存...</div>
+        <p class="cache-summary">此浏览器已用 {{ formatSize(cacheSummary.used) }} / {{ formatSize(cacheSummary.limit) }}</p>
+        <div v-if="cacheLoading" class="list-state">正在读取…</div>
         <div v-else class="cache-list">
           <TransitionGroup v-if="cacheItems.length" name="cache" tag="div" class="cache-list__rows">
             <div v-for="item in cacheItems" :key="item.key" class="cache-item">
@@ -1562,15 +1524,15 @@ watch(
                 <strong>{{ item.track?.title || item.task?.title || item.key }}</strong>
                 <small>
                   {{ item.track?.artist || item.task?.artist || item.task?.platform }}
-                  · {{ item.blob?.size ? `音频已缓存 ${formatSize(item.blob.size)}` : "仅任务记录" }}
+                  · {{ item.blob?.size ? formatSize(item.blob.size) : "仅任务记录" }}
                 </small>
               </span>
-              <button class="mini-button" title="删除" @click="removeCacheItem(item)">
+              <button class="mini-button" title="删除" aria-label="删除缓存" @click="removeCacheItem(item)">
                 <Trash2 :size="16" />
               </button>
             </div>
           </TransitionGroup>
-          <div v-else class="list-state">暂无本地缓存记录</div>
+          <div v-else class="list-state">暂无缓存</div>
         </div>
       </section>
       </Transition>
@@ -1609,6 +1571,11 @@ watch(
         <button type="button" role="menuitem" @click="runSongMenu('play')"><Play :size="16" />立即播放</button>
         <button type="button" role="menuitem" @click="runSongMenu('next')"><ListStart :size="16" />下一首播放</button>
         <button type="button" role="menuitem" @click="runSongMenu('queue')"><ListPlus :size="16" />加入播放队列</button>
+        <template v-if="songMenu.recommend">
+          <div class="context-menu__divider"></div>
+          <button type="button" role="menuitem" @click="runSongMenu('like')"><Heart :size="16" />喜欢</button>
+          <button type="button" role="menuitem" @click="runSongMenu('less')"><Ban :size="16" />少推荐类似音乐</button>
+        </template>
         <div class="context-menu__divider"></div>
         <p class="context-menu__label">添加到歌单</p>
         <button v-for="item in songMenuPlaylists" :key="item.id" type="button" role="menuitem" @click="runSongMenu('add', item.id)"><ListMusic :size="16" /><span>{{ item.name }}</span></button>
@@ -1617,6 +1584,21 @@ watch(
           <div class="context-menu__divider"></div>
           <button type="button" role="menuitem" class="is-danger" @click="runSongMenu('remove')"><Trash2 :size="16" />从此歌单移除</button>
         </template>
+      </div>
+    </Transition>
+
+    <Transition name="context">
+      <div
+        v-if="feedMenu.open"
+        class="context-menu"
+        :style="{ left: `${feedMenu.x}px`, top: `${feedMenu.y}px` }"
+        role="menu"
+        aria-label="推荐歌曲"
+        @pointerdown.stop
+        @contextmenu.prevent
+      >
+        <button type="button" role="menuitem" @click="runFeedMenu('next')"><ListStart :size="16" />全部下一首播放</button>
+        <button type="button" role="menuitem" @click="runFeedMenu('queue')"><ListPlus :size="16" />全部加入播放队列</button>
       </div>
     </Transition>
 

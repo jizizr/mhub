@@ -5,6 +5,17 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// The appearance preference lives in the settings popover.
+async function settingsSelect(page, title) {
+  if (!await page.locator(".listening-settings.is-open").count()) await page.locator(".listening-settings__trigger:visible").first().click();
+  const select = page.locator(`.listening-settings.is-open select[title='${title}']`).first();
+  // Close the popover after a change so it never covers later clicks.
+  return {
+    selectOption: async (value) => { await select.selectOption(value); await page.keyboard.press("Escape"); },
+    inputValue: async () => { const value = await select.inputValue(); await page.keyboard.press("Escape"); return value; },
+  };
+}
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const playwright = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE) : "playwright");
 let server;
@@ -61,7 +72,7 @@ try {
       await page.emulateMedia({ colorScheme: os === "dark" ? "light" : "dark" });
       await verify(theme === "system" ? !isDark : isDark, "OS change");
       await page.setViewportSize({ width: 1280, height: 900 });
-      await page.locator(".theme-toggle").click();
+      await (await settingsSelect(page, "外观")).selectOption({ system: "light", light: "dark", dark: "system" }[theme]);
       await verify(theme === "light" || (theme === "dark" && os === "light"), "app theme toggle");
     } finally { await context.close(); }
   }

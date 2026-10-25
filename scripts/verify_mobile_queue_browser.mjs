@@ -54,7 +54,7 @@ async function inspectDock(page, scenario, full = false) {
     const navBox = nav.getBoundingClientRect();
     const footerStyle = getComputedStyle(footer);
     const navStyle = getComputedStyle(nav);
-    const navHits = full ? [] : [...nav.querySelectorAll(".nav-item")].map(button => {
+    const navHits = full ? [] : [...nav.querySelectorAll(".nav-item")].filter(button => button.getClientRects().length).map(button => {
       const box = button.getBoundingClientRect();
       return button.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
     });
@@ -233,7 +233,8 @@ try {
         await inspectOverlay(page, `${scenario}:collapsed-player-drawer`);
         await page.locator(".queue-panel:not(.queue-panel--embedded) button[title='关闭']").click();
         await settle(page);
-        await page.locator(".sidebar .nav-item").nth(1).click();
+        await page.locator(".nav-item--library").click();
+        await page.locator(".library-links").getByRole("button", { name: "播放队列" }).click();
         await page.locator(".queue-panel--embedded").waitFor();
         await settle(page);
         page.once("dialog", dialog => dialog.accept());
@@ -246,7 +247,7 @@ try {
             playerHidden: document.querySelector('.player-bar').getClientRects().length === 0,
             reserved: parseFloat(getComputedStyle(app).paddingBottom),
             actual: innerHeight - nav.top,
-            navClickable: [...document.querySelectorAll('.sidebar .nav-item')].every(button => {
+            navClickable: [...document.querySelectorAll('.sidebar .nav-item')].filter(button => button.getClientRects().length).every(button => {
               const r = button.getBoundingClientRect();
               return button.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
             }),

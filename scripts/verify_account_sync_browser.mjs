@@ -142,7 +142,7 @@ try {
     status.position = 42_000;
     account.publishPlayback({ flush: true });
   }, [track(1, "晴天"), track(3, "七里香")]);
-  await b.page.getByRole("button", { name: /在线音乐/ }).first().click();
+  await b.page.getByRole("button", { name: /^主页$/ }).first().click();
   await b.page.locator(".handoff").getByText("七里香").waitFor({ timeout: 10_000 });
   results.handoff = await b.page.locator(".handoff").innerText();
 

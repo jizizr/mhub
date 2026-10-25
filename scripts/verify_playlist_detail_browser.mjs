@@ -122,6 +122,7 @@ async function createFixture(base, viewport, { homeIds = ["current"], searchIds 
       }
       if (url.pathname.endsWith("/lyrics")) return json({ lines: [] });
       if (/\/playbacks\/[^/]+$/.test(url.pathname)) return json(tasks.get(decodeURIComponent(url.pathname.split("/").at(-1))) || { detail: "Synthetic task not found" }, tasks.has(decodeURIComponent(url.pathname.split("/").at(-1))) ? 200 : 404);
+      if (url.pathname === "/api/v1/auth/config") return json({ enabled: false });
       log.unexpected.push(url.pathname); return json({ detail: "Unstubbed API request blocked" }, 500);
     }
     if (url.pathname === "/health") return json({ status: "ok" });
@@ -140,12 +141,12 @@ async function createFixture(base, viewport, { homeIds = ["current"], searchIds 
     Math.random = () => .73;
   }, { queue: originalIds.map(track), local: { id: "synthetic-local", name: "普通测试歌单", platform: "applemusic", cover, tracks: localIds.map(track) }, shuffle: viewport.width < 880 });
   await page.goto(base, { waitUntil: "domcontentloaded" });
-  await page.locator(".recommend-personal-card").first().waitFor();
+  await page.locator(".artwork-rail--featured .artwork-card").first().waitFor();
   return { page, context, log, slowRelease };
 }
 
 async function openCard(page, name) {
-  const card = page.locator(".recommend-personal-card").filter({ hasText: name });
+  const card = page.locator(".artwork-rail--featured .artwork-card").filter({ hasText: name });
   await card.scrollIntoViewIfNeeded();
   // click() can still scroll a large mobile card into its action point after
   // scrollIntoViewIfNeeded(). Capture the actual entry position at dispatch,
@@ -169,7 +170,7 @@ async function inspectLayout(page, scenario) {
       const rect = element.getBoundingClientRect();
       return element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
     });
-    check(scenario, `action is reachable: ${(await button.locator("strong").textContent())}`, hit);
+    check(scenario, `action is reachable: ${(await button.textContent()).trim()}`, hit);
   }
   await page.evaluate(() => window.scrollTo(0, document.scrollingElement.scrollHeight)); await settle(page);
   const last = await page.locator(".playlist-detail .song-row").last().boundingBox();
@@ -210,26 +211,29 @@ async function verifySingleTrackAppend(base, viewport) {
       check(scenario, `${label}: persists only queue changes`, JSON.stringify(persisted.ids) === JSON.stringify(expected) && persisted.playlists === savedPlaylists, persisted.ids);
     }
 
-    const feedButton = page.locator(".recommend-list-row").filter({ hasText: "测试歌曲 recommend-append" }).getByRole("button", { name: "加入播放队列", exact: true });
+    // Feed rows keep per-song actions in their ⋯ menu.
+    const viaMenu = (row, item, more = "更多操作") => ({ click: async () => { await row.getByRole("button", { name: more }).click(); await page.getByRole("menuitem", { name: item, exact: true }).click(); } });
+    const feedButton = viaMenu(page.locator(".recommend-list-row").filter({ hasText: "测试歌曲 recommend-append" }), "加入播放队列");
     await appendFrom("recommendation song plus", feedButton, "recommend-append");
     await appendFrom("repeated recommendation plus", feedButton, "recommend-append", { existing: true });
-    const currentButton = page.locator(".recommend-list-row").filter({ hasText: "测试歌曲 current" }).getByRole("button", { name: "加入播放队列", exact: true });
+    const currentButton = viaMenu(page.locator(".recommend-list-row").filter({ hasText: "测试歌曲 current" }), "加入播放队列");
     await appendFrom("currently playing song plus", currentButton, "current", { existing: true });
-    await appendFrom("recommendation batch append", page.locator(".recommend-hero__actions").getByRole("button", { name: "加入播放队列", exact: true }), "recommend-batch");
+    await appendFrom("recommendation batch append", viaMenu(page.locator(".home-actions"), "全部加入播放队列", "更多推荐操作"), "recommend-batch");
 
     await openCard(page, "测试专属歌单");
     await page.locator(".playlist-detail .song-row").last().waitFor();
     const recommendationButton = page.locator(".playlist-detail .song-row").filter({ hasText: "测试歌曲 r-1" }).filter({ has: page.locator(".song-row__title", { hasText: /^测试歌曲 r-1$/ }) }).getByRole("button", { name: "加入播放队列", exact: true });
     await appendFrom("recommended playlist song plus", recommendationButton, "r-1");
 
-    await page.locator(".sidebar .nav-item").filter({ hasText: "我的歌单" }).click();
+    await page.locator(".sidebar .nav-item").filter({ hasText: /^资料库$|^歌单$/ }).filter({ visible: true }).first().click();
     await page.locator(".playlist-card").filter({ hasText: "普通测试歌单" }).click();
     await page.locator(".playlist-detail .song-row").last().waitFor();
     const localButton = page.locator(".playlist-detail .song-row").filter({ hasText: "测试歌曲 local-1" }).getByRole("button", { name: "加入播放队列", exact: true });
     await appendFrom("local playlist song plus", localButton, "local-1");
 
-    await page.getByRole("textbox", { name: "搜索歌曲或艺人" }).fill("测试追加歌曲");
-    await page.locator(".search-box--main button[type='submit']").click();
+    await page.locator(".nav-item--search").click();
+    await page.getByRole("searchbox", { name: "搜索歌曲、艺人或音乐链接" }).fill("测试追加歌曲");
+    await page.getByRole("searchbox", { name: "搜索歌曲、艺人或音乐链接" }).press("Enter");
     await page.locator(".song-list .song-row").filter({ hasText: "测试歌曲 search-append" }).waitFor();
     const searchButton = page.locator(".song-list .song-row").filter({ hasText: "测试歌曲 search-append" }).getByRole("button", { name: "加入播放队列", exact: true });
     await appendFrom("search result song plus", searchButton, "search-append");
@@ -290,13 +294,13 @@ try {
       await settle(page);
       check(scenario, "browser Back closes the full player without leaving detail", await page.locator(".full-player").count() === 0 && (await snapshot(page)).activeView === "recommendation");
       const playing = await snapshot(page);
-      await page.locator(".playlist-detail__actions > button").filter({ hasText: "加入播放队列" }).click();
+      await page.locator(".playlist-detail__actions > button").filter({ hasText: "加入队列" }).click();
       await settle(page);
       const appended = await snapshot(page);
       const expectedAppend = [...originalIds, ...recommendationIds.filter(id => !originalIds.includes(id))];
       check(scenario, "append retains the old queue and adds all new songs at its end", JSON.stringify(appended.ids) === JSON.stringify(expectedAppend), appended.ids);
       check(scenario, "append does not interrupt the active audio", appended.current === "current" && appended.audioSrc === playing.audioSrc && !appended.audioPaused && appended.audioTime >= playing.audioTime && appended.events.filter(event => ["pause", "emptied", "loadstart"].includes(event.type)).length === playing.events.filter(event => ["pause", "emptied", "loadstart"].includes(event.type)).length, { playing, appended });
-      await page.locator(".playlist-detail__actions > button").filter({ hasText: "下一首播放" }).click();
+      await page.locator(".playlist-detail__actions > button").filter({ hasText: "下一首" }).click();
       await settle(page);
       const next = await snapshot(page);
       const expectedNext = ["current", ...recommendationIds.filter(id => id !== "current"), "keep", "tail"];
@@ -306,14 +310,14 @@ try {
         await page.locator(".player-bar button[title^='播放顺序：']").click();
         await page.locator(".player-bar .play-mode-option").filter({ hasText: "随机播放" }).click();
       }
-      await page.locator(".playlist-detail__actions > button").filter({ hasText: "替换队列并播放" }).click();
+      await page.locator(".playlist-detail__action--primary").click();
       await page.waitForFunction(() => { const audio = document.querySelector("audio"); return audio && !audio.paused && audio.currentTime > .15; });
       await settle(page);
       const replaced = await snapshot(page);
       check(scenario, "replace removes old songs and starts the shuffled collection", replaced.ids.length === 57 && [...replaced.ids].sort().join() === [...recommendationIds].sort().join() && replaced.shuffle === "on" && replaced.current !== recommendationIds[0] && replaced.playIndex === 0 && replaced.state === "playing", replaced);
       check(scenario, "shuffle retains the collection's original order", JSON.stringify(replaced.originalIds) === JSON.stringify(recommendationIds), replaced.originalIds);
-      await page.locator(".playlist-detail__back").click();
-      await page.locator(".recommend-personal-card").first().waitFor();
+      await page.locator(".playlist-detail .page-back").click();
+      await page.locator(".artwork-rail--featured .artwork-card").first().waitFor();
       await settle(page);
       const returned = await page.evaluate(() => ({ scroll: window.scrollY, focus: document.activeElement?.dataset?.recommendationId }));
       check(scenario, "return restores the original recommendation position and focus", Math.abs(returned.scroll - returnScroll) <= 3 && returned.focus === "pl.synthetic-long", { returned, returnScroll });
@@ -321,24 +325,24 @@ try {
       await page.locator(".playlist-detail .song-row").last().waitFor();
       check(scenario, "recommended albums use the same detail and actions", await page.locator(".playlist-detail .song-row").count() === 3 && await page.locator(".playlist-detail__actions > button").count() === 3);
       check(scenario, "album detail preserves the full canonical URL and numeric catalog ID", log.resolves.at(-1)?.collection === "https://music.apple.com/cn/album/1624000713" && log.resolves.at(-1)?.platform === "applemusic" && log.resolves.at(-1)?.limit === null, log.resolves.at(-1));
-      await page.locator(".sidebar .nav-item").filter({ hasText: "我的歌单" }).click();
+      await page.locator(".sidebar .nav-item").filter({ hasText: /^资料库$|^歌单$/ }).filter({ visible: true }).first().click();
       await page.locator(".playlist-card").filter({ hasText: "普通测试歌单" }).click();
       await page.locator(".playlist-detail .song-row").last().waitFor();
       check(scenario, "ordinary playlists share all three explicit actions", await page.locator(".playlist-detail__actions > button").count() === 3 && await page.locator(".playlist-detail .song-row").count() === 3);
-      await page.locator(".sidebar .nav-item").filter({ hasText: "在线音乐" }).click();
+      await page.locator(".sidebar .nav-item").filter({ hasText: "主页" }).click();
       await openCard(page, "失败后重试");
       await page.getByRole("alert").filter({ hasText: "暂时无法打开" }).waitFor();
       check(scenario, "failed collection load has disabled actions and an explicit retry", await page.locator(".playlist-detail__actions > button:disabled").count() === 3);
       await page.getByRole("button", { name: "重新加载" }).click();
       await page.locator(".playlist-detail .song-row").last().waitFor();
       check(scenario, "retry loads the collection and enables actions", await page.locator(".playlist-detail .song-row").count() === 2 && await page.locator(".playlist-detail__actions > button:disabled").count() === 0);
-      await page.locator(".playlist-detail__back").click();
-      await page.locator(".recommend-personal-card").first().waitFor();
+      await page.locator(".playlist-detail .page-back").click();
+      await page.locator(".artwork-rail--featured .artwork-card").first().waitFor();
       await openCard(page, "延迟返回");
       await page.getByRole("status", { name: "正在加载歌单曲目" }).waitFor();
       const pending = await snapshot(page);
-      await page.locator(".playlist-detail__back").click();
-      await page.locator(".recommend-personal-card").first().waitFor();
+      await page.locator(".playlist-detail .page-back").click();
+      await page.locator(".artwork-rail--featured .artwork-card").first().waitFor();
       await openCard(page, "测试推荐专辑");
       await page.locator(".playlist-detail .song-row").last().waitFor();
       slowRelease(); await page.waitForTimeout(450);

@@ -11,6 +11,18 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// Quality and lyric preferences live in the settings popover (player bar on
+// desktop, page header on phones); open it once and return the select.
+async function settingsSelect(page, title) {
+  if (!await page.locator(".listening-settings.is-open").count()) await page.locator(".listening-settings__trigger:visible").first().click();
+  const select = page.locator(`.listening-settings.is-open select[title='${title}']`).first();
+  // Close the popover after a change so it never covers later clicks.
+  return {
+    selectOption: async (value) => { await select.selectOption(value); await page.keyboard.press("Escape"); },
+    inputValue: async () => { const value = await select.inputValue(); await page.keyboard.press("Escape"); return value; },
+  };
+}
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const web = path.resolve(process.env.MUSIC_WEB_DIR || path.join(root, "web"));
 const playwright = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE) : "playwright");
@@ -98,6 +110,7 @@ async function createFixture({ width = 1280, height = 900 } = {}, moduleControl 
         return route.fulfill({ status: 200, contentType: "audio/wav", headers: { ...cors, "content-length": String(audio.length), "accept-ranges": "bytes" }, body: audio });
       }
       if (/\/playbacks\/[^/]+$/.test(url.pathname)) return json(log.tasks.get(decodeURIComponent(url.pathname.split("/").at(-1))) || {}, 200);
+      if (url.pathname === "/api/v1/auth/config") return json({ enabled: false });
       log.unexpected.push(url.pathname); return json({ detail: "Unstubbed API blocked" }, 500);
     }
     if (url.pathname === "/health") return json({ status: "ok" });
@@ -112,7 +125,7 @@ async function createFixture({ width = 1280, height = 900 } = {}, moduleControl 
     }
   }, { tracks });
   await page.goto(base, { waitUntil: "domcontentloaded" });
-  await page.locator("select[title='歌词文字']").waitFor();
+  await page.locator(".listening-settings__trigger:visible").first().waitFor();
   return { context, page, log };
 }
 async function start(page) {
@@ -147,7 +160,7 @@ try {
     const { page, context, log } = await createFixture(viewport);
     const scenario = `${viewport.width}x${viewport.height}`;
     try {
-      await page.locator("select[title='歌词文字']").selectOption("simplified");
+      await (await settingsSelect(page, "歌词文字")).selectOption("simplified");
       await start(page);
       const converted = await expectText(page, "繁体传统与爱");
       const observed = await text(page);
@@ -176,15 +189,15 @@ try {
       check(`${scenario}: switching songs resets per-song override to Simplified preference`, await expectText(page, "繁体传统与爱"), await text(page));
       await page.locator(".full-player button[title='收起']").click();
       await page.locator(".full-player").waitFor({ state: "detached" });
-      await page.locator("select[title='歌词文字']").selectOption("original");
+      await (await settingsSelect(page, "歌词文字")).selectOption("original");
       await page.locator(".player-bar .track-info").click();
       check(`${scenario}: Original setting preserves source text and translation`, await expectText(page, "繁體傳統與愛") && (await text(page)).includes("這裡聽見溫柔"), await text(page));
       check(`${scenario}: Original setting hides conversion toggle`, await page.locator(".lyric-script-toggle").count() === 0);
       await page.locator(".full-player button[title='收起']").click();
       await page.locator(".full-player").waitFor({ state: "detached" });
-      await page.locator("select[title='歌词文字']").selectOption("simplified");
+      await (await settingsSelect(page, "歌词文字")).selectOption("simplified");
       await page.reload({ waitUntil: "domcontentloaded" });
-      check(`${scenario}: Simplified preference persists after reload`, await page.locator("select[title='歌词文字']").inputValue() === "simplified");
+      check(`${scenario}: Simplified preference persists after reload`, await (await settingsSelect(page, "歌词文字")).inputValue() === "simplified");
       await start(page);
       check(`${scenario}: persisted preference converts after reload`, await expectText(page, "繁体传统与爱"), await text(page));
       check(`${scenario}: production requests only hashed OpenCC assets`, log.requests.filter(isConverterRequest).every(request => /^\/assets\/(?:opencc-|t2cn-|cn2t-)/.test(request)), log.requests.filter(isConverterRequest));
@@ -260,7 +273,7 @@ try {
       const moduleControl = { failSimplified: true };
       const { page, context, log } = await createFixture({}, moduleControl);
       try {
-        await page.locator("select[title='歌词文字']").selectOption("simplified");
+        await (await settingsSelect(page, "歌词文字")).selectOption("simplified");
         await start(page);
         const retry = page.getByRole("button", { name: "转换失败 · 重试" });
         await retry.waitFor({ timeout: 6000 });
@@ -283,13 +296,13 @@ try {
       const holdSimplified = new Promise(resolve => { release = resolve; });
       const { page, context, log } = await createFixture({}, { holdSimplified });
       try {
-        await page.locator("select[title='歌词文字']").selectOption("simplified");
+        await (await settingsSelect(page, "歌词文字")).selectOption("simplified");
         await start(page);
         await page.getByRole("status").filter({ hasText: "正在转换" }).waitFor({ timeout: 6000 });
         check("delayed dictionary leaves lyrics readable while loading", (await text(page)).includes("繁體傳統與愛"), await text(page));
         await page.locator(".full-player button[title='收起']").click();
         await page.locator(".full-player").waitFor({ state: "detached" });
-        await page.locator("select[title='歌词文字']").selectOption("original");
+        await (await settingsSelect(page, "歌词文字")).selectOption("original");
         await page.locator(".player-bar .track-info").click();
         await expectText(page, "繁體傳統與愛");
         release();
@@ -308,7 +321,7 @@ try {
         const { page, context, log } = await createFixture(viewport, control);
         const label = `${viewport.width} ${failure}`;
         try {
-          await page.locator("select[title='歌词文字']").selectOption("simplified");
+          await (await settingsSelect(page, "歌词文字")).selectOption("simplified");
           await page.locator(".player-bar .player-controls button[title='播放']").click();
           await page.locator(".player-bar .track-info").click();
           const fallback = page.locator(".lyrics-fallback");

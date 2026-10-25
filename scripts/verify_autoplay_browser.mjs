@@ -4,6 +4,18 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+// Quality and lyric preferences live in the settings popover (player bar on
+// desktop, page header on phones); open it once and return the select.
+async function settingsSelect(page, title) {
+  if (!await page.locator(".listening-settings.is-open").count()) await page.locator(".listening-settings__trigger:visible").first().click();
+  const select = page.locator(`.listening-settings.is-open select[title='${title}']`).first();
+  // Close the popover after a change so it never covers later clicks.
+  return {
+    selectOption: async (value) => { await select.selectOption(value); await page.keyboard.press("Escape"); },
+    inputValue: async () => { const value = await select.inputValue(); await page.keyboard.press("Escape"); return value; },
+  };
+}
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const web = path.join(root, 'web');
 const pw = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE) : 'playwright');
@@ -73,6 +85,7 @@ async function fixture(width = 390, options = {}) {
         return route.fulfill({ status: 200, contentType: 'audio/wav', headers, body: bytes });
       }
       if (/\/playbacks\/[^/]+$/.test(url.pathname)) return json(tasks.get(decodeURIComponent(url.pathname.split('/').at(-1))) || {}, 200);
+      if (url.pathname === "/api/v1/auth/config") return json({ enabled: false });
       log.unexpected.push(url.pathname); return json({ detail: 'Unstubbed API blocked' }, 500);
     }
     if (url.pathname === '/health') return json({ status: 'ok' });
@@ -113,7 +126,7 @@ try {
       await play(page);
       await page.locator('.queue-autoplay__toggle').click();
       await until(page, v => v.autoState === 'loading');
-      await page.locator('select[title="音质"]').selectOption('hires');
+      await (await settingsSelect(page, "音质")).selectOption('hires');
       const before = await snapshot(page);
       release();
       const ready = await until(page, v => v.ids.length === 3);

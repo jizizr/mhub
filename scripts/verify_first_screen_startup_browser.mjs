@@ -51,6 +51,7 @@ try {
         state.homes += 1;
         return json({ tracks: [{ id: "100", platform: "applemusic", song: "合成首屏样本", singer: "合成艺人", cover: "" }], playlists: [], tags: [] });
       }
+      if (url.pathname === "/api/v1/auth/config") return json({ enabled: false });
       if (url.pathname === "/api/v1/lyrics") {
         state.lyrics += 1;
         return json({ available: false, plain: "", translation: "" });
@@ -86,11 +87,13 @@ try {
     try {
       await page.goto(origin, { waitUntil: "domcontentloaded" });
       await page.locator(".recommend-list-row__text strong").waitFor({ timeout: 5000 });
-      check(name("recommendations render while platform GET is unresolved"), state.homes === 1 && state.platforms === 1 && await page.locator(".platform-list button").count() === 0);
+      check(name("recommendations render while platform GET is unresolved"), state.homes === 1 && state.platforms === 1 && !(await page.locator(".nav-item--search").isDisabled()));
       check(name("first screen does not request FullPlayer or lyric parser chunks"), !state.requests.some((value) => /\/assets\/(FullPlayer|lyrics)-/.test(value)));
       check(name("first screen makes no lyric request"), state.lyrics === 0);
       platformGate.resolve();
-      await page.locator(".platform-list button").waitFor({ state: "attached" });
+      await page.locator(".nav-item--search").click();
+      await page.locator(".search-scopes button").first().waitFor({ state: "attached" });
+      await page.locator(".nav-item--discover").click();
       await page.locator(".track-info").click();
       await page.locator(".full-player").waitFor();
       await page.waitForFunction(() => window.__playerListeners.added === 1);
