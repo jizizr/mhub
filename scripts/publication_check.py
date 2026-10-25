@@ -8,7 +8,7 @@ import sys
 ROOT_FILES = {
     '.gitignore', '.gitattributes', '.dockerignore', '.env.example', 'Cargo.toml', 'Cargo.lock',
     'Dockerfile', 'compose.yaml', 'config.example.toml', 'README.md',
-    'CONTRIBUTING.md', 'SECURITY.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.txt',
+    'AGENTS.md', 'CONTRIBUTING.md', 'SECURITY.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.txt',
 }
 DOCS = {'docs/deployment.md', 'docs/architecture.md'}
 PATTERNS = {

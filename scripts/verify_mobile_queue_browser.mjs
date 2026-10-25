@@ -52,6 +52,8 @@ async function inspectDock(page, scenario, full = false) {
       return { title: button.title, pressed: button.getAttribute("aria-pressed"), visible: x >= 0 && x < innerWidth && y >= 0 && y < innerHeight, hit: button.contains(hit) };
     });
     const navBox = nav.getBoundingClientRect();
+    const footerStyle = getComputedStyle(footer);
+    const navStyle = getComputedStyle(nav);
     const navHits = full ? [] : [...nav.querySelectorAll(".nav-item")].map(button => {
       const box = button.getBoundingClientRect();
       return button.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
@@ -63,6 +65,13 @@ async function inspectDock(page, scenario, full = false) {
       footerInside: rect.top >= 0 && rect.bottom <= innerHeight + 1,
       mobileSeparation: innerWidth > 880 || full || rect.bottom <= navBox.top + 1,
       noHorizontalOverflow: document.documentElement.scrollWidth <= innerWidth + 1,
+      floating: rect.left >= 12 && rect.right <= innerWidth - 12 && navBox.left >= 12 && navBox.right <= innerWidth - 12
+        && parseFloat(footerStyle.borderRadius) >= 20 && parseFloat(navStyle.borderRadius) >= 24,
+      compact: Math.abs(rect.height - 56) < 1 && Math.abs(navBox.height - 52) < 1,
+      dockGap: navBox.top - rect.bottom,
+      navBottomGap: innerHeight - navBox.bottom,
+      expectedBottomGap: parseFloat(getComputedStyle(document.querySelector('.app')).getPropertyValue('--mobile-dock-bottom')),
+      visibleSeek: [...footer.querySelectorAll('input[type="range"]')].some(input => input.getClientRects().length > 0),
       progressInside: !progressRect || (progressRect.left >= 0 && progressRect.right <= innerWidth + 1 && progressRect.top >= rect.top && progressRect.bottom <= innerHeight),
     };
   }, { full });
@@ -79,10 +88,15 @@ async function inspectDock(page, scenario, full = false) {
   }
   if (!full && state.viewportWidth <= 390) {
     check(scenario, "compact player retains at least 80px for track text", state.titleWidth >= 80, { width: state.titleWidth });
-    check(scenario, "compact player shows play, next and queue controls", [/^(播放|暂停|正在缓冲，点击暂停)$/, /^下一首$/, /^队列$/].every(pattern => state.controls.some(item => pattern.test(item.title))), state.controls);
+    check(scenario, "compact player shows play and next; queue remains in navigation", [/^(播放|暂停|正在缓冲，点击暂停)$/, /^下一首$/].every(pattern => state.controls.some(item => pattern.test(item.title))), state.controls);
   }
   check(scenario, "navigation remains clickable; player and navigation do not overlap", state.navHits.every(Boolean) && state.mobileSeparation, state);
   check(scenario, "page has no horizontal overflow", state.noHorizontalOverflow, state);
+  if (!full && state.viewportWidth <= 880) {
+    check(scenario, "mobile player and navigation float as compact separate pills", state.floating && state.compact && state.dockGap >= 7, state);
+    check(scenario, "bottom dock respects the safe area", state.navBottomGap >= 8 && (!Number.isFinite(state.expectedBottomGap) || state.navBottomGap >= state.expectedBottomGap - 1), state);
+    check(scenario, "compact progress does not expose a native range over the feed", !state.visibleSeek, state);
+  }
 }
 
 async function inspectQueuePage(page, scenario, { removeLast = false } = {}) {
@@ -187,7 +201,7 @@ try {
         await inspectQueuePage(page, `${scenario}:shorter-viewport`);
         // Model the 34px bottom safe area without depending on host hardware.
         await page.evaluate(() => {
-          document.documentElement.style.setProperty("--bottom-nav-height", "86px");
+          document.documentElement.style.setProperty("--mobile-dock-bottom", "34px");
           document.documentElement.style.setProperty("--full-player-toolbar-height", "138px");
         });
         await inspectQueuePage(page, `${scenario}:safe-area-34`);
@@ -195,10 +209,14 @@ try {
       }
       await page.locator(".sidebar .nav-item").first().click();
       await settle(page);
-      await page.locator(".player-bar button[title='队列']").click();
-      await inspectOverlay(page, `${scenario}:drawer`);
-      await page.locator(".queue-panel:not(.queue-panel--embedded) button[title='关闭']").click();
-      await settle(page);
+      // On phones the compact transport keeps just play/next. The queue tab
+      // opens the queue page; its drawer shortcut is in the full player.
+      if (viewport.width > 880) {
+        await page.locator(".player-bar button[title='队列']").click();
+        await inspectOverlay(page, `${scenario}:drawer`);
+        await page.locator(".queue-panel:not(.queue-panel--embedded) button[title='关闭']").click();
+        await settle(page);
+      }
       await page.locator(".player-bar .track-info").click();
       await page.locator(".full-player").waitFor();
       await settle(page);
@@ -208,6 +226,33 @@ try {
         const screenshot = `/tmp/music-mobile-queue-${engine}-${viewport.width}x${viewport.height}-full.png`;
         await page.screenshot({ path: screenshot });
         console.log(JSON.stringify({ screenshot }));
+      }
+      if (viewport.width <= 880) {
+        await page.locator(".full-player .collapse-button").click();
+        await settle(page);
+        await inspectOverlay(page, `${scenario}:collapsed-player-drawer`);
+        await page.locator(".queue-panel:not(.queue-panel--embedded) button[title='关闭']").click();
+        await settle(page);
+        await page.locator(".sidebar .nav-item").nth(1).click();
+        await page.locator(".queue-panel--embedded").waitFor();
+        await settle(page);
+        page.once("dialog", dialog => dialog.accept());
+        await page.locator(".queue-panel--embedded button[title='清空队列']").click();
+        await settle(page);
+        const empty = await page.evaluate(() => {
+          const app = document.querySelector('.app');
+          const nav = document.querySelector('.sidebar').getBoundingClientRect();
+          return {
+            playerHidden: document.querySelector('.player-bar').getClientRects().length === 0,
+            reserved: parseFloat(getComputedStyle(app).paddingBottom),
+            actual: innerHeight - nav.top,
+            navClickable: [...document.querySelectorAll('.sidebar .nav-item')].every(button => {
+              const r = button.getBoundingClientRect();
+              return button.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+            }),
+          };
+        });
+        check(scenario, "clearing the last track removes the empty mini player and its reserved space", empty.playerHidden && empty.reserved <= empty.actual + 13 && empty.navClickable, empty);
       }
       check(scenario, "real app has no uncaught browser errors", errors.length === 0, errors);
     } catch (error) {

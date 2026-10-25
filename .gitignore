@@ -33,6 +33,7 @@ __pycache__/
 *.egg-info/
 
 # Local investigation / reference material
+/HANDOFF.local.md
 /.playwright-mcp/
 /rkp-diagnostics/
 /splayer-desktop/

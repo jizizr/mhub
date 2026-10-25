@@ -31,4 +31,25 @@ ALAC 解码器只把完整数据包解码为 PCM，不处理账号、网络或�
 - 默认测试使用合成数据或本地 mock，真实账号下载显式 opt-in。
 - 公开源码、Docker 上下文和对应源码包共用发布边界检查。
 - API 运行能力保留；历史在线 API 文档、部署记录和私人数据不随源码发布。
-- 当前服务使用共享平台配置，无多用户账号隔离。增加用户体系需要单独设计存储、权限和任务配额。
+- 平台配置、音频缓存和播放任务仍由所有访问者共享；账号只隔离个人资料库与接力播放状态。
+
+## PWA 安装与更新
+
+安装清单的 `id`、`start_url`、`scope` 保持稳定；明暗主题清单共用身份。图标使用内容哈希 URL，安装元数据按发布版本更新并重新验证 HTTP 缓存，离线仍可使用缓存副本。Service Worker 更新绕过脚本 HTTP 缓存；更新不会强制刷新正在播放的页面，也不会清理音频缓存。
+
+`frontend/public/icons/app-icon.svg` 是安装图标的源文件。可选开发工具 `scripts/generate_pwa_icons.mjs` 使用 Sharp 生成 192／512 像素全彩 PNG、Apple Touch 图标和内嵌 PNG 的 favicon.ico，Sharp 不进入前端运行包。生成时设置 `SHARP_MODULE` 指向本地安装的 Sharp 模块入口；更换图标后提交生成资产并执行 `node scripts/verify_pwa_icons_browser.mjs`（可通过 `PLAYWRIGHT_MODULE` 指定 Playwright 模块）。
+
+部分 Android 浏览器将重新编码的图标写入快捷方式字符串，受系统 65,535 字节限制；下载 PNG 的体积无法预测此字符串大小。浏览器验证覆盖多种缩放尺寸和 PNG 再编码，发布验证还需检查真实设备的快捷方式能否持久化。图标采用低复杂度矢量源，避免噪点纹理放大重新编码体积。
+
+## 账号与跨设备同步
+
+`[auth]` 的 `rp_origin` 为空时账号功能关闭，`/api/v1/auth/config` 返回 `enabled: false`，前端不显示入口，也不加载同步代码。启用后需要 MySQL；账号相关表（`mhub_` 前缀）由服务启动后首次使用时 `CREATE TABLE IF NOT EXISTS` 创建。
+
+- **认证**（`src/accounts/`）：通行密钥（webauthn-rs，可发现凭据）为主，argon2 密码兜底，注册时生成 8 个一次性恢复码。会话令牌放在 `HttpOnly; SameSite=Lax` Cookie `mhub_session`，库中只存 SHA-256；30 天滑动续期，可在设备列表吊销。写操作要求 `x-mhub-client` 头，WebSocket 握手校验 Origin。注册可选 Cloudflare Turnstile；登录与注册按 IP 和用户名限流。
+- **资料库**：每个账号一份 Yjs 文档，包含歌单（含有序曲目键）、曲目元数据、喜欢／少推荐。曲目键为平台加源 ID，不含音质。服务端以 `yrs` 持有内存文档，更新追加写入 `mhub_library_updates`，每 200 条或 1 MB 压缩为快照；同一账号的连接通过广播互推。单次更新上限 2 MiB，单文档上限由 `library_limit_bytes` 配置。
+- **传输**：`/api/v1/sync/ws` 使用 y-sync 协议（step1/step2/update）；无法建立 WebSocket 时退回 `POST /api/v1/sync/library` 交换状态向量和差量。
+- **本地副本**：登录后的资料库保存在 IndexedDB（`mhub-library-<账号 ID>`），同步代码为懒加载分块。会话过期或断网时继续写入本地副本，重新登录同一账号后由 CRDT 自动合并，新增、改名、删除与重排都不会重复或丢失。
+- **登录合并**：同一账号的副本直接走 CRDT 同步；另一账号的副本保留在本机，切换到新账号；游客 localStorage 数据生成合并预览——规范化同名且曲目重合度不低于 60%、或来源链接相同的歌单合并，其余新建，喜欢／少推荐取并集。处理过的游客歌单打 `importedTo` 标记，不会重复询问。主动退出登录时可选择清除本机云端副本。
+- **接力播放**：播放队列不进入 CRDT。每台设备上报最近一份播放快照（队列窗口、位置、播放模式），服务端按设备后写覆盖并推送。其他设备在首页和队列页显示“在此设备继续”，用本机音质设置接管，不会打断本机播放。
+
+`scripts/verify_account_sync_browser.mjs` 用两个浏览器上下文和虚拟认证器验证游客合并、通行密钥登录、实时同步、会话失效后的离线合并及接力播放；需要启用 `[auth]` 的后端和测试数据库。

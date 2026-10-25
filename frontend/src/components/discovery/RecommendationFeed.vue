@@ -1,9 +1,9 @@
 <script setup>
 import { computed } from "vue";
-import { Ban, ChevronLeft, ChevronRight, Heart, ListPlus, Play, RefreshCcw, Shuffle, Sparkles } from "lucide-vue-next";
+import { Ban, ChevronLeft, ChevronRight, Heart, ListPlus, ListStart, Play, RefreshCcw, Shuffle, Sparkles } from "lucide-vue-next";
 import { trackIdentity } from "../../stores/queue";
 
-const emit = defineEmits(["play", "queue", "open", "refresh", "mood", "play-all", "queue-all", "playlist", "like", "less"]);
+const emit = defineEmits(["play", "queue", "queue-next", "open", "refresh", "mood", "play-all", "queue-all", "queue-next-all", "playlist", "like", "less"]);
 
 const moods = [
   { id: "relax", label: "放松一下", query: "chill" },
@@ -33,6 +33,42 @@ const props = defineProps({
 // horizontal axis. Only mouse dragging is handled here: touch/pen scrolling
 // stays native so vertical page scrolling, momentum and pinch zoom can coexist.
 const railDragState = new WeakMap();
+const railTimers = new WeakMap();
+
+// Mouse wheel and drag move the rail with CSS snapping paused, then glide to
+// the nearest card once. Snapping while the position is being set by script
+// made every wheel tick snap back and every drag end jump.
+function pauseSnap(rail) {
+  window.clearTimeout(railTimers.get(rail));
+  rail.classList.add("is-free-scrolling");
+}
+
+// `from` (wheel) makes settling directional: a deliberate wheel movement
+// always reaches the next card instead of gliding back to where it began.
+function settleRail(rail, velocity = 0, from = null) {
+  const cards = [...rail.children];
+  if (!cards.length) { rail.classList.remove("is-free-scrolling"); return; }
+  const origin = cards[0].offsetLeft;
+  const max = rail.scrollWidth - rail.clientWidth;
+  // Project the release velocity (px/ms) a little, like native momentum.
+  // Capped like native momentum, so a fast flick moves about two cards.
+  const capped = Math.max(-2.5, Math.min(2.5, velocity));
+  const projected = Math.min(max, Math.max(0, rail.scrollLeft + capped * 220));
+  let target = projected >= max - 2 ? max : 0;
+  const travel = from === null ? 0 : rail.scrollLeft - from;
+  if (target !== max || travel) {
+    let best = Infinity;
+    for (const card of cards) {
+      const left = Math.min(max, card.offsetLeft - origin);
+      if (Math.abs(travel) > 12 && (travel > 0 ? left <= from + 1 : left >= from - 1)) continue;
+      if (Math.abs(left - projected) < best) { best = Math.abs(left - projected); target = left; }
+    }
+  }
+  rail.scrollTo({ left: target, behavior: "smooth" });
+  const release = () => rail.classList.remove("is-free-scrolling");
+  rail.addEventListener("scrollend", release, { once: true });
+  railTimers.set(rail, window.setTimeout(release, 600));
+}
 
 function beginRailDrag(event) {
   const rail = event.currentTarget;
@@ -44,6 +80,9 @@ function beginRailDrag(event) {
     startY: event.clientY,
     startScroll: rail.scrollLeft,
     moved: false,
+    lastX: event.clientX,
+    lastTime: event.timeStamp,
+    velocity: 0,
   });
 }
 
@@ -62,10 +101,18 @@ function moveRailDrag(event) {
     // Keep ordinary button clicks on the card. Only take pointer capture
     // after the gesture has clearly become a horizontal drag.
     rail.classList.add("is-dragging");
+    pauseSnap(rail);
     rail.setPointerCapture?.(event.pointerId);
   }
   if (!state.moved) return;
   event.preventDefault();
+  const elapsed = event.timeStamp - state.lastTime;
+  if (elapsed > 0) {
+    // Smoothed scroll velocity; pointer movement is opposite to scrollLeft.
+    state.velocity = 0.7 * ((state.lastX - event.clientX) / elapsed) + 0.3 * state.velocity;
+    state.lastX = event.clientX;
+    state.lastTime = event.timeStamp;
+  }
   rail.scrollLeft = state.startScroll - delta;
 }
 
@@ -86,6 +133,8 @@ function endRailDrag(event) {
   }
   rail.classList.remove("is-dragging");
   railDragState.delete(rail);
+  // A pause before release means the user stopped: no momentum.
+  if (state.moved) settleRail(rail, event.timeStamp - state.lastTime > 80 ? 0 : state.velocity);
 }
 
 function handleRailClick(event) {
@@ -98,14 +147,23 @@ function handleRailClick(event) {
 
 function handleRailWheel(event) {
   const rail = event.currentTarget;
-  if (rail.scrollWidth <= rail.clientWidth) return;
-  // Trackpads already provide deltaX. A vertical mouse wheel should still
-  // move a horizontal rail, which makes the affordance useful on desktop.
-  const delta = Math.abs(event.deltaX) >= Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-  if (!delta) return;
-  const before = rail.scrollLeft;
+  if (rail.scrollWidth <= rail.clientWidth || event.ctrlKey) return;
+  // Horizontal trackpad swipes scroll natively, with the browser's own
+  // momentum and snapping. Only a vertical wheel is mapped to the rail.
+  if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+  const delta = event.deltaY * (event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? rail.clientWidth : 1);
+  const max = rail.scrollWidth - rail.clientWidth;
+  // At either end the wheel keeps scrolling the page.
+  if ((delta < 0 && rail.scrollLeft <= 0) || (delta > 0 && rail.scrollLeft >= max - 1)) return;
+  event.preventDefault();
+  if (!rail.classList.contains("is-free-scrolling")) rail.dataset.wheelFrom = String(rail.scrollLeft);
+  pauseSnap(rail);
   rail.scrollLeft += delta;
-  if (rail.scrollLeft !== before) event.preventDefault();
+  railTimers.set(rail, window.setTimeout(() => {
+    const from = Number(rail.dataset.wheelFrom);
+    delete rail.dataset.wheelFrom;
+    settleRail(rail, 0, Number.isFinite(from) ? from : null);
+  }, 140));
 }
 
 function scrollRail(button, direction) {
@@ -155,6 +213,9 @@ function keyFor(track, index) {
           </button>
           <button class="ghost-action" :disabled="loading" @click="emit('refresh')">
             <Shuffle :size="16" />换一批
+          </button>
+          <button class="ghost-action" :disabled="!tracks.length" @click="emit('queue-next-all')">
+            <ListStart :size="16" />下一首播放
           </button>
           <button class="ghost-action" :disabled="!tracks.length" @click="emit('queue-all')">
             <ListPlus :size="16" />加入播放队列
@@ -212,9 +273,10 @@ function keyFor(track, index) {
             <strong>{{ track.title }}</strong><small>{{ track.artist || "未知艺人" }}</small>
           </button>
           <div class="recommend-track-card__actions">
-            <button class="mini-button" title="喜欢" @click="emit('like', track)"><Heart :size="15" /></button>
+            <button class="mini-button is-secondary" title="喜欢" @click="emit('like', track)"><Heart :size="15" /></button>
+            <button class="mini-button" title="下一首播放" @click="emit('queue-next', track)"><ListStart :size="15" /></button>
             <button class="mini-button" title="加入播放队列" @click="emit('queue', track)"><ListPlus :size="15" /></button>
-            <button class="mini-button" title="少推荐类似音乐" @click="emit('less', track)"><Ban :size="15" /></button>
+            <button class="mini-button is-secondary" title="少推荐类似音乐" @click="emit('less', track)"><Ban :size="15" /></button>
           </div>
         </article>
       </div>
@@ -297,6 +359,7 @@ function keyFor(track, index) {
           <span class="cover-thumb is-small"><img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" /></span>
           <button class="recommend-list-row__text" type="button" @click="emit('open', track)"><strong>{{ track.title }}</strong><small>{{ track.artist || "未知艺人" }} · {{ track.platform || platformLabel }}</small></button>
           <button class="mini-button" title="喜欢" @click="emit('like', track)"><Heart :size="15" /></button>
+          <button class="mini-button" title="下一首播放" @click="emit('queue-next', track)"><ListStart :size="15" /></button>
           <button class="mini-button" title="加入播放队列" @click="emit('queue', track)"><ListPlus :size="15" /></button>
           <button class="mini-button" title="少推荐类似音乐" @click="emit('less', track)"><Ban :size="15" /></button>
         </article>

@@ -8,6 +8,10 @@ const BACKGROUND_PCM_QUEUE_SECONDS = 15;
 const MAX_PCM_QUEUE_BYTES = 24 * 1024 * 1024;
 const DECODE_SLICE_MS = 8;
 const DECODE_SLICE_PACKETS = 64;
+// After EOF packets are decoded from the cached Blob. Read it in windows: one
+// async Blob read per packet (20-90 ms of audio) could not keep a Hi-Res
+// queue filled while the page was busy.
+const BLOB_READ_WINDOW_BYTES = 2 * 1024 * 1024;
 const STARTUP_QUEUE_SECONDS = 0.5;
 const RESUME_TIMEOUT_MS = 1500;
 const RANGE_HANDOFF_TIMEOUT_MS = 8000;
@@ -116,27 +120,98 @@ function trustedCompletedPacketSource(value, policy) {
   return candidate.url.href;
 }
 
-function resampleInterleaved(input, channels, sourceRate, targetRate) {
-  if (!input?.length || !channels || !sourceRate || !targetRate || Math.abs(sourceRate - targetRate) <= 1) {
-    return input;
+/**
+ * Streaming sample-rate converter (Catmull-Rom cubic) for interleaved PCM.
+ * Phase and the last input frames carry over between calls. Converting each
+ * packet on its own pinned both of its ends to the packet edges, which jumped
+ * time at every boundary: a 10-50 Hz flutter on 44.1 kHz -> 48 kHz music and
+ * a half-sample jump per packet on 96 kHz -> 192 kHz Hi-Res.
+ */
+export function createStreamResampler(channels, sourceRate, targetRate) {
+  if (!channels || !sourceRate || !targetRate || Math.abs(sourceRate - targetRate) <= 1) {
+    return {
+      process: (input) => input.slice(0, Math.floor(input.length / (channels || 1)) * (channels || 1)),
+      flush: () => new Float32Array(0),
+    };
   }
-  const inputFrames = Math.floor(input.length / channels);
-  if (inputFrames < 2) return input;
-  const outputFrames = Math.max(1, Math.round(inputFrames * targetRate / sourceRate));
-  const output = new Float32Array(outputFrames * channels);
-  const scale = (inputFrames - 1) / Math.max(1, outputFrames - 1);
-  for (let frame = 0; frame < outputFrames; frame += 1) {
-    const source = frame * scale;
-    const left = Math.floor(source);
-    const right = Math.min(inputFrames - 1, left + 1);
-    const weight = source - left;
-    for (let channel = 0; channel < channels; channel += 1) {
-      const a = input[left * channels + channel] || 0;
-      const b = input[right * channels + channel] || 0;
-      output[frame * channels + channel] = a + (b - a) * weight;
+  const step = sourceRate / targetRate;
+  let history = null;
+  let position = 1;
+  // Output frames for source positions [position, end) of `source`, where
+  // frame i reads frames i-1..i+2.
+  const interpolate = (source, end) => {
+    const count = Math.max(0, Math.ceil((end - position) / step));
+    const output = new Float32Array(count * channels);
+    let time = position;
+    for (let index = 0; index < count; index += 1, time += step) {
+      const frame = Math.floor(time);
+      const fraction = time - frame;
+      const base = frame * channels;
+      for (let channel = 0; channel < channels; channel += 1) {
+        const p0 = source[base - channels + channel];
+        const p1 = source[base + channel];
+        const p2 = source[base + channels + channel];
+        const p3 = source[base + 2 * channels + channel];
+        output[index * channels + channel] = p1 + 0.5 * fraction * (p2 - p0 +
+          fraction * (2 * p0 - 5 * p1 + 4 * p2 - p3 + fraction * (3 * (p1 - p2) + p3 - p0)));
+      }
     }
-  }
-  return output;
+    position = time;
+    return output;
+  };
+  // A virtual frame continuing the slope of its neighbours, so the stream
+  // edges interpolate like the interior instead of flattening.
+  const extrapolate = (target, at, from, toward) => {
+    for (let channel = 0; channel < channels; channel += 1) {
+      target[at * channels + channel] = 2 * target[from * channels + channel] - target[toward * channels + channel];
+    }
+  };
+  return {
+    process(input) {
+      const inputFrames = Math.floor(input.length / channels);
+      if (!inputFrames) return new Float32Array(0);
+      const fresh = input.subarray(0, inputFrames * channels);
+      let source;
+      if (history) {
+        source = new Float32Array(history.length + fresh.length);
+        source.set(history);
+        source.set(fresh, history.length);
+      } else {
+        // Frame 0 is virtual; interpolation starts exactly on the first sample.
+        source = new Float32Array(fresh.length + channels);
+        source.set(fresh, channels);
+        if (inputFrames > 1) extrapolate(source, 0, 1, 2);
+        else source.set(fresh.subarray(0, channels));
+        position = 1;
+      }
+      const frames = source.length / channels;
+      if (frames < 4) {
+        history = source;
+        return new Float32Array(0);
+      }
+      // Frame i needs i-1..i+2, so positions stay below frames - 2.
+      const output = interpolate(source, frames - 2);
+      history = source.slice((frames - 3) * channels);
+      position -= frames - 3;
+      return output;
+    },
+    /** Emit the frames still held back at the end of the stream. */
+    flush() {
+      if (!history) return new Float32Array(0);
+      const real = history.length / channels;
+      const source = new Float32Array((real + 2) * channels);
+      source.set(history);
+      for (let pad = real; pad < real + 2; pad += 1) {
+        if (pad >= 2) extrapolate(source, pad, pad - 1, pad - 2);
+        else source.set(source.subarray((pad - 1) * channels, pad * channels), pad * channels);
+      }
+      // Positions up to one source period past the last real frame.
+      const output = interpolate(source, real);
+      history = null;
+      position = 1;
+      return output;
+    },
+  };
 }
 
 class AlacPacketStreamParser {
@@ -609,9 +684,12 @@ export class AlacWorkletPlayer {
       let slicePackets = 0;
       while (generation === this.generation && epoch === this.epoch && this.decodeIndex < this.packets.length && this.queuedFrames < this.pcmQueueTargetFrames) {
         const packet = this.packets[this.decodeIndex];
-        const bytes = packet.bytes || new Uint8Array(await this.completeBlob.slice(packet.offset, packet.offset + packet.length).arrayBuffer());
+        const bytes = packet.bytes || await this.readCompletedPacket(packet);
         if (generation !== this.generation || epoch !== this.epoch) return;
-        const output = new Float32Array(Math.max(this.decoder.maxSamplesPerPacket(), 1024));
+        // Reused: the resampler below always returns a new transferable array.
+        const capacity = Math.max(this.decoder.maxSamplesPerPacket(), 1024);
+        if (this.decodeBuffer?.length !== capacity) this.decodeBuffer = new Float32Array(capacity);
+        const output = this.decodeBuffer;
         const count = this.decoder.decodePacketF32(bytes, output);
         const decodedFrames = Math.floor(count / this.track.channels);
         if (decodedFrames !== packet.duration) throw new Error("ALAC packet 解码长度与时间索引不一致");
@@ -619,12 +697,14 @@ export class AlacWorkletPlayer {
         const skip = Math.min(this.skipSourceFrames, decodedFrames);
         this.skipSourceFrames -= skip;
         const decoded = output.subarray(skip * this.track.channels, count);
-        const samples = resampleInterleaved(decoded, this.track.channels, this.track.sampleRate, this.outputSampleRate);
-        const frames = Math.floor(samples.length / this.track.channels);
+        // One converter per renderer epoch: a seek or new track starts fresh.
+        if (this.resamplerEpoch !== epoch) {
+          this.resampler = createStreamResampler(this.track.channels, this.track.sampleRate, this.outputSampleRate);
+          this.resamplerEpoch = epoch;
+        }
+        const pcm = this.resampler.process(decoded);
+        const frames = Math.floor(pcm.length / this.track.channels);
         if (frames) {
-          // Slice same-rate data too: only the decoded samples are transferred,
-          // without unused capacity from a short final packet.
-          const pcm = samples.byteOffset || samples.byteLength !== samples.buffer.byteLength ? samples.slice() : samples;
           this.sentFrames += frames;
           this.node.port.postMessage({ type: "data", epoch, format: "f32", data: pcm.buffer, frames }, [pcm.buffer]);
         }
@@ -637,6 +717,12 @@ export class AlacWorkletPlayer {
         }
       }
       if (generation === this.generation && epoch === this.epoch && this.eof && this.decodeIndex === this.packets.length && !this.renderEofSent) {
+        const tail = this.resamplerEpoch === epoch ? this.resampler.flush() : null;
+        const tailFrames = tail ? Math.floor(tail.length / this.track.channels) : 0;
+        if (tailFrames) {
+          this.sentFrames += tailFrames;
+          this.node.port.postMessage({ type: "data", epoch, format: "f32", data: tail.buffer, frames: tailFrames }, [tail.buffer]);
+        }
         this.renderEofSent = true;
         this.node.port.postMessage({ type: "eof", epoch });
         this.resolveStartup();
@@ -646,6 +732,19 @@ export class AlacWorkletPlayer {
     } finally {
       if (this.decoding === epoch) this.decoding = null;
     }
+  }
+
+  async readCompletedPacket(packet) {
+    const blob = this.completeBlob;
+    const window = this.blobWindow;
+    if (window?.blob === blob && packet.offset >= window.start && packet.offset + packet.length <= window.end) {
+      return window.bytes.subarray(packet.offset - window.start, packet.offset - window.start + packet.length);
+    }
+    const start = packet.offset;
+    const end = Math.min(blob.size, Math.max(start + packet.length, start + BLOB_READ_WINDOW_BYTES));
+    const bytes = new Uint8Array(await blob.slice(start, end).arrayBuffer());
+    this.blobWindow = { blob, start, end, bytes };
+    return bytes.subarray(0, packet.length);
   }
 
   handleWorkletMessage(message) {
@@ -826,6 +925,9 @@ export class AlacWorkletPlayer {
     this.parser = null;
     this.packets = [];
     this.completeBlob = null;
+    this.blobWindow = null;
+    this.resampler = null;
+    this.resamplerEpoch = null;
     this.loaded = this.playing = this.eof = this.ended = this.streamCompleteNotified = this.renderEofSent = false;
     this.decodeIndex = this.totalSourceFrames = this.skipSourceFrames = this.sentFrames = this.consumedFrames = this.totalBytes = this.readBytes = this.expectedTotalBytes = 0;
     this.pendingSeekFrame = null;

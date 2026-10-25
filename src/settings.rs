@@ -14,6 +14,60 @@ pub struct Settings {
     pub db: DB,
     #[serde(default)]
     pub music: Music,
+    #[serde(default)]
+    pub auth: Auth,
+}
+
+/// Accounts and cross-device sync. Disabled while `rp_origin` is empty.
+#[derive(Debug, Deserialize)]
+pub struct Auth {
+    /// Public origin users open, e.g. `https://music.example.com`. Passkeys
+    /// are bound to it: changing the domain invalidates existing passkeys.
+    #[serde(default)]
+    pub rp_origin: String,
+    /// Defaults to the origin's host.
+    #[serde(default)]
+    pub rp_id: String,
+    #[serde(default = "default_rp_name")]
+    pub rp_name: String,
+    /// Cloudflare Turnstile for sign-up. Empty keys disable the challenge.
+    #[serde(default)]
+    pub turnstile_site_key: String,
+    #[serde(default)]
+    pub turnstile_secret: String,
+    #[serde(default = "default_session_days")]
+    pub session_days: u64,
+    #[serde(default = "default_true")]
+    pub cookie_secure: bool,
+    #[serde(default = "default_library_limit_bytes")]
+    pub library_limit_bytes: usize,
+}
+
+impl Default for Auth {
+    fn default() -> Self {
+        Self {
+            rp_origin: String::new(),
+            rp_id: String::new(),
+            rp_name: default_rp_name(),
+            turnstile_site_key: String::new(),
+            turnstile_secret: String::new(),
+            session_days: default_session_days(),
+            cookie_secure: true,
+            library_limit_bytes: default_library_limit_bytes(),
+        }
+    }
+}
+
+fn default_rp_name() -> String {
+    "MHub".to_string()
+}
+
+fn default_session_days() -> u64 {
+    30
+}
+
+fn default_library_limit_bytes() -> usize {
+    16 * 1024 * 1024
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -219,5 +273,7 @@ mod tests {
         assert!(settings.music.applemusic.wv_client_id.is_empty());
         assert!(settings.music.applemusic.wv_private_key.is_empty());
         assert!(!settings.music.applemusic.wrapper_lite_enabled);
+        assert!(settings.auth.rp_origin.is_empty());
+        assert!(settings.auth.turnstile_secret.is_empty());
     }
 }

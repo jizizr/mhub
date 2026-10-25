@@ -32,9 +32,9 @@ function harness({ entries = {}, network = async () => new Response("network") }
   ]));
   const calls = { put: [], match: [], delete: [], open: [], fetch: [], claim: 0 };
   const key = (value) => typeof value === "string" ? new URL(value, origin).href : value.url;
-  const fetchNetwork = (value) => {
-    calls.fetch.push(value.url);
-    return network(value);
+  const fetchNetwork = (value, options) => {
+    calls.fetch.push({ url: value.url, options });
+    return network(value, options);
   };
   const caches = {
     keys: async () => [...cacheData.keys()],
@@ -90,6 +90,28 @@ function harness({ entries = {}, network = async () => new Response("network") }
     },
   };
 }
+
+test("install manifests refresh from the network instead of reusing a stale theme", async () => {
+  for (const path of ["/manifest.webmanifest", "/manifest-dark.webmanifest"]) {
+    const worker = harness({ entries: { [appCache]: { [path]: "old manifest" } } });
+    const result = worker.dispatch(request(path, { mode: "cors", destination: "manifest" }));
+    assert.equal(result.intercepted, true);
+    assert.equal(await (await result.response).text(), "network");
+    assert.equal(worker.calls.put.length, 1);
+    assert.equal(worker.calls.fetch[0].options.cache, "no-cache", "revalidate the browser HTTP cache as well as CacheStorage");
+  }
+});
+
+test("both install themes remain available offline", async () => {
+  for (const path of ["/manifest.webmanifest", "/manifest-dark.webmanifest"]) {
+    const worker = harness({
+      entries: { [appCache]: { [path]: "offline manifest" } },
+      network: async () => { throw new TypeError("offline"); },
+    });
+    const result = worker.dispatch(request(path, { mode: "cors", destination: "manifest" }));
+    assert.equal(await (await result.response).text(), "offline manifest");
+  }
+});
 
 test("documentation navigations and downloadable files always use the network", async () => {
   const worker = harness();

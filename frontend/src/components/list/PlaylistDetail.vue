@@ -17,7 +17,7 @@ const props = defineProps({
   showQueue: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "open", "menu", "delete", "show-queue"]);
+const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "queue-next", "open", "menu", "delete", "show-queue"]);
 const tracks = computed(() => props.playlist?.tracks || []);
 const title = computed(() => props.playlist?.name || (props.playlist?.resource_type === "albums" ? "推荐专辑" : "推荐歌单"));
 const cover = computed(() => props.playlist?.cover || props.playlist?.cover_url || tracks.value.find((track) => track.cover)?.cover || "");
@@ -120,6 +120,7 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
         :items="tracks"
         @play="emit('play', $event)"
         @queue="emit('queue', $event)"
+        @queue-next="emit('queue-next', $event)"
         @open="emit('open', $event)"
         @menu="emit('menu', $event)"
       />

@@ -28,12 +28,14 @@ function harness() {
   const context = {
     console: { warn: (...args) => state.warnings.push(args) },
     window: { addEventListener() {}, removeEventListener() {},
-      setInterval(callback) { timers.set(1, callback); return 1; },
+      setInterval(callback) { const id = timers.size + 1; timers.set(id, callback); return id; },
       clearInterval(id) { timers.delete(id); } },
     document: { addEventListener() {}, removeEventListener() {}, body: { classList: { remove() {} } } },
     player: { initPlayer() {}, destroyPlayer() {} },
+    themeController: { dispose() {} },
     platforms: { value: [] }, cacheItems: { value: [] }, cacheLoading: { value: false }, audioRef: { value: {} },
     status: { setNotice() {} },
+    account: { init: () => Promise.resolve(), publishPlayback() {} },
     getPlatforms: () => { state.platforms += 1; return platformRequest.promise; },
     listCachedTracks: () => { state.cache += 1; return cacheRequest.promise; },
     loadRecommendations: () => { state.recommendations += 1; return Promise.resolve(); },
@@ -45,9 +47,9 @@ function harness() {
     "trustedMediaOrigins", "resolveTrackSource", "resolveCachedTrackSource", "prepareOutput", "preparePlaybackSession",
     "createNativeOutput", "createMediaSessionController", "createPlaybackLifecycle", "getCachedLoudness", "warmLoudness",
     "waitForCompletedSource", "prefetchTrackSource", "cacheActiveTrackSource", "loadLyricsForTrack", "getContinuationRecommendations",
-    "canUseAlacWorklet", "canRequestAlacWorklet", "loadAlacModule"]) context[name] = () => {};
+    "canUseAlacWorklet", "canRequestAlacWorklet", "loadAlacModule", "handlePageHide", "handleVisibility"]) context[name] = () => {};
   vm.createContext(context);
-  vm.runInContext(`let appUnmounted = false, uiSyncTimer = 0;
+  vm.runInContext(`let appUnmounted = false, uiSyncTimer = 0, handoffTimer = 0;
     let searchAbort = null, recommendationAbort = null, recommendationRequestId = 0, recommendationDetailVersion = 0;
     const UI_SYNC_INTERVAL_MS = 250;\n${refresh}\n${mounted}\n${unmounted}`, context);
   return { context, state, timers, platformRequest, cacheRequest };
@@ -60,7 +62,7 @@ test("slow platform and IndexedDB reads do not gate recommendations or the UI cl
   assert.equal(h.state.recommendations, 1, "recommendations start before platforms resolves");
   assert.equal(h.state.cache, 1);
   assert.equal(h.state.ticks, 1);
-  assert.equal(h.timers.size, 1);
+  assert.equal(h.timers.size, 2, "UI clock and hand-off refresh");
   h.timers.get(1)();
   assert.equal(h.state.ticks, 2, "the UI clock also runs while IndexedDB is pending");
   h.platformRequest.resolve([{ id: "applemusic", label: "Apple Music" }]);
@@ -93,7 +95,7 @@ test("unavailable IndexedDB leaves the app clock and platform fallback usable", 
   assert.equal(h.context.platforms.value.length, 3);
   assert.equal(h.context.cacheLoading.value, false);
   assert.equal(h.state.warnings.length, 1);
-  assert.equal(h.timers.size, 1);
+  assert.equal(h.timers.size, 2, "UI clock and hand-off refresh");
   assert.equal(h.state.recommendations, 1);
   h.state.unmount();
 });

@@ -15,10 +15,13 @@ const media = useMediaStore();
 const draft = ref(null);
 const sliderValue = computed(() => draft.value ?? status.position);
 const duration = computed(() => Math.max(status.duration || media.track?.duration || 0, 0));
+const progress = computed(() => duration.value > 0
+  ? Math.min(1, Math.max(0, sliderValue.value / duration.value))
+  : 0);
 </script>
 
 <template>
-  <footer class="player-bar">
+  <footer class="player-bar" :class="{ 'player-bar--empty': !media.track }" aria-label="当前播放">
     <div class="progress-rail">
       <SeekSlider
         class="progress-input"
@@ -48,6 +51,11 @@ const duration = computed(() => Math.max(status.duration || media.track?.duratio
         </label>
         <ListeningSettings compact />
       </div>
+    </div>
+    <!-- The compact dock shows progress without a native range thumb covering
+         the feed. Opening the player retains the full accessible seek slider. -->
+    <div class="player-bar__compact-progress" aria-hidden="true">
+      <span :style="{ transform: `scaleX(${progress})` }" />
     </div>
   </footer>
 </template>

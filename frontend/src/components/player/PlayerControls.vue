@@ -90,7 +90,7 @@ onBeforeUnmount(() => {
     <IconButton class="player-control--secondary" title="歌词" :active="media.expanded" :disabled="!media.track" @click="media.expanded = true">
       <Mic2 :size="18" />
     </IconButton>
-    <IconButton title="队列" :active="status.queueOpen" @click="status.queueOpen = !status.queueOpen">
+    <IconButton class="player-control--queue" title="队列" :active="status.queueOpen" @click="status.queueOpen = !status.queueOpen">
       <ListMusic :size="18" />
     </IconButton>
   </div>

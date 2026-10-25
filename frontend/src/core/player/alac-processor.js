@@ -142,16 +142,6 @@ class AlacPcmProcessor extends AudioWorkletProcessor {
     return (value & 0x8000 ? value - 0x10000 : value) / 32768;
   }
 
-  consumeFrame() {
-    const item = this.queue[0];
-    if (!item) return;
-    item.offset += 1;
-    this.pendingFrames = Math.max(0, this.pendingFrames - 1);
-    if (item.offset >= item.frames) this.queue.shift();
-    this.position += 1;
-    this.consumedFrames += 1;
-  }
-
   process(_inputs, outputs) {
     if (this.disposed) return false;
     const output = outputs[0];
@@ -164,12 +154,35 @@ class AlacPcmProcessor extends AudioWorkletProcessor {
       // After an underrun, accumulate a useful cushion before resuming. One
       // packet at a time otherwise alternates tiny sound bursts and silence.
       if (this.needsBuffer && (this.pendingFrames >= this.bufferTargetFrames || this.eof)) this.needsBuffer = false;
-      for (let frame = 0; !this.needsBuffer && frame < frameCount; frame += 1) {
-        if (!this.queue.length) break;
-        for (let channel = 0; channel < output.length; channel += 1) {
-          output[channel][frame] = this.readSample(frame, Math.min(channel, this.channels - 1));
+      // Copy whole runs from each queued block. The audio thread has well
+      // under a millisecond per quantum at 192 kHz; per-sample calls risked
+      // missing it on slower phones.
+      let frame = 0;
+      while (!this.needsBuffer && frame < frameCount && this.queue.length) {
+        const item = this.queue[0];
+        const run = Math.min(frameCount - frame, item.frames - item.offset);
+        if (item.floats) {
+          const source = item.floats;
+          const channels = this.channels;
+          for (let channel = 0; channel < output.length; channel += 1) {
+            const target = output[channel];
+            let index = item.offset * channels + Math.min(channel, channels - 1);
+            for (let offset = 0; offset < run; offset += 1, index += channels) target[frame + offset] = source[index] || 0;
+          }
+          item.offset += run;
+        } else {
+          for (let offset = 0; offset < run; offset += 1) {
+            for (let channel = 0; channel < output.length; channel += 1) {
+              output[channel][frame + offset] = this.readSample(frame + offset, Math.min(channel, this.channels - 1));
+            }
+            item.offset += 1;
+          }
         }
-        this.consumeFrame();
+        frame += run;
+        this.pendingFrames = Math.max(0, this.pendingFrames - run);
+        this.position += run;
+        this.consumedFrames += run;
+        if (item.offset >= item.frames) this.queue.shift();
       }
       if (!this.pendingFrames && !this.eof && !this.needsBuffer) {
         this.needsBuffer = true;

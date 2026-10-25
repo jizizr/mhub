@@ -1,5 +1,5 @@
 <script setup>
-import { ListPlus, MoreHorizontal, Play } from "lucide-vue-next";
+import { ListPlus, ListStart, MoreHorizontal, Play } from "lucide-vue-next";
 import { computed } from "vue";
 import { useMediaStore } from "../../stores/media";
 import { trackIdentity } from "../../stores/queue";
@@ -12,7 +12,7 @@ const props = defineProps({
   emptyText: { type: String, default: "没有结果" },
 });
 
-const emit = defineEmits(["play", "queue", "open", "menu"]);
+const emit = defineEmits(["play", "queue", "queue-next", "open", "menu"]);
 const media = useMediaStore();
 const status = useStatusStore();
 const rows = computed(() => props.items);
@@ -77,6 +77,9 @@ function trackInfo(track) {
           <span class="song-row__actions">
             <button class="mini-button hide-mobile" title="播放" @click.stop="emit('play', track)">
               <Play :size="16" />
+            </button>
+            <button class="mini-button hide-mobile" title="下一首播放" @click.stop="emit('queue-next', track)">
+              <ListStart :size="16" />
             </button>
             <button class="mini-button hide-mobile" title="加入播放队列" @click.stop="emit('queue', track)">
               <ListPlus :size="16" />

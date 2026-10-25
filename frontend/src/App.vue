@@ -43,8 +43,12 @@ import {
 import { useMediaStore } from "./stores/media";
 import { trackIdentity, useQueueStore } from "./stores/queue";
 import { usePlaylistStore } from "./stores/playlists";
+import { useAccountStore } from "./stores/account";
+import AccountButton from "./components/account/AccountButton.vue";
+import HandoffCard from "./components/account/HandoffCard.vue";
 import { useStatusStore } from "./stores/status";
 import { formatSize } from "./utils/format";
+import { createThemeController } from "./utils/theme.js";
 import { trackFromPlayback, trackFromSearch } from "./utils/track";
 
 const audioRef = ref(null);
@@ -67,8 +71,6 @@ const playlistActionNotice = ref("");
 const recommendationTags = ref([]);
 const recommendationSeedIndex = ref(0);
 const recentTracks = ref([]);
-const recommendationLessKeys = ref([]);
-const recommendationLikedKeys = ref([]);
 const searchLoading = ref(false);
 const searchError = ref("");
 const cacheItems = ref([]);
@@ -80,6 +82,9 @@ const status = useStatusStore();
 const media = useMediaStore();
 const queue = useQueueStore();
 const playlists = usePlaylistStore();
+const account = useAccountStore();
+const AccountDialog = defineAsyncComponent(() => import("./components/account/AccountDialog.vue"));
+let handoffTimer = 0;
 const FullPlayer = defineAsyncComponent(() => import("./components/player/FullPlayer.vue"));
 const ImportDialog = defineAsyncComponent(() => import("./components/import/ImportDialog.vue"));
 // Keep the instance after its first opening so its own leave transition and
@@ -131,15 +136,6 @@ try {
   if (Array.isArray(saved)) recommendationSeenIds = saved.filter((id) => /^\d+$/.test(String(id))).slice(-120).map(String);
 } catch { /* Storage may be unavailable in a private session. */ }
 
-function loadRecommendationKeys(key) {
-  try {
-    const value = JSON.parse(localStorage.getItem(key) || "[]");
-    return Array.isArray(value) ? value : [];
-  } catch {
-    return [];
-  }
-}
-
 // The ALAC decoder (worklet transport + WebAssembly glue) is a separate chunk.
 // It is preloaded at idle for lossless listeners and on the first lossless
 // play otherwise, so the first screen never waits for it.
@@ -174,12 +170,6 @@ function loadRecentTracks() {
 }
 
 recentTracks.value = loadRecentTracks();
-recommendationLessKeys.value = loadRecommendationKeys("music-web-splayer-recommendation-less-v1");
-recommendationLikedKeys.value = loadRecommendationKeys("music-web-splayer-recommendation-liked-v1");
-
-function saveRecommendationKeys(key, value) {
-  localStorage.setItem(key, JSON.stringify(value.slice(0, 80)));
-}
 
 function uniqueTracks(items) {
   const seen = new Set();
@@ -216,19 +206,9 @@ const THEMES = [
   { id: "light", label: "浅色", icon: Sun },
   { id: "dark", label: "深色", icon: Moon },
 ];
-const THEME_COLORS = { light: "#f6f5f3", dark: "#141416" };
 const currentTheme = computed(() => THEMES.find((item) => item.id === status.theme) || THEMES[0]);
 
-// An explicit theme overrides prefers-color-scheme; "system" follows it.
-function applyTheme(theme) {
-  const root = document.documentElement;
-  if (theme === "light" || theme === "dark") root.dataset.theme = theme;
-  else delete root.dataset.theme;
-  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
-    const scheme = meta.media.includes("dark") ? "dark" : "light";
-    meta.content = THEME_COLORS[theme === "system" ? scheme : theme];
-  }
-}
+const themeController = createThemeController(() => status.theme);
 
 function cycleTheme() {
   const next = THEMES[(THEMES.indexOf(currentTheme.value) + 1) % THEMES.length];
@@ -237,7 +217,7 @@ function cycleTheme() {
   status.toast(`外观：${next.label}`);
 }
 
-watch(() => status.theme, applyTheme, { immediate: true });
+watch(() => status.theme, () => themeController.sync(), { immediate: true });
 
 function currentQualityLabel() {
   const map = { standard: "标准", high: "高品质", lossless: "无损", hires: "Hi-Res" };
@@ -587,9 +567,18 @@ async function openQueueTrack(track) {
   if (await player.playAtIndex(queue.findTrackIndex(track))) media.expanded = true;
 }
 
+// Every "add to the end" entry point has a matching "play next" one; both
+// routes go through these two handlers so feedback stays identical.
 function queueTrack(track) {
   const added = player.insertManyToQueue([trackForCurrentQuality(track)], queue.queueLength);
   status.toast(added ? `${track.title} 已加入播放队列末尾` : `${track.title} 已在播放队列中`);
+}
+
+function queueTrackNext(track) {
+  const arranged = player.queueNextMany([trackForCurrentQuality(track)]);
+  status.toast(arranged
+    ? `${track.title} 将${status.playIndex >= 0 ? "在下一首播放" : "排在队列最前"}`
+    : `${track.title} 正在播放`);
 }
 
 function trackForCurrentQuality(track) {
@@ -662,7 +651,7 @@ async function loadRecommendations(queryText = "", { refresh = false } = {}) {
     const nextTracks = uniqueTracks(
       (Array.isArray(items) ? items : [])
         .map((item) => trackFromSearch(item, status.quality))
-        .filter((track) => !recommendationLessKeys.value.includes(trackIdentity(track))),
+        .filter((track) => !playlists.less.includes(trackIdentity(track))),
     ).slice(0, 12);
     // Keep the previous batch usable if the upstream pool is temporarily
     // exhausted instead of replacing the whole feed with an empty page.
@@ -881,11 +870,18 @@ function queueRecommendations() {
   status.toast(added ? `已将 ${added} 首推荐加入播放队列末尾` : "这些推荐歌曲已在播放队列中");
 }
 
+function queueRecommendationsNext() {
+  const tracks = recommendationTracks.value.map(trackForCurrentQuality);
+  if (!tracks.length) return;
+  const arranged = player.queueNextMany(tracks);
+  status.toast(arranged ? `已安排 ${arranged} 首推荐接下来播放` : "这些推荐歌曲已在播放");
+}
+
 function likeRecommendation(track) {
   const key = trackIdentity(track);
   if (!key) return;
-  recommendationLikedKeys.value = [key, ...recommendationLikedKeys.value.filter((item) => item !== key)].slice(0, 80);
-  saveRecommendationKeys("music-web-splayer-recommendation-liked-v1", recommendationLikedKeys.value);
+  // Liked / less lists live in the playlist store, so they sync with an account.
+  playlists.addTaste("liked", key);
   recordRecentTrack(track);
   status.toast(`已记录喜欢，之后会更多保留类似音乐：${track.title}`);
 }
@@ -893,8 +889,7 @@ function likeRecommendation(track) {
 function suggestLessRecommendation(track) {
   const key = trackIdentity(track);
   if (!key) return;
-  recommendationLessKeys.value = [key, ...recommendationLessKeys.value.filter((item) => item !== key)].slice(0, 80);
-  saveRecommendationKeys("music-web-splayer-recommendation-less-v1", recommendationLessKeys.value);
+  playlists.addTaste("less", key);
   recommendationTracks.value = recommendationTracks.value.filter((item) => trackIdentity(item) !== key);
   status.toast("会减少类似推荐");
 }
@@ -972,10 +967,7 @@ function runSongMenu(action, targetId = "") {
   closePlaylistMenu();
   if (!track) return;
   if (action === "play") void playTrack(track);
-  if (action === "next") {
-    const arranged = player.queueNextMany([trackForCurrentQuality(track)]);
-    status.toast(arranged ? `${track.title} 将在下一首播放` : `${track.title} 正在播放`);
-  }
+  if (action === "next") queueTrackNext(track);
   if (action === "queue") queueTrack(track);
   if (action === "add") {
     const playlist = playlists.getById(targetId);
@@ -1041,6 +1033,15 @@ function runPlaylistMenu(action) {
 
 function handleDocumentPointerDown() {
   closePlaylistMenu();
+}
+
+function handlePageHide() {
+  account.publishPlayback({ flush: true });
+}
+
+function handleVisibility() {
+  if (document.visibilityState === "visible") account.resume();
+  else account.publishPlayback({ flush: true });
 }
 
 function handleAudioGesture() {
@@ -1298,6 +1299,11 @@ onMounted(() => {
     { id: "netease", label: "网易云音乐" },
   ]).then((items) => { if (!appUnmounted) platforms.value = items; });
   void loadRecommendations();
+  void account.init();
+  window.addEventListener("pagehide", handlePageHide);
+  document.addEventListener("visibilitychange", handleVisibility);
+  // Keep other devices' hand-off position fresh while this one plays.
+  handoffTimer = window.setInterval(() => { if (status.isPlaying) account.publishPlayback(); }, 15_000);
   if (canRequestAlacWorklet({ platform: "applemusic", quality: status.quality })) {
     const preload = () => void loadAlacModule().catch(() => {});
     if ("requestIdleCallback" in window) window.requestIdleCallback(preload, { timeout: 4000 });
@@ -1309,6 +1315,10 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  themeController.dispose();
+  window.removeEventListener("pagehide", handlePageHide);
+  document.removeEventListener("visibilitychange", handleVisibility);
+  window.clearInterval(handoffTimer);
   appUnmounted = true;
   player.destroyPlayer();
   window.removeEventListener("popstate", handlePopstate);
@@ -1334,10 +1344,16 @@ watch(
   () => status.queueOpen,
   syncQueueHistory,
 );
+
+// Report this device's queue for hand-off whenever what plays changes.
+watch(
+  () => [status.playIndex, status.currentTrack && trackIdentity(status.currentTrack), status.isPlaying, queue.queueLength],
+  () => account.publishPlayback(),
+);
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :class="{ 'app--has-track': Boolean(media.track) }">
     <Sidebar :platforms="platforms" @discover="returnToRecommendations" @playlist-contextmenu="({ event, playlist }) => openPlaylistMenu(event, playlist)" />
     <main class="main">
       <header class="topbar">
@@ -1362,6 +1378,7 @@ watch(
             <option value="simplified">简体歌词</option>
             <option value="traditional">繁體歌词</option>
           </select>
+          <AccountButton class="topbar-account" compact />
           <button class="ghost-action theme-toggle" type="button" :title="`外观：${currentTheme.label}（点击切换）`" :aria-label="`外观：${currentTheme.label}`" @click="cycleTheme">
             <component :is="currentTheme.icon" :size="17" />
           </button>
@@ -1383,6 +1400,7 @@ watch(
           </div>
         </div>
         <div v-if="searchError" class="error-banner">{{ searchError }}</div>
+        <HandoffCard v-if="!searchedQuery" />
         <RecommendationFeed
           v-if="!searchedQuery"
           :tracks="recommendationTracks"
@@ -1398,11 +1416,13 @@ watch(
           :personalized="recommendationPersonal"
           @play="playTrack"
           @queue="queueTrack"
+          @queue-next="queueTrackNext"
           @open="openTrack"
           @refresh="refreshRecommendations"
           @mood="chooseRecommendationMood"
           @play-all="playRecommendations"
           @queue-all="queueRecommendations"
+          @queue-next-all="queueRecommendationsNext"
           @playlist="openRecommendedPlaylist"
           @like="likeRecommendation"
           @less="suggestLessRecommendation"
@@ -1414,6 +1434,7 @@ watch(
           empty-text="没有找到匹配的歌曲，换个关键词试试，或返回推荐。"
           @play="playTrack"
           @queue="queueTrack"
+          @queue-next="queueTrackNext"
           @open="openTrack"
           @menu="openSongMenu"
         />
@@ -1438,6 +1459,7 @@ watch(
           @show-queue="openQueueView"
           @play="playTrack"
           @queue="queueTrack"
+          @queue-next="queueTrackNext"
           @open="openTrack"
           @menu="openSongMenu"
         />
@@ -1450,6 +1472,7 @@ watch(
             <h1>播放队列</h1>
           </div>
         </div>
+        <HandoffCard />
         <QueuePanel embedded />
       </section>
 
@@ -1472,6 +1495,7 @@ watch(
           @show-queue="openQueueView"
           @play="playTrack"
           @queue="queueTrack"
+          @queue-next="queueTrackNext"
           @open="openTrack"
           @menu="openSongMenu($event, activePlaylist.id)"
         />
@@ -1608,6 +1632,9 @@ watch(
     </Transition>
     <audio ref="audioRef" preload="auto" crossorigin="anonymous" />
 
+    <Transition name="dialog">
+      <AccountDialog v-if="account.dialogOpen" />
+    </Transition>
     <Transition name="dialog">
       <ImportDialog v-if="importOpen" :platforms="platforms" @close="importOpen = false" @imported="finishImport" />
     </Transition>

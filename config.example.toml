@@ -47,3 +47,14 @@ cookie = ""
 enabled = true
 base_url = "https://api.vkeys.cn"
 token = ""
+
+[auth]
+# Accounts and cross-device playlist/queue sync (needs db.mysql.url).
+# Leave rp_origin empty to disable. Passkeys are bound to this origin.
+rp_origin = ""
+# rp_id = ""             # defaults to the origin's host
+# Cloudflare Turnstile for sign-up; empty keys disable the challenge.
+turnstile_site_key = ""
+turnstile_secret = ""
+# session_days = 30
+# cookie_secure = true   # set false only for plain-HTTP local testing

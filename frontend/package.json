@@ -20,10 +20,14 @@
     "@pixi/filter-bulge-pinch": "^5.1.1",
     "@pixi/filter-color-matrix": "^7.4.3",
     "@pixi/sprite": "^7.4.3",
+    "lib0": "^0.2.119",
     "lucide-vue-next": "^1.0.0",
     "opencc-js": "^1.4.2",
     "pinia": "^3.0.4",
-    "vue": "^3.5.39"
+    "vue": "^3.5.39",
+    "y-indexeddb": "^9.0.12",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.7",

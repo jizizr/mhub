@@ -1,5 +1,5 @@
 const APP_CACHE = "music-web-app-v1";
-const APP_SHELL = ["/", "/manifest.webmanifest"];
+const APP_SHELL = ["/", "/manifest.webmanifest?v=29e8713a10", "/manifest-dark.webmanifest?v=29e8713a10"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -27,6 +27,12 @@ self.addEventListener("fetch", (event) => {
   // CacheStorage does not honor Cache-Control: no-store automatically.
   if (isDocumentationUrl(url)) return;
   if (url.pathname.startsWith("/api/") || url.pathname === "/health") return;
+
+  // Install metadata must reflect the current release; retain an offline copy.
+  if (request.destination === "manifest" || /^\/manifest(?:-dark)?\.webmanifest$/.test(url.pathname)) {
+    event.respondWith(networkFirst(request, url.pathname, { cache: "no-cache" }));
+    return;
+  }
 
   if (request.mode === "navigate") {
     event.respondWith(networkFirst(request, "/"));
@@ -70,10 +76,10 @@ async function removeCachedDocumentation() {
   }
 }
 
-async function networkFirst(request, fallbackUrl) {
+async function networkFirst(request, fallbackUrl, fetchOptions) {
   const cache = await caches.open(APP_CACHE);
   try {
-    const response = await fetch(request);
+    const response = await fetch(request, fetchOptions);
     if (response.ok) await cache.put(request, response.clone());
     return response;
   } catch {

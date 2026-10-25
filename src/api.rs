@@ -82,6 +82,8 @@ pub struct AppState {
     downloads: Arc<RwLock<HashMap<String, DownloadTask>>>,
     /// Wakes long-polling status requests after a task changes state.
     task_events: Arc<Notify>,
+    /// Accounts and sync; `None` when `[auth]` is not configured.
+    accounts: Option<Arc<crate::accounts::Accounts>>,
     inflight: Arc<RwLock<HashMap<String, Arc<InflightDownload>>>>,
     data_dir: PathBuf,
     media_base_url: Option<url::Url>,
@@ -387,6 +389,10 @@ pub fn app() -> Router {
     let state = AppState {
         downloads: Arc::new(RwLock::new(HashMap::new())),
         task_events: Arc::new(Notify::new()),
+        accounts: crate::accounts::Accounts::from_settings(
+            &SETTINGS.auth,
+            Arc::new(crate::accounts::store::MySqlStore::new(SETTINGS.db.mysql.url.clone())),
+        ),
         inflight: Arc::new(RwLock::new(HashMap::new())),
         data_dir: PathBuf::from(data_dir),
         media_base_url: media_base_url(env::var("MUSIC_API_MEDIA_BASE_URL").ok().as_deref())
@@ -397,6 +403,7 @@ pub fn app() -> Router {
 }
 
 fn app_with_state(state: AppState, serve_web: bool) -> Router {
+    let accounts = state.accounts.clone();
     let router = Router::new()
         .route("/health", get(health))
         .route("/api/v1/platforms", get(platforms))
@@ -417,7 +424,8 @@ fn app_with_state(state: AppState, serve_web: bool) -> Router {
         .route("/api/v1/playbacks/:id/cover", get(download_cover))
         .route("/api/v1/playbacks/:id/lyrics", get(download_lyrics))
         .route("/api/v1/playbacks/:id/loudness", get(playback_loudness))
-        .with_state(state);
+        .with_state(state)
+        .merge(crate::accounts::router(accounts));
 
     let router = if serve_web {
         // The frontend build writes `.br`/`.gz` siblings; serve them directly
@@ -2779,6 +2787,7 @@ mod tests {
         let state = AppState {
             downloads: Arc::new(RwLock::new(HashMap::new())),
             task_events: Arc::new(Notify::new()),
+            accounts: None,
             inflight: Arc::new(RwLock::new(HashMap::new())),
             data_dir: directory.to_path_buf(),
             media_base_url: None,
@@ -3878,6 +3887,7 @@ mod tests {
         let state = AppState {
             downloads: Arc::new(RwLock::new(HashMap::new())),
             task_events: Arc::new(Notify::new()),
+            accounts: None,
             inflight: Arc::new(RwLock::new(HashMap::new())),
             data_dir: directory.path().to_path_buf(),
             media_base_url: None,

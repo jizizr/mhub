@@ -12,7 +12,7 @@
 
 | 位置 | 用途 | 生效方式 |
 | --- | --- | --- |
-| `config.toml` | 平台凭据、wrapper 地址、可选数据库和 Telegram | 修改后重建容器进程 |
+| `config.toml` | 平台凭据、wrapper 地址、可选数据库、Telegram 和账号 `[auth]` | 修改后重建容器进程 |
 | `.env` | 监听地址、端口、日志级别及可选媒体域 | `docker compose up -d` |
 | `MUSIC_MEDIA_BASE_URL` | 已完成媒体的独立源；默认同源 | 改动后 `docker compose up -d --build` |
 | `MUSIC_LEGACY_MEDIA_BASE_URL` | 迁移后旧队列媒体地址的兼容源 | 改动后重新构建前端 |
@@ -26,7 +26,7 @@
 ## 外部服务
 
 - **Apple Music**：自行部署并认证兼容的 raw wrapper 或 wrapper-lite，在配置中填入容器可访问的地址。`127.0.0.1` 在容器里指容器自身。wrapper-lite 默认关闭；需要时设置 `wrapper_lite_enabled` 和对应 URL，保留旧 wrapper 回退配置。区域、账号授权和上游可用性仍然影响下载。Widevine 兼容路径需要自行提供 `wv_device` 设备文件，或 `wv_client_id` 与 `wv_private_key` 文件对；将文件只读挂载并填写容器内路径，公开版本不再内置第三方测试设备凭据。
-- **MySQL**：填写已有兼容 `music_cache` 表的数据库 URL；不启用数据库时仍可运行应用，但不能复用数据库记录的远端缓存。本项目不会自动创建或迁移外部数据库。
+- **MySQL**：填写已有兼容 `music_cache` 表的数据库 URL；不启用数据库时仍可运行应用，但不能复用数据库记录的远端缓存。除启用账号后自动创建的 `mhub_` 前缀表外，本项目不会创建或迁移外部数据库。
 - **Telegram**：填写 Bot token、缓存 chat ID 和可选 Bot API 地址。大文件通常需要自建 Local Bot API。该服务与本容器必须共享文件存储，并通过 `MUSIC_API_TELEGRAM_LOCAL_ROOT`、`MUSIC_API_TELEGRAM_CONTAINER_ROOT` 对齐路径；可在自己的 Compose override 中添加只读共享卷和这两个环境变量。不要把整个账号数据目录复制进镜像。
 
 本仓库不分发 wrapper 二进制或第三方服务的认证数据，也不把任何外部服务的认证操作伪装成镜像首次启动过程。
@@ -48,7 +48,20 @@ location / {
 }
 ```
 
-API 目前没有内置用户鉴权。CORS 不是访问控制，保护静态首页也不能代替保护 `/api/`。对外部署应在代理层统一控制访问并限制请求频率。不要在代理日志里记录 Cookie 或敏感查询参数。
+音乐 API 本身没有用户鉴权，账号只保护个人歌单和接力播放。CORS 不是访问控制，保护静态首页也不能代替保护 `/api/`。对外部署应在代理层统一控制访问并限制请求频率。不要在代理日志里记录 Cookie 或敏感查询参数。
+
+## 账号与同步
+
+账号功能默认关闭。启用时在 `config.toml` 的 `[auth]` 中设置：
+
+- `rp_origin`：用户访问的 HTTPS origin，如 `https://music.example.com`；`rp_id` 为空时取其主机名。通行密钥绑定 RP ID，上线后更换域名会使已注册的通行密钥失效。
+- `cookie_secure`：HTTPS 部署保持 `true`；仅本机 HTTP 调试时设为 `false`。
+- `turnstile_site_key`、`turnstile_secret`：开放注册时建议配置 Cloudflare Turnstile；留空则不校验。
+- `session_days`、`library_limit_bytes`：会话有效期与单账号资料库上限。
+
+账号需要 `db.mysql.url` 指向可写的 MySQL；表在首次使用时创建。反向代理和 CDN 需对 `/api/v1/sync/ws` 放行 WebSocket 升级（Nginx 需 `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`），并且不缓存 `/api/v1/auth/`、`/api/v1/sync/`。不支持 WebSocket 时客户端会退回 HTTP 同步，但失去实时推送。若有多个后端实例，同一账号的连接须落到同一实例（当前广播在进程内）。备份数据库时一并保留 `mhub_` 表。
+
+本机 macOS 编译 `webauthn-rs` 依赖的 OpenSSL 时，可设置 `OPENSSL_DIR=/opt/homebrew/opt/openssl@3`；Docker 构建镜像已包含所需库。
 
 ## 升级、备份与恢复
 

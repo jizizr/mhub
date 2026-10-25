@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 aes = "0.8"
 async-trait = "0.1"
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 base64 = "0.22"
 cbc = { version = "0.1", features = ["alloc"] }
 chrono = "0.4"
@@ -49,9 +49,16 @@ urlencoding = "2.1"
 uuid = { version = "1", features = ["v4"] }
 widevine = "0.1"
 widevine-proto = "0.1"
+webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
+argon2 = "0.5"
+yrs = "0.28"
+sha2 = "0.10"
+dashmap = "6"
+webauthn-rs-proto = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
+tokio-tungstenite = "0.24"
 
 [profile.release]
 lto = true

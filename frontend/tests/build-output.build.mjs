@@ -28,3 +28,23 @@ test("generated decoder validates and contains no developer machine paths", asyn
     assert.doesNotMatch(bytes.toString("latin1"), /\/(?:Users|home)\/[^/]+\//);
   }
 });
+
+test("every compressible file has fresh .br and .gz siblings with identical content", async () => {
+  const { brotliDecompressSync, gunzipSync } = await import("node:zlib");
+  const files = [];
+  const walk = async (directory) => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const url = new URL(entry.name + (entry.isDirectory() ? "/" : ""), directory);
+      if (entry.isDirectory()) await walk(url);
+      else if (/\.(?:js|mjs|css|html|wasm|svg|json|txt|webmanifest)$/.test(entry.name)) files.push(url);
+    }
+  };
+  await walk(output);
+  assert.ok(files.some((url) => url.pathname.endsWith("/manifest.webmanifest")), "small files such as manifests are covered");
+  for (const url of files) {
+    const source = await readFile(url);
+    // A missing or stale sibling would be served instead of this file.
+    assert.deepEqual(brotliDecompressSync(await readFile(new URL(`${url.href}.br`))), source, `${url.pathname}.br`);
+    assert.deepEqual(gunzipSync(await readFile(new URL(`${url.href}.gz`))), source, `${url.pathname}.gz`);
+  }
+});

@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
-import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { brotliCompress, constants, gzip } from "node:zlib";
 import { promisify } from "node:util";
@@ -14,6 +14,9 @@ const COMPRESSIBLE = /\.(?:js|mjs|css|html|wasm|svg|json|txt|webmanifest)$/;
 // The Rust server serves `.br` / `.gz` siblings through ServeDir's
 // precompressed support, so compression happens once per build instead of
 // per request (and also works without a compressing reverse proxy).
+// Every compressible file always gets both siblings, even when tiny: deploys
+// keep files missing from a build, and the server prefers a sibling, so a
+// skipped sibling would leave an older compressed copy shadowing the update.
 function precompress() {
   let outDir = "";
   return {
@@ -31,14 +34,12 @@ function precompress() {
       };
       await walk(outDir);
       await Promise.all(files.map(async (path) => {
-        if ((await stat(path)).size < 1024) return;
         const source = await readFile(path);
         const [br, gz] = await Promise.all([
           brotli(source, { params: { [constants.BROTLI_PARAM_QUALITY]: 11, [constants.BROTLI_PARAM_SIZE_HINT]: source.length } }),
           gzipAsync(source, { level: 9 }),
         ]);
-        if (br.length < source.length * 0.95) await writeFile(`${path}.br`, br);
-        if (gz.length < source.length * 0.95) await writeFile(`${path}.gz`, gz);
+        await Promise.all([writeFile(`${path}.br`, br), writeFile(`${path}.gz`, gz)]);
       }));
     },
   };

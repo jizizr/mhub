@@ -12,7 +12,7 @@ const cover = computed(() => {
 </script>
 
 <template>
-  <button class="track-info" :disabled="!media.track" @click="media.expanded = Boolean(media.track)">
+  <button class="track-info" :disabled="!media.track" :title="media.track ? '展开播放器与歌词' : '选择一首音乐开始'" @click="media.expanded = Boolean(media.track)">
     <span class="track-info__cover">
       <img v-if="cover" :src="cover" alt="" @error="media.coverBroken = true" />
     </span>

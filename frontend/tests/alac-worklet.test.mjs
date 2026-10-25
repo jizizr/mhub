@@ -57,7 +57,7 @@ const source = (await readFile(new URL("../src/core/player/alac-worklet.js", imp
   .replace('from "./audio-output.js";', `from ${JSON.stringify(new URL("../src/core/player/audio-output.js", import.meta.url).href)};`)
   .replace('from "./alac-support.js";', `from ${JSON.stringify(new URL("../src/core/player/alac-support.js", import.meta.url).href)};`)
   .replace('import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.js";', 'const initAlacWasm = async () => {}; const AlacDecoder = globalThis.__alacTestDecoder;');
-const { AlacWorkletPlayer } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const { AlacWorkletPlayer, createStreamResampler } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function until(predicate) {
   for (let i = 0; i < 100; i += 1) { if (predicate()) return; await tick(); }
@@ -1057,3 +1057,63 @@ for (const sourceKind of ['completed', 'blob', 'legacy-server', 'compressed']) {
     await player.destroy();
   });
 }
+
+function resampleInPackets(sourceRate, targetRate, packetFrames, packets, frequency) {
+  const resampler = createStreamResampler(2, sourceRate, targetRate);
+  const parts = [];
+  for (let packet = 0; packet < packets; packet += 1) {
+    const input = new Float32Array(packetFrames * 2);
+    for (let frame = 0; frame < packetFrames; frame += 1) {
+      const value = Math.sin(2 * Math.PI * frequency * (packet * packetFrames + frame) / sourceRate);
+      input[frame * 2] = value;
+      input[frame * 2 + 1] = -value;
+    }
+    parts.push(resampler.process(input));
+  }
+  parts.push(resampler.flush());
+  const output = new Float32Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { output.set(part, offset); offset += part.length; }
+  return output;
+}
+
+for (const [sourceRate, targetRate] of [[44100, 48000], [96000, 192000], [48000, 192000]]) {
+  test(`resampling ${sourceRate} -> ${targetRate} keeps phase continuous across packet boundaries`, () => {
+    const packetFrames = 4096;
+    const packets = 12;
+    const frequency = 1000;
+    const output = resampleInPackets(sourceRate, targetRate, packetFrames, packets, frequency);
+    const frames = output.length / 2;
+    const expectedFrames = packetFrames * packets * targetRate / sourceRate;
+    assert.ok(Math.abs(frames - expectedFrames) <= 1, `${frames} frames for ${expectedFrames}`);
+    // Every output frame must sit on the ideal waveform at its own time,
+    // including the frames on each side of a packet boundary.
+    let maxError = 0;
+    for (let frame = 0; frame < frames; frame += 1) {
+      const ideal = Math.sin(2 * Math.PI * frequency * frame / targetRate);
+      maxError = Math.max(maxError, Math.abs(output[frame * 2] - ideal), Math.abs(output[frame * 2 + 1] + ideal));
+    }
+    assert.ok(maxError < 0.002, `max error ${maxError}`);
+  });
+}
+
+test("same-rate conversion copies samples unchanged", () => {
+  const input = Float32Array.from([0.1, -0.1, 0.2, -0.2, 0.3]);
+  const output = createStreamResampler(2, 48000, 48000).process(input);
+  assert.deepEqual([...output], [...input.subarray(0, 4)]);
+  assert.notEqual(output.buffer, input.buffer, "the result is transferable without detaching the decoder buffer");
+});
+
+test("decoding after EOF reads the cached Blob in windows, not once per packet", async () => {
+  const player = await ready();
+  const slices = [];
+  const blob = player.completeBlob;
+  const originalSlice = blob.slice.bind(blob);
+  blob.slice = (...args) => { slices.push(args); return originalSlice(...args); };
+  await player.seek(0);
+  await until(() => player.decoding === null && player.queuedFrames > 0);
+  const decoded = player.decodeIndex;
+  assert.ok(decoded > 4, `decoded ${decoded} packets`);
+  assert.ok(slices.length <= Math.ceil(blob.size / (2 * 1024 * 1024)), `${slices.length} Blob reads for ${decoded} packets`);
+  await player.stop();
+});

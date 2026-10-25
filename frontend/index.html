@@ -2,26 +2,35 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f5f3" />
-    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#141416" />
+    <meta name="theme-color" content="#f6f5f3" />
+    <link rel="manifest" href="/manifest.webmanifest?v=29e8713a10" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="MHub" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>MHub</title>
     <script>
-      // Apply a saved explicit theme before the first paint.
+      // Set the canvas and browser chrome before styles and Vue load. Keep this
+      // small bootstrap in sync with src/utils/theme.js (covered by theme tests).
+      var theme = "system";
       try {
-        var theme = JSON.parse(localStorage.getItem("music-web-splayer-status-v3") || "{}").theme;
-        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+        theme = JSON.parse(localStorage.getItem("music-web-splayer-status-v3") || "{}").theme;
       } catch (error) { /* Storage may be unavailable. */ }
+      var explicit = theme === "light" || theme === "dark";
+      var scheme = explicit ? theme : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      var color = scheme === "dark" ? "#141416" : "#f6f5f3";
+      if (explicit) document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = scheme;
+      document.documentElement.style.backgroundColor = color;
+      document.querySelector('meta[name="theme-color"]').content = color;
+      document.querySelector('meta[name="color-scheme"]').content = scheme;
+      document.querySelector('link[rel="manifest"]').setAttribute("href", scheme === "dark" ? "/manifest-dark.webmanifest?v=29e8713a10" : "/manifest.webmanifest?v=29e8713a10");
     </script>
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" href="/favicon.ico" sizes="any" />
-    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
-    <link rel="icon" type="image/png" sizes="16x16" href="/icons/favicon-16.png" />
-    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="icon" href="/favicon.ico?v=ef7c92af9a" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png?v=ecce6220cd" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/icons/favicon-16.png?v=e9d4eb70b1" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon-681b626c7c.png" />
   </head>
   <body>
     <div id="root"></div>

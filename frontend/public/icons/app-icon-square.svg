@@ -1,0 +1,7 @@
+<!-- Full-bleed variant for hosts that apply their own mask (iOS apple-touch-icon). Rendered by scripts/generate_pwa_icons.mjs. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff7084"/><stop offset=".5" stop-color="#fa3655"/><stop offset="1" stop-color="#e6163d"/></linearGradient>
+<filter id="lift" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#8a0020" flood-opacity=".22"/></filter>
+</defs>
+<rect width="1024" height="1024" fill="url(#bg)"/>
+<g fill="#fff" filter="url(#lift)"><rect x="168.0" y="317.4" width="104.0" height="389.1" rx="52.0"/><rect x="314.0" y="204.8" width="104.0" height="614.4" rx="52.0"/><rect x="460.0" y="358.4" width="104.0" height="307.2" rx="52.0"/><rect x="606.0" y="204.8" width="104.0" height="614.4" rx="52.0"/><rect x="752.0" y="317.4" width="104.0" height="389.1" rx="52.0"/></g></svg>
