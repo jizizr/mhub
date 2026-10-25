@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from "vue";
-import { ChevronLeft, ListPlus, ListStart, LoaderCircle, Music2, Play, RefreshCcw, Shuffle, Trash2 } from "lucide-vue-next";
+import { ChevronLeft, ListPlus, ListStart, LoaderCircle, Music2, Play, RefreshCcw, RefreshCw, Shuffle, Trash2 } from "lucide-vue-next";
+import { canSyncPlaylist } from "../../services/playlist-sync";
 import SongList from "./SongList.vue";
 
 const props = defineProps({
@@ -14,9 +15,20 @@ const props = defineProps({
   busy: { type: Boolean, default: false },
   notice: { type: String, default: "" },
   currentTrack: { type: Object, default: null },
+  syncing: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "queue-next", "open", "menu", "delete"]);
+const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "queue-next", "open", "menu", "delete", "sync"]);
+const syncable = computed(() => props.local && canSyncPlaylist(props.playlist));
+const syncedLabel = computed(() => {
+  const at = props.playlist?.synced_at;
+  if (!syncable.value || !at) return "";
+  const minutes = Math.floor((Date.now() - at) / 60000);
+  if (minutes < 1) return "刚刚同步";
+  if (minutes < 60) return `${minutes} 分钟前同步`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)} 小时前同步`;
+  return `${Math.floor(minutes / 1440)} 天前同步`;
+});
 const tracks = computed(() => props.playlist?.tracks || []);
 const title = computed(() => props.playlist?.name || (props.playlist?.resource_type === "albums" ? "推荐专辑" : "推荐歌单"));
 const cover = computed(() => props.playlist?.cover || props.playlist?.cover_url || tracks.value.find((track) => track.cover)?.cover || "");
@@ -40,9 +52,14 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
       <button type="button" class="page-back" @click="emit('back')">
         <ChevronLeft :size="20" aria-hidden="true" />{{ local ? "资料库" : "主页" }}
       </button>
-      <button v-if="local" type="button" class="mini-button playlist-detail__delete" title="删除歌单" aria-label="删除歌单" @click="emit('delete')">
-        <Trash2 :size="17" aria-hidden="true" />
-      </button>
+      <div class="playlist-detail__tools">
+        <button v-if="syncable" type="button" class="ghost-action playlist-detail__sync" :disabled="syncing" title="与原歌单同步：加入新增的歌，移除原歌单已删的歌" @click="emit('sync')">
+          <RefreshCw :size="15" :class="{ 'is-spinning': syncing }" aria-hidden="true" />{{ syncing ? "同步中…" : "同步" }}
+        </button>
+        <button v-if="local" type="button" class="mini-button playlist-detail__delete" title="删除歌单" aria-label="删除歌单" @click="emit('delete')">
+          <Trash2 :size="17" aria-hidden="true" />
+        </button>
+      </div>
     </nav>
 
     <header class="playlist-detail__header">
@@ -53,7 +70,7 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
       <div class="playlist-detail__heading">
         <h1>{{ title }}</h1>
         <p class="playlist-detail__meta">
-          {{ source }} · {{ loading ? "正在读取" : error ? "未加载" : `${tracks.length} 首` }}
+          {{ source }} · {{ loading ? "正在读取" : error ? "未加载" : `${tracks.length} 首` }}<template v-if="syncedLabel"> · {{ syncedLabel }}</template>
         </p>
         <div class="playlist-detail__actions" role="group" aria-label="歌单播放方式">
           <button type="button" class="playlist-detail__action playlist-detail__action--primary" :disabled="unavailable" :title="replaceHint" @click="emit('replace')">
@@ -111,6 +128,8 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
 <style scoped>
 .playlist-detail { min-width: 0; }
 .playlist-detail__nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 18px; }
+.playlist-detail__tools { display: flex; align-items: center; gap: 6px; }
+.playlist-detail__sync { min-height: 34px; padding: 0 12px; border-radius: 999px; font-size: 13px; }
 .playlist-detail__delete { color: var(--text-muted); }
 .playlist-detail__delete:hover { color: var(--danger); }
 .playlist-detail__header { display: grid; grid-template-columns: 220px minmax(0, 1fr); align-items: end; gap: 28px; margin-bottom: 22px; }

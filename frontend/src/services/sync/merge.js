@@ -60,6 +60,8 @@ export function planGuestMerge(guest, cloud, accountId) {
         platform: playlist.platform || "",
         sourceId: playlist.source_id || "",
         sourceUrl: playlist.source_url || "",
+        sourcePlatform: playlist.source_platform || "",
+        sourceKeys: playlist.source_keys ?? null,
         cover: playlist.cover || "",
         tracks: playlist.tracks || [],
       });

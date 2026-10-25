@@ -5,6 +5,8 @@ import { matchCollection, resolveCollection } from "../../apis/music";
 import { usePlaylistStore } from "../../stores/playlists";
 import { useStatusStore } from "../../stores/status";
 import { trackFromSearch } from "../../utils/track";
+import { trackIdentity } from "../../stores/queue";
+import { platformFromUrl } from "../../services/playlist-sync";
 
 const props = defineProps({
   platforms: { type: Array, default: () => [] },
@@ -31,13 +33,9 @@ const mergeId = ref(playlists.items[0]?.id || "");
 let requestVersion = 0;
 
 const platformName = (id) => props.platforms.find((item) => item.id === id)?.label || id;
-const sourcePlatform = (value) => /music\.163\.com\//i.test(value) || /163cn\.tv\//i.test(value)
-  ? "netease"
-  : /music\.apple\.com\//i.test(value)
-    ? "applemusic"
-    : /y\.qq\.com\//i.test(value)
-      ? "tencent"
-      : status.searchPlatform;
+const sourcePlatform = (value) => platformFromUrl(value) || status.searchPlatform;
+// A same-platform import keeps its link and can later sync with the source.
+const syncable = computed(() => Boolean(collection.value && collection.value.platform === target.value));
 
 function chosen(item, index) {
   const selected = selections.value[index];
@@ -141,6 +139,10 @@ function submit() {
       platform: matches.value?.target_platform || target.value,
       sourceId: collection.value.id,
       sourceUrl: collection.value.source_url,
+      sourcePlatform: collection.value.platform,
+      // Everything in the source counts as seen, so songs left out here are
+      // not added back by a later sync.
+      sourceKeys: syncable.value ? collection.value.items.map((item) => trackIdentity(trackFromSearch(item, "high"))) : null,
     })
     : playlists.merge(mergeId.value, tracks);
   if (!playlist) return;
@@ -264,6 +266,9 @@ onBeforeUnmount(() => {
               <option v-for="playlist in playlists.items" :key="playlist.id" :value="playlist.id">{{ playlist.name }}</option>
             </select>
             <button type="button" class="primary-action" :disabled="!canImport" @click="submit">导入 {{ selectedTracks.length }} 首</button>
+            <p v-if="mode === 'create'" class="import__sync-hint">
+              {{ syncable ? "保留原歌单链接，每天自动同步新增和删除的歌曲" : "跨平台导入不随原歌单更新" }}
+            </p>
           </footer>
         </template>
       </template>
@@ -346,4 +351,5 @@ onBeforeUnmount(() => {
   .import-row__candidates { margin-left: 0; }
   .import__footer .primary-action { flex: 1 1 100%; justify-content: center; }
 }
+.import__sync-hint { flex-basis: 100%; margin: 0; color: var(--text-muted); font-size: 12px; }
 </style>

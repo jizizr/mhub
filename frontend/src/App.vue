@@ -1,6 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Ban, ChevronLeft, ChevronRight, Disc3, FolderOpen, HardDrive, Heart, ListMusic, ListPlus, ListStart, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, Search, Trash2, X } from "lucide-vue-next";
+import { Ban, ChevronLeft, ChevronRight, Disc3, FolderOpen, HardDrive, Heart, ListMusic, ListPlus, ListStart, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, RefreshCw, Search, Trash2, X } from "lucide-vue-next";
 import {
   audioUrl,
   createPlayback,
@@ -50,6 +50,7 @@ import { useStatusStore } from "./stores/status";
 import { formatSize } from "./utils/format";
 import { createThemeController } from "./utils/theme.js";
 import { trackFromPlayback, trackFromSearch } from "./utils/track";
+import { canSyncPlaylist } from "./services/playlist-sync";
 
 const audioRef = ref(null);
 const platforms = ref([]);
@@ -1020,6 +1021,28 @@ function queuePlaylist(id) {
   appendPlaylistQueue(playlists.getById(id));
 }
 
+async function syncPlaylistFromSource(id) {
+  try {
+    const result = await playlists.syncFromSource(id);
+    if (!result) return;
+    status.toast(result.added || result.removed ? `已同步：新增 ${result.added} 首，移除 ${result.removed} 首` : "已是最新");
+  } catch (error) {
+    status.toast(error?.message || "同步失败，请稍后再试");
+  }
+}
+
+// Daily background sync of imported playlists, after start-up work settles.
+function scheduleAutoSync() {
+  if (appUnmounted) return;
+  const run = async () => {
+    if (appUnmounted || document.visibilityState !== "visible") return;
+    const summary = await playlists.syncDue();
+    if (summary.playlists) status.toast(`已同步 ${summary.playlists} 个歌单：新增 ${summary.added} 首，移除 ${summary.removed} 首`);
+  };
+  if ("requestIdleCallback" in window) window.requestIdleCallback(() => void run(), { timeout: 8000 });
+  else window.setTimeout(() => void run(), 5000);
+}
+
 function runPlaylistMenu(action) {
   const id = playlistMenu.value.playlistId;
   closePlaylistMenu();
@@ -1029,6 +1052,7 @@ function runPlaylistMenu(action) {
   if (action === "queue") queuePlaylist(id);
   if (action === "next") nextPlaylistQueue(playlists.getById(id));
   if (action === "rename") renamePlaylist(id);
+  if (action === "sync") void syncPlaylistFromSource(id);
   if (action === "delete") deletePlaylist(id);
 }
 
@@ -1285,7 +1309,8 @@ onMounted(() => {
     { id: "netease", label: "网易云音乐" },
   ]).then((items) => { if (!appUnmounted) platforms.value = items; });
   void loadRecommendations();
-  void account.init();
+  // Account start-up may swap in the synced library; sync sources after it.
+  void account.init().finally(scheduleAutoSync);
   window.addEventListener("pagehide", handlePageHide);
   document.addEventListener("visibilitychange", handleVisibility);
   // Keep other devices' hand-off position fresh while this one plays.
@@ -1459,6 +1484,8 @@ watch(
           @append="appendPlaylistQueue(activePlaylist)"
           @next="nextPlaylistQueue(activePlaylist)"
           @delete="deleteActivePlaylist"
+          :syncing="playlists.syncing.includes(activePlaylist.id)"
+          @sync="syncPlaylistFromSource(activePlaylist.id)"
           @play="playTrack"
           @queue="queueTrack"
           @queue-next="queueTrackNext"
@@ -1552,6 +1579,7 @@ watch(
         <button type="button" role="menuitem" @click="runPlaylistMenu('queue')"><ListPlus :size="16" />加入播放队列</button>
         <button type="button" role="menuitem" @click="runPlaylistMenu('next')"><ListStart :size="16" />下一首播放</button>
         <button type="button" role="menuitem" @click="runPlaylistMenu('rename')"><Pencil :size="16" />重命名</button>
+        <button v-if="canSyncPlaylist(playlists.getById(playlistMenu.playlistId))" type="button" role="menuitem" :disabled="playlists.syncing.includes(playlistMenu.playlistId)" @click="runPlaylistMenu('sync')"><RefreshCw :size="16" />与原歌单同步</button>
         <div class="context-menu__divider"></div>
         <button type="button" role="menuitem" class="is-danger" @click="runPlaylistMenu('delete')"><Trash2 :size="16" />删除歌单</button>
       </div>

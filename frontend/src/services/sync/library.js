@@ -1,7 +1,8 @@
 // The account library as a Yjs document:
 //
 //   playlists: Y.Map<id, Y.Map{ name, platform, source_id, source_url, cover,
-//                               created_at, updated_at, order: Y.Array<key> }>
+//                               created_at, updated_at, order: Y.Array<key>,
+//                               source_platform, source_keys: key[], synced_at }>
 //   tracks:    Y.Map<key, { platform, source_id, title, artist, cover }>
 //   taste:     Y.Map{ liked: Y.Array<key>, less: Y.Array<key> }
 //
@@ -82,6 +83,9 @@ export function readLibrary(doc) {
       platform: entry.get("platform") || "",
       source_id: entry.get("source_id") || "",
       source_url: entry.get("source_url") || "",
+      source_platform: entry.get("source_platform") || "",
+      source_keys: Array.isArray(entry.get("source_keys")) ? entry.get("source_keys") : null,
+      synced_at: entry.get("synced_at") || 0,
       cover: entry.get("cover") || list[0]?.cover || "",
       created_at: entry.get("created_at") || 0,
       updated_at: entry.get("updated_at") || 0,
@@ -96,7 +100,7 @@ export function readLibrary(doc) {
   return { playlists: items, liked: keysOf("liked"), less: keysOf("less") };
 }
 
-export function createPlaylist(doc, { id, name, platform = "", sourceId = "", sourceUrl = "", cover = "", tracks = [], now = Date.now() }) {
+export function createPlaylist(doc, { id, name, platform = "", sourceId = "", sourceUrl = "", sourcePlatform = "", sourceKeys = null, cover = "", tracks = [], now = Date.now() }) {
   doc.transact(() => {
     const { playlists, tracks: tracksMap } = roots(doc);
     const keys = [...new Set(rememberTracks(tracksMap, tracks))];
@@ -105,6 +109,11 @@ export function createPlaylist(doc, { id, name, platform = "", sourceId = "", so
     entry.set("platform", platform);
     entry.set("source_id", sourceId);
     entry.set("source_url", sourceUrl);
+    if (sourcePlatform) entry.set("source_platform", sourcePlatform);
+    if (Array.isArray(sourceKeys)) {
+      entry.set("source_keys", sourceKeys);
+      entry.set("synced_at", now);
+    }
     entry.set("cover", cover || tracks[0]?.cover || "");
     entry.set("created_at", now);
     entry.set("updated_at", now);
@@ -136,6 +145,32 @@ export function appendTracks(doc, id, tracks, now = Date.now()) {
     added = keys.length;
   }, LOCAL);
   return added;
+}
+
+/**
+ * Apply a planPlaylistSync() result with the smallest edits (delete keys,
+ * insert keys after a neighbour), so concurrent edits on other devices merge.
+ */
+export function syncPlaylist(doc, id, { tracks, plan, sourceKeys, sourcePlatform, now = Date.now() }) {
+  doc.transact(() => {
+    const entry = playlistEntry(doc, id);
+    const order = entry?.get("order");
+    if (!(order instanceof Y.Array)) return;
+    rememberTracks(roots(doc).tracks, tracks);
+    const removed = new Set(plan.remove);
+    const values = order.toArray();
+    for (let index = values.length - 1; index >= 0; index -= 1) {
+      if (removed.has(values[index])) order.delete(index, 1);
+    }
+    for (const { key, after } of plan.insert) {
+      const position = after === null ? 0 : order.toArray().indexOf(after) + 1;
+      order.insert(position, [key]);
+    }
+    entry.set("source_keys", sourceKeys);
+    entry.set("source_platform", sourcePlatform);
+    entry.set("synced_at", now);
+    if (plan.remove.length || plan.insert.length) entry.set("updated_at", now);
+  }, LOCAL);
 }
 
 export function renamePlaylist(doc, id, name, now = Date.now()) {

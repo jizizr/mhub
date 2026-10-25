@@ -2,6 +2,8 @@ import { defineStore } from "pinia";
 import { markRaw } from "vue";
 import { trackIdentity } from "./queue";
 import { trackFromSearch } from "../utils/track.js";
+import { resolveCollection } from "../apis/music.js";
+import { canSyncPlaylist, isSyncDue, planPlaylistSync, sourcePlatformOf, syncedTracks } from "../services/playlist-sync.js";
 
 const STORAGE_KEY = "music-web-splayer-playlists-v1";
 const TASTE_KEYS = { liked: "music-web-splayer-recommendation-liked-v1", less: "music-web-splayer-recommendation-less-v1" };
@@ -57,6 +59,10 @@ function normalizePlaylist(item) {
     platform: item.platform || "",
     source_id: item.source_id || "",
     source_url: item.source_url || "",
+    source_platform: item.source_platform || "",
+    // Source keys at the last sync (null for imports made before syncing).
+    source_keys: Array.isArray(item.source_keys) ? item.source_keys : null,
+    synced_at: item.synced_at || 0,
     cover: item.cover || item.tracks?.[0]?.cover || "",
     tracks: uniqueTracks(item.tracks),
     created_at: item.created_at || Date.now(),
@@ -70,6 +76,8 @@ export const usePlaylistStore = defineStore("playlists", {
     liked: restoreTaste("liked"),
     less: restoreTaste("less"),
     mode: "local",
+    /** Ids of playlists syncing from their source right now. */
+    syncing: [],
   }),
   getters: {
     count: (state) => state.items.length,
@@ -122,10 +130,13 @@ export const usePlaylistStore = defineStore("playlists", {
       this[kind] = [key, ...this[kind].filter((item) => item !== key)].slice(0, TASTE_LIMIT);
       localStorage.setItem(TASTE_KEYS[kind], JSON.stringify(this[kind]));
     },
-    create({ name, tracks, platform, sourceId, sourceUrl }) {
+    create({ name, tracks, platform, sourceId, sourceUrl, sourcePlatform, sourceKeys }) {
       if (cloud) {
         const id = makeId();
-        cloud.ops.createPlaylist(cloud.doc, { id, name, tracks: uniqueTracks(tracks), platform: platform || "", sourceId: sourceId || "", sourceUrl: sourceUrl || "" });
+        cloud.ops.createPlaylist(cloud.doc, {
+          id, name, tracks: uniqueTracks(tracks), platform: platform || "", sourceId: sourceId || "", sourceUrl: sourceUrl || "",
+          sourcePlatform: sourcePlatform || "", sourceKeys: sourceKeys || null,
+        });
         this.refreshCloud();
         return this.getById(id);
       }
@@ -137,6 +148,9 @@ export const usePlaylistStore = defineStore("playlists", {
         platform,
         source_id: sourceId,
         source_url: sourceUrl,
+        source_platform: sourcePlatform,
+        source_keys: sourceKeys,
+        synced_at: sourceKeys ? now : 0,
         created_at: now,
         updated_at: now,
       });
@@ -191,6 +205,64 @@ export const usePlaylistStore = defineStore("playlists", {
       playlist.updated_at = Date.now();
       this.save();
       return playlist;
+    },
+    /**
+     * Merge the source playlist's current songs into playlist `id`
+     * (services/playlist-sync.js). Returns { added, removed } or null.
+     */
+    applySourceSync(id, upstreamTracks, now = Date.now()) {
+      const playlist = this.getById(id);
+      if (!playlist) return null;
+      const tracks = uniqueTracks(upstreamTracks);
+      const upstream = tracks.map(trackIdentity);
+      const plan = planPlaylistSync({ local: playlist.tracks.map(trackIdentity), base: playlist.source_keys, upstream });
+      const sourcePlatform = sourcePlatformOf(playlist);
+      if (cloud) {
+        cloud.ops.syncPlaylist(cloud.doc, id, { tracks, plan, sourceKeys: upstream, sourcePlatform, now });
+        this.refreshCloud();
+      } else {
+        playlist.tracks = syncedTracks(playlist.tracks, tracks, plan, trackIdentity);
+        playlist.source_keys = upstream;
+        playlist.source_platform = sourcePlatform;
+        playlist.synced_at = now;
+        if (plan.remove.length || plan.insert.length) {
+          playlist.cover ||= playlist.tracks[0]?.cover || "";
+          playlist.updated_at = now;
+        }
+        this.save();
+      }
+      return { added: plan.insert.length, removed: plan.remove.length };
+    },
+    /** Fetch the source playlist and merge it in. Throws on network errors. */
+    async syncFromSource(id) {
+      const playlist = this.getById(id);
+      if (!canSyncPlaylist(playlist) || this.syncing.includes(id)) return null;
+      this.syncing = [...this.syncing, id];
+      try {
+        const collection = await resolveCollection({ platform: sourcePlatformOf(playlist), url: playlist.source_url });
+        if (!collection.items?.length) throw new Error("源歌单为空或暂时无法读取");
+        return this.applySourceSync(id, collection.items.map((item) => trackFromSearch(item, "high")));
+      } finally {
+        this.syncing = this.syncing.filter((item) => item !== id);
+      }
+    },
+    /** Daily background sync of due playlists, one at a time. */
+    async syncDue({ limit = 10, now = Date.now() } = {}) {
+      const due = this.items.filter((playlist) => isSyncDue(playlist, now)).slice(0, limit);
+      const summary = { playlists: 0, added: 0, removed: 0, failed: 0 };
+      for (const playlist of due) {
+        try {
+          const result = await this.syncFromSource(playlist.id);
+          if (result && (result.added || result.removed)) {
+            summary.playlists += 1;
+            summary.added += result.added;
+            summary.removed += result.removed;
+          }
+        } catch {
+          summary.failed += 1;
+        }
+      }
+      return summary;
     },
     remove(id) {
       if (cloud) {
