@@ -31,6 +31,10 @@ def allowed(path):
         return False
     if path in ROOT_FILES or path in DOCS:
         return True
+    # README screenshots and diagrams: published in Git, but not part of the
+    # source download (public_files below does not enumerate them).
+    if len(p.parts) == 3 and p.parts[:2] == ('docs', 'images') and p.suffix in {'.png', '.webp', '.svg', '.jpg'}:
+        return True
     if any(part in {'node_modules', 'target', '__pycache__', 'docs', 'pkg'} for part in p.parts):
         return False
     if p.name.startswith('.env') or p.name == '.DS_Store' or p.suffix in {'.pem', '.key', '.log', '.sqlite', '.db', '.har', '.wvd', '.bin'}:

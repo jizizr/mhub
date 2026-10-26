@@ -14,8 +14,21 @@ Frontend interaction and lyric integration were developed with reference to:
 The standalone wasm/alac-decoder crate retains its MIT OR Apache-2.0 license.
 The upstream alac decoder is MIT OR Apache-2.0.
 
+Copyleft dependencies keep their own terms: the widevine and widevine-proto
+crates are GPL-3.0 (combined with this AGPL-3.0 work under section 13 of both
+licenses); webauthn-rs, cssparser, selectors and related crates are MPL-2.0 and
+are used unmodified; @applemusic-like-lyrics/* is AGPL-3.0-only.
+
+The user interface follows the layout and interaction of the Apple Music web
+player. No Apple code, icons, logos or fonts are included; the interface uses
+system fonts, and SF Pro is not distributed because of its license.
+
 Apple Music and other service names are trademarks of their respective owners.
 This project is independent and is not affiliated with those services.
+Music, artwork and lyrics obtained through those services belong to their
+rights holders and are subject to each service's terms; this license grants no
+rights to that content. Album art and lyrics in README screenshots are shown
+only to illustrate features.
 
 The Docker image includes corresponding application source at /source.tar.gz.
 Dependency versions are recorded in the Cargo and npm lockfiles. See also

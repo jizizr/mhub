@@ -1,6 +1,6 @@
 <script setup>
-import { computed } from "vue";
-import { ChevronLeft, ChevronRight, Ellipsis, ListMusic, LoaderCircle, Play, RefreshCcw, Shuffle, Sparkles } from "lucide-vue-next";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Ellipsis, ListMusic, LoaderCircle, Play, RefreshCcw, Shuffle, Sparkles } from "lucide-vue-next";
 import { trackIdentity } from "../../stores/queue";
 
 // Per-song actions (next, queue, like, less, add to playlist) live in the
@@ -147,11 +147,62 @@ function handleRailClick(event) {
   delete rail.dataset.suppressClick;
 }
 
-function scrollRail(button, direction) {
-  const rail = button?.parentElement?.querySelector(".artwork-rail");
+// Paddles page by whole cards, as Apple Music's shelves do. A turn still
+// animating is the starting point for the next click, so quick clicks add up
+// instead of being swallowed; snapping is paused until the glide ends.
+const featuredRail = ref(null);
+const railAtStart = ref(true);
+const railAtEnd = ref(true);
+let railResize = null;
+
+function updateRailEnds() {
+  const rail = featuredRail.value;
   if (!rail) return;
-  rail.scrollBy({ left: direction * Math.max(rail.clientWidth * 0.72, 220), behavior: "smooth" });
+  const max = rail.scrollWidth - rail.clientWidth;
+  const position = Number(rail.dataset.pageTarget ?? rail.scrollLeft);
+  railAtStart.value = position <= 1;
+  railAtEnd.value = position >= max - 1;
 }
+
+function scrollRail(direction) {
+  const rail = featuredRail.value;
+  const cards = rail ? [...rail.children] : [];
+  if (!cards.length) return;
+  const style = getComputedStyle(rail);
+  const visible = rail.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const step = cards.length > 1 ? cards[1].offsetLeft - cards[0].offsetLeft : visible;
+  // A page is every card that fits, counting the gap after the last one.
+  const gap = step - cards[0].offsetWidth;
+  const perPage = Math.max(1, Math.floor((visible + gap + 1) / step));
+  const max = rail.scrollWidth - rail.clientWidth;
+  const from = Number(rail.dataset.pageTarget ?? rail.scrollLeft);
+  const index = Math.round(from / step) + direction * perPage;
+  const target = Math.max(0, Math.min(max, index * step));
+  if (Math.abs(target - from) < 1) return;
+  rail.dataset.pageTarget = String(target);
+  pauseSnap(rail);
+  rail.scrollTo({ left: target, behavior: "smooth" });
+  updateRailEnds();
+  const finish = () => {
+    if (rail.dataset.pageTarget !== String(target)) return;
+    delete rail.dataset.pageTarget;
+    rail.classList.remove("is-free-scrolling");
+    updateRailEnds();
+  };
+  rail.addEventListener("scrollend", finish, { once: true });
+  railTimers.set(rail, window.setTimeout(finish, 700));
+}
+
+onMounted(() => {
+  railResize = new ResizeObserver(updateRailEnds);
+  if (featuredRail.value) railResize.observe(featuredRail.value);
+  updateRailEnds();
+});
+watch(() => props.recommendationPlaylists, () => nextTick(() => {
+  if (featuredRail.value && railResize) railResize.observe(featuredRail.value);
+  updateRailEnds();
+}));
+onBeforeUnmount(() => railResize?.disconnect());
 
 const GENERIC_TAG = /^(为你精选|精选推荐\s*\d+)$/;
 
@@ -207,9 +258,14 @@ function keyFor(track, index) {
     <section v-if="recommendationPlaylists.length" class="recommend-section">
       <h2 class="section-title">为你推荐</h2>
       <div class="recommend-rail-shell">
-        <button class="recommend-rail-control recommend-rail-control--prev" type="button" aria-label="向左浏览" @click="scrollRail($event.currentTarget, -1)"><ChevronLeft :size="18" /></button>
+        <!-- Apple Music's paddles: a tall thin chevron on frosted glass. -->
+        <button class="recommend-rail-control recommend-rail-control--prev" type="button" aria-label="向左浏览" :disabled="railAtStart" @click="scrollRail(-1)">
+          <svg viewBox="0 0 9 31" aria-hidden="true"><path d="M7 2 1.8 15.5 7 29" /></svg>
+        </button>
         <div
+          ref="featuredRail"
           class="artwork-rail artwork-rail--featured"
+          @scroll.passive="updateRailEnds"
           tabindex="0"
           aria-label="推荐歌单"
           @pointerdown="beginRailDrag"
@@ -220,24 +276,32 @@ function keyFor(track, index) {
           @click.capture="handleRailClick"
           @dragstart.prevent
         >
-          <article v-for="playlist in recommendationPlaylists" :key="playlist.id" class="artwork-card">
+          <!-- Apple Music's hero cards: portrait, the artwork bleeding into a
+               blurred copy of itself, with the text laid over the bottom. -->
+          <article v-for="playlist in recommendationPlaylists" :key="playlist.id" class="artwork-card artwork-card--hero">
             <div class="artwork-card__art">
-              <button class="artwork-card__cover" :data-recommendation-id="playlist.id" type="button" :aria-label="`查看${playlist.resource_type === 'albums' ? '专辑' : '歌单'}：${playlist.name}`" @click="emit('playlist', playlist)">
-                <img v-if="playlist.cover" :src="playlist.cover" alt="" loading="lazy" />
+              <button class="artwork-card__cover artwork-card__hero" :data-recommendation-id="playlist.id" type="button" :aria-label="`查看${playlist.resource_type === 'albums' ? '专辑' : '歌单'}：${playlist.name}`" @click="emit('playlist', playlist)">
+                <template v-if="playlist.cover">
+                  <img class="artwork-card__hero-backdrop" :src="playlist.cover" alt="" loading="lazy" aria-hidden="true" />
+                  <img class="artwork-card__hero-art" :src="playlist.cover" alt="" loading="lazy" />
+                </template>
                 <Sparkles v-else :size="24" />
+                <span class="artwork-card__hero-text">
+                  <small class="artwork-card__eyebrow">{{ playlist.resource_type === "albums" ? "专辑" : "歌单" }}</small>
+                  <strong>{{ playlist.name }}</strong>
+                  <small>{{ playlist.curator || "Apple Music" }}</small>
+                </span>
               </button>
               <button class="artwork-card__play" :class="{ 'is-pending': pendingPlaylist === playlist.id }" type="button" title="播放" :aria-label="`播放${playlist.resource_type === 'albums' ? '专辑' : '歌单'}：${playlist.name}`" @click="emit('play-playlist', playlist)">
                 <LoaderCircle v-if="pendingPlaylist === playlist.id" class="is-spinning" :size="16" />
                 <Play v-else :size="15" fill="currentColor" />
               </button>
             </div>
-            <button class="artwork-card__text" type="button" tabindex="-1" aria-hidden="true" @click="emit('playlist', playlist)">
-              <strong>{{ playlist.name }}</strong>
-              <small>{{ playlist.curator || "Apple Music" }}</small>
-            </button>
           </article>
         </div>
-        <button class="recommend-rail-control recommend-rail-control--next" type="button" aria-label="向右浏览" @click="scrollRail($event.currentTarget, 1)"><ChevronRight :size="18" /></button>
+        <button class="recommend-rail-control recommend-rail-control--next" type="button" aria-label="向右浏览" :disabled="railAtEnd" @click="scrollRail(1)">
+          <svg viewBox="0 0 9 31" aria-hidden="true"><path d="M2 2 7.2 15.5 2 29" /></svg>
+        </button>
       </div>
     </section>
 

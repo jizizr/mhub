@@ -56,6 +56,8 @@
   --am-scrubber-track: rgba(0, 0, 0, 0.1);
   --am-scrubber-fill: rgba(0, 0, 0, 0.5);
   --am-platter: rgba(246, 246, 246, 0.48);
+  --am-paddle-bg: rgba(246, 246, 246, 0.48);
+  --am-paddle-active: rgba(246, 246, 246, 0.6);
   --am-track-hover: rgba(0, 0, 0, 0.06);
   --am-track-selected: rgba(0, 0, 0, 0.12);
   --am-track-alt: rgba(0, 0, 0, 0.016);
@@ -141,6 +143,8 @@
   --am-scrubber-track: rgba(255, 255, 255, 0.1);
   --am-scrubber-fill: rgba(255, 255, 255, 0.55);
   --am-platter: rgba(246, 246, 246, 0.48);
+  --am-paddle-bg: rgba(40, 40, 40, 0.5);
+  --am-paddle-active: rgba(40, 40, 40, 0.6);
   --am-track-hover: rgba(255, 255, 255, 0.06);
   --am-track-selected: rgba(255, 255, 255, 0.2);
   --am-track-alt: rgba(255, 255, 255, 0.016);
@@ -213,6 +217,8 @@
     --am-scrubber-track: rgba(255, 255, 255, 0.1);
     --am-scrubber-fill: rgba(255, 255, 255, 0.55);
     --am-platter: rgba(246, 246, 246, 0.48);
+    --am-paddle-bg: rgba(40, 40, 40, 0.5);
+    --am-paddle-active: rgba(40, 40, 40, 0.6);
     --am-track-hover: rgba(255, 255, 255, 0.06);
     --am-track-selected: rgba(255, 255, 255, 0.2);
     --am-track-alt: rgba(255, 255, 255, 0.016);
@@ -621,28 +627,37 @@ button.artwork-card__play:hover { background: rgba(255, 255, 255, .86); color: v
 .recommend-list-row__text small { color: var(--text-muted); font-size: 13px; }
 .recommend-loading { min-height: 100px; display: grid; place-items: center; padding: 22px; border-radius: 14px; background: var(--surface); color: var(--text-muted); font-size: 14px; }
 .recommend-rail-shell { position: relative; min-width: 0; }
+/* Shelf paddles, from Apple Music's shelf-grid-nav: a 28×52 frosted pill
+   with a tall thin chevron, shown while the shelf is hovered and hidden at
+   either end. Centred with `translate`, so the global pressed `transform`
+   cannot move it out from under the pointer mid-click. */
 .recommend-rail-control {
   position: absolute;
-  z-index: 2;
-  top: 38%;
+  z-index: 3;
+  top: calc(50% - 3px);
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
-  color: var(--text);
-  box-shadow: var(--shadow-sm);
+  width: 28px;
+  height: 52px;
+  padding: 0;
+  border: 0;
+  border-radius: 1000px;
+  background: var(--am-paddle-bg);
+  color: var(--am-secondary);
+  -webkit-backdrop-filter: saturate(190%) blur(60px);
+  backdrop-filter: saturate(190%) blur(60px);
   opacity: 0;
-  transform: translateY(-50%);
-  transition: opacity var(--motion-fast);
+  translate: 0 -50%;
+  transition: opacity .25s linear, background-color .25s linear, color .25s linear;
   cursor: pointer;
 }
-.recommend-rail-shell:hover .recommend-rail-control, .recommend-rail-control:focus-visible { opacity: 1; }
-.recommend-rail-control:hover { color: var(--accent); }
+.recommend-rail-control svg { width: 8.5px; height: 30.5px; overflow: visible; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.recommend-rail-shell:hover .recommend-rail-control:not(:disabled), .recommend-rail-shell:focus-within .recommend-rail-control:not(:disabled) { opacity: 1; }
+.recommend-rail-control:not(:disabled):active { transform: none; background: var(--am-paddle-active); color: var(--am-primary); }
+.recommend-rail-control:disabled { opacity: 0; cursor: default; pointer-events: none; }
 .recommend-rail-control--prev { left: -12px; }
 .recommend-rail-control--next { right: -12px; }
+@media (max-width: 999px) { .recommend-rail-control { display: none; } }
 
 .song-enter-active, .song-leave-active, .song-move {
   transition: opacity var(--motion-base) var(--ease-standard), transform var(--motion-base) var(--ease-emphasized);
@@ -2057,8 +2072,7 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
   .recommend-feed { gap: 30px; }
   .recommend-section { gap: 12px; }
   .artwork-rail, .artwork-rail--featured { grid-auto-columns: calc(20% - 16px); gap: 20px; }
-  .recommend-rail-control { top: calc((100% - 30px) / 2); width: 28px; height: 52px; border: 0; border-radius: 6px; background: var(--am-platter); color: var(--am-primary); box-shadow: none; -webkit-backdrop-filter: blur(60px) saturate(1.9); backdrop-filter: blur(60px) saturate(1.9); }
-  .recommend-rail-control:hover { color: var(--am-primary); background: var(--am-platter); }
+  /* 6px inside the 40px page margin, as on Apple Music. */
   .recommend-rail-control--prev { left: -34px; }
   .recommend-rail-control--next { right: -34px; }
   .recommend-track-list { grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 20px; }
@@ -2187,4 +2201,23 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
   .queue-panel--embedded .queue-head__time { text-align: right; }
   .queue-panel--embedded .queue-item__text small { display: none; }
   .queue-panel--embedded .queue-item__artist-col, .queue-panel--embedded .queue-item__album { display: block; }
+}
+
+/* Featured shelf: Apple Music's portrait hero cards. The square cover sits at
+   the top and fades into a blurred, enlarged copy of itself; eyebrow, title
+   and subtitle are white text over the lower part. */
+.artwork-card--hero .artwork-card__hero { position: relative; display: block; aspect-ratio: 3 / 4; margin: 0; border-radius: 10px; background: #3a3a3c; color: #fff; text-align: left; isolation: isolate; }
+.artwork-card--hero .artwork-card__hero > svg { position: absolute; top: 38%; left: 50%; transform: translate(-50%, -50%); }
+.artwork-card--hero .artwork-card__hero img { position: absolute; display: block; object-fit: cover; }
+.artwork-card--hero .artwork-card__hero-backdrop { inset: -18%; width: 136%; height: 136%; filter: blur(26px) saturate(1.35) brightness(.7); transform: translateZ(0); }
+.artwork-card--hero .artwork-card__hero-art { top: 0; left: 0; width: 100%; height: auto; aspect-ratio: 1; -webkit-mask-image: linear-gradient(180deg, #000 58%, transparent 96%); mask-image: linear-gradient(180deg, #000 58%, transparent 96%); }
+.artwork-card--hero .artwork-card__hero-text { position: absolute; z-index: 2; left: 0; right: 0; bottom: 0; display: grid; gap: 1px; padding: 48px 56px 16px 16px; background: linear-gradient(180deg, transparent, rgba(0, 0, 0, .38)); }
+.artwork-card--hero .artwork-card__hero-text strong, .artwork-card--hero .artwork-card__hero-text small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artwork-card--hero .artwork-card__hero-text strong { color: #fff; font-size: 15px; font-weight: 600; line-height: 19px; }
+.artwork-card--hero .artwork-card__hero-text small { color: rgba(255, 255, 255, .72); font-size: 12px; line-height: 15px; }
+.artwork-card--hero .artwork-card__hero-text .artwork-card__eyebrow { color: rgba(255, 255, 255, .86); font-weight: 600; }
+.artwork-card--hero .artwork-card__play { left: auto; right: 14px; bottom: 18px; }
+.artwork-card--hero .artwork-card__cover::before { z-index: 1; }
+@media (max-width: 880px) {
+  .artwork-rail--featured { grid-auto-columns: 62%; }
 }
