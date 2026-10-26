@@ -8,10 +8,10 @@
 [部署指南](docs/deployment.md) · [架构说明](docs/architecture.md) · [参与贡献](CONTRIBUTING.md) · [许可证](#许可与版权)
 
 <p align="center">
-  <img src="docs/images/desktop-home.webp" alt="首页：推荐歌单、最近播放与悬浮播放条" width="100%">
+  <img src="docs/images/desktop-home.webp" alt="首页：推荐卡片从半透明侧栏下滑过，底部是悬浮播放条" width="100%">
 </p>
 <p align="center">
-  <img src="docs/images/desktop-playlist-dark.webp" alt="歌单详情：随封面取色的页面背景" width="49%">
+  <img src="docs/images/desktop-playlist.webp" alt="歌单详情：随封面取色的页面背景" width="49%">
   <img src="docs/images/desktop-lyrics.webp" alt="全屏歌词：逐字歌词与流动的封面背景" width="49%">
 </p>
 <p align="center">
@@ -44,12 +44,100 @@
 
 ## 架构
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
-  <img src="docs/images/architecture-light.svg" alt="MHub 架构：浏览器 / PWA、反向代理与媒体域、Rust 服务、外部服务" width="100%">
-</picture>
+### 部署层级
 
-图由 `scripts/generate_architecture_svg.py` 生成。模块边界、数据流和账号同步的细节见[架构说明](docs/architecture.md)。
+```mermaid
+flowchart TB
+  subgraph L1["① 浏览器 / PWA"]
+    direction LR
+    UI["Vue 3 界面<br/>Pinia 队列与资料库"] ~~~ ENGINE["播放引擎<br/>主 audio + 预载 audio<br/>ALAC WASM → AudioWorklet"] ~~~ LOCAL[("IndexedDB<br/>音频 / 歌词缓存")] ~~~ SW["Service Worker<br/>Media Session"]
+  end
+
+  subgraph L2["② 接入层"]
+    direction LR
+    PROXY["反向代理<br/>TLS · 访问控制 · 不缓冲音频"] ~~~ MEDIA["媒体域 / CDN（可选）<br/>只缓存已完成的音频"]
+  end
+
+  subgraph L3["③ MHub 服务（Rust）"]
+    direction LR
+    API["HTTP API<br/>长轮询任务状态"] ~~~ TASK["播放任务<br/>去重 · 选源 · 并发闸门"] ~~~ ADAPTER["平台适配<br/>Apple Music · 网易云 · QQ …"] ~~~ REC["推荐<br/>AutoPlay 电台"] ~~~ SYNC["账号与同步<br/>通行密钥 · yrs"]
+  end
+
+  subgraph L4["④ 存储"]
+    direction LR
+    DISK[("数据卷<br/>解密后的音频 · ALAC 包")] ~~~ DB[("MySQL<br/>music_cache 索引 · 账号")] ~~~ TG[("Telegram<br/>Bot API 文件仓库")]
+  end
+
+  subgraph L5["⑤ 上游"]
+    direction LR
+    PLAT["各平台接口<br/>搜索 · 歌单 · 音频"] ~~~ WRAP["wrapper / wrapper-lite<br/>自建 Apple 解密服务"]
+  end
+
+  L1 <==>|"REST · 长轮询 · WebSocket · 音频 Range"| L2
+  L2 <==>|"HTTP"| L3
+  L3 <==>|"读写缓存 · 查索引 · 上传 / 拉取文件"| L4
+  L3 ==>|"取歌曲信息 · 下载加密分片 · 请求解密"| L5
+```
+
+### 一首歌的数据流
+
+```mermaid
+flowchart TD
+  PLAY(["用户点播：平台 + 歌曲 ID + 音质"]) --> T1{"内存里已有<br/>同一首歌的任务？"}
+  T1 -->|"有：共享同一份下载"| OUT
+  T1 -->|没有| Q[("查询 MySQL music_cache")]
+  Q -->|"命中 file_id"| HIT
+  Q -->|未命中| MISS
+
+  subgraph HIT["A. 命中：从 Telegram 取"]
+    direction TB
+    H1["getFile 取文件路径"] --> H2{"本地 Bot API<br/>共享目录可读？"}
+    H2 -->|是| H3["读本地文件"]
+    H2 -->|否| H4["按 Range 从 Telegram 拉流"]
+    H3 & H4 --> H5[("数据卷：已解密的完整 M4A")]
+    H5 --> H6["本地把 ALAC 拆成<br/>独立音频包 .alacstream"]
+  end
+
+  subgraph MISS["B. 未命中：边下边解边播"]
+    direction TB
+    M1["平台适配<br/>解析歌曲与音质"] --> M2["拉 HLS 播放列表与 init 段"]
+    M2 --> M3["下载下一个 fMP4 加密分片"]
+    M3 --> M4["wrapper-lite 解密这一片<br/>（失败回退 wrapper → Widevine）"]
+    M4 -.->|"循环直到最后一片"| M3
+    M4 ==>|"同一片解密数据<br/>同时写两路"| FORK{{" "}}
+
+    subgraph USER["用户流：首片解密完就能播"]
+      direction TB
+      U1[".streaming<br/>浏览器可播的 fMP4"]
+      U2[".alacstream<br/>ALAC 音频包"]
+    end
+
+    subgraph CACHE["缓存流：不阻塞播放"]
+      direction TB
+      C1[".assembled<br/>累积全部解密分片"] -->|"最后一片到齐"| C2["重封装为完整 M4A"]
+      C2 --> C3[("数据卷")]
+      C2 -->|"后台 sendAudio"| C4["上传 Telegram"]
+      C4 -->|"写入 file_id"| C5[("MySQL upsert")]
+    end
+
+    FORK ==> U1 & U2
+    FORK ==> C1
+  end
+
+  USER ==>|"任务转为 streaming<br/>长轮询通知浏览器"| OUT
+  H5 & H6 ==> OUT
+
+  subgraph OUT["C. 浏览器"]
+    direction TB
+    O1{"传输方式"}
+    O1 -->|"wasm_alac"| O2["fetch 音频包<br/>中断后按 Range 续传"]
+    O2 --> O3["WASM 解码 → AudioWorklet"]
+    O1 -->|"原生"| O4["audio 元素 Range 请求"]
+    O3 & O4 --> O5[("写入 IndexedDB<br/>下次离线直接读")]
+  end
+```
+
+命中缓存时，Telegram 里存的就是解密后的完整文件，不再经过 wrapper；未命中时，每解密一片就同时写给用户和缓存，首片到手就能开播，Telegram 上传在整首下载完后后台进行，不占播放的时间。模块边界和账号同步的细节见[架构说明](docs/architecture.md)。
 
 ## 实现思路
 
@@ -130,7 +218,7 @@ src/                    Rust 服务、平台适配、音频、缓存与账号
 frontend/src/           Vue 界面、播放器、队列与浏览器缓存
 frontend/tests/         前端行为与音频管线回归测试
 wasm/alac-decoder/      独立的 Rust ALAC 解码器
-scripts/                浏览器回归、发布检查与图表生成
+scripts/                浏览器回归与发布检查
 docs/                   架构与部署说明、README 图片
 ```
 

@@ -576,16 +576,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   user-select: none;
 }
 .artwork-rail::-webkit-scrollbar { display: none; }
-/* Desktop shelves run under the page margins to the edges of the main column,
-   so cards slide out of view as in Apple Music; the first card still lines
-   up with the page inside the 40px page margins. */
+/* Desktop shelves run past the page margins: on the right to the window
+   edge, on the left under the translucent sidebar, so scrolled cards slide
+   beneath its blur as in Apple Music. The first card still lines up with
+   the page inside the 40px margins; the app clips the overflow. */
 @media (min-width: 881px) {
-  .main { overflow-x: clip; }
+  .app { overflow-x: clip; }
   .artwork-rail {
     --rail-bleed: 40px;
-    margin-inline: calc(-1 * var(--rail-bleed));
-    padding-inline: var(--rail-bleed);
-    scroll-padding-inline: var(--rail-bleed);
+    --rail-bleed-start: calc(var(--sidebar-width) + var(--rail-bleed));
+    margin-inline: calc(-1 * var(--rail-bleed-start)) calc(-1 * var(--rail-bleed));
+    padding-inline: var(--rail-bleed-start) var(--rail-bleed);
+    scroll-padding-inline: var(--rail-bleed-start) var(--rail-bleed);
   }
 }
 .artwork-rail--featured { grid-auto-columns: clamp(200px, 23%, 260px); }
@@ -2044,7 +2046,7 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
    five-up 20px-gap shelves of 7px-radius artwork with 12px captions, and
    54px track rows with 0.5px dividers, 12px rounded hover and selection. */
 @media (min-width: 881px) {
-  .sidebar { padding: 8px 12px 20px 20px; gap: 0; border-right: 0; background: var(--sidebar-bg); }
+  .sidebar { z-index: 2; padding: 8px 12px 20px 20px; gap: 0; border-right: 0; background: var(--sidebar-bg); -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px); }
   .brand { gap: 6px; height: 72px; margin: 0 0 0 -12px; padding: 0 0 0 20px; }
   .brand__mark { width: 22px; height: 22px; border-radius: 6px; box-shadow: none; }
   .brand__mark svg { width: 15px; height: 15px; }
