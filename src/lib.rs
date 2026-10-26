@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod api;
 pub mod audio;
+mod audio_cache;
 pub mod cache;
 mod loudness;
 pub mod matching;

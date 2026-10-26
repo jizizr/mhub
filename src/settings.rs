@@ -16,6 +16,38 @@ pub struct Settings {
     pub music: Music,
     #[serde(default)]
     pub auth: Auth,
+    #[serde(default)]
+    pub audio_cache: AudioCache,
+}
+
+/// Local copies of completed songs under `data/downloads`. Telegram and the
+/// platforms stay the source of truth; these files only make replays, seeking
+/// and ALAC packet streams cheap, so they are evicted by idle time and size.
+#[derive(Debug, Deserialize)]
+pub struct AudioCache {
+    /// Remove a song's local files after this many hours without a request.
+    #[serde(default = "default_audio_cache_idle_hours")]
+    pub idle_hours: u64,
+    /// Keep the directory below this size, least recently used first.
+    #[serde(default = "default_audio_cache_max_gib")]
+    pub max_gib: u64,
+}
+
+impl Default for AudioCache {
+    fn default() -> Self {
+        Self {
+            idle_hours: default_audio_cache_idle_hours(),
+            max_gib: default_audio_cache_max_gib(),
+        }
+    }
+}
+
+fn default_audio_cache_idle_hours() -> u64 {
+    72
+}
+
+fn default_audio_cache_max_gib() -> u64 {
+    20
 }
 
 /// Accounts and cross-device sync. Disabled while `rp_origin` is empty.

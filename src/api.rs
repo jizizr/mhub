@@ -4,6 +4,7 @@ use crate::{
         BrowserAudioService, PendingAudioFile, ensure_audio_file, lock_audio_path,
         needs_browser_lossless_derivative, valid_audio_file,
     },
+    audio_cache,
     cache::{MusicCache, find_music_cache, upsert_music_cache},
     loudness::{self, LoudnessResponse},
     matching,
@@ -29,7 +30,7 @@ use std::{
     io::{Cursor, SeekFrom},
     path::{Path as FsPath, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::{
     fs,
@@ -404,6 +405,7 @@ pub fn app() -> Router {
         media_base_url: media_base_url(env::var("MUSIC_API_MEDIA_BASE_URL").ok().as_deref())
             .expect("MUSIC_API_MEDIA_BASE_URL must be an HTTP(S) origin without credentials, path, query or fragment"),
     };
+    spawn_audio_cache_sweeper(state.clone());
 
     app_with_state(state, serve_web())
 }
@@ -1038,8 +1040,10 @@ async fn register_download_task(state: &AppState, task: &DownloadTask) -> Option
         .filter(|existing| existing.status != DownloadStatus::Failed)
     {
         upgrade_completed_alac_transport(existing, task.streaming_mode.as_deref());
+        audio_cache::touch(&existing.work_id);
         return Some(task_for_client(existing, task.streaming_mode.as_deref()));
     }
+    audio_cache::touch(&task.work_id);
     downloads.insert(task.id.clone(), task.clone());
     None
 }
@@ -1554,6 +1558,8 @@ async fn download_provider_track(
     };
     tokio::spawn(upload_audio_to_telegram_cache(TelegramCacheUpload {
         state: state.clone(),
+        task_id: id.clone(),
+        work_id: task.work_id.clone(),
         inflight_key,
         chat_id: upload_chat_id,
         filename: audio_filename.clone(),
@@ -1740,6 +1746,8 @@ async fn download_provider_track_streaming(
     };
     tokio::spawn(upload_audio_to_telegram_cache(TelegramCacheUpload {
         state: state.clone(),
+        task_id: id.clone(),
+        work_id: task.work_id.clone(),
         inflight_key,
         chat_id: upload_chat_id,
         filename: audio_filename.clone(),
@@ -1917,6 +1925,8 @@ async fn remove_inflight(state: &AppState, key: &str) {
 
 struct TelegramCacheUpload {
     state: AppState,
+    task_id: String,
+    work_id: String,
     inflight_key: String,
     chat_id: i64,
     filename: String,
@@ -1967,6 +1977,15 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
     cache.thumb_file_id = uploaded.thumb_file_id.unwrap_or_default();
     if let Err(err) = upsert_music_cache(&cache).await {
         tracing::warn!("failed to save music cache: {err}");
+    }
+    // Let this generation fall back to Telegram once its local files are
+    // evicted, keeping its media revision and URLs valid for open clients.
+    if let Some(task) = job.state.downloads.write().await.get_mut(&job.task_id)
+        && task.work_id == job.work_id
+        && task.file_id.is_none()
+    {
+        task.file_id = Some(cache.file_id.clone());
+        task.thumb_file_id = (!cache.thumb_file_id.is_empty()).then(|| cache.thumb_file_id.clone());
     }
     remove_inflight(&job.state, &job.inflight_key).await;
 }
@@ -2198,6 +2217,7 @@ async fn stream_growing_audio_file(
 
 async fn load_task(state: &AppState, id: &str) -> ApiResult<DownloadTask> {
     if let Some(task) = state.downloads.read().await.get(id).cloned() {
+        audio_cache::touch(&task.work_id);
         return Ok(task);
     }
 
@@ -2224,7 +2244,9 @@ async fn load_task(state: &AppState, id: &str) -> ApiResult<DownloadTask> {
     // lookup awaited the database. Never replace that live generation with
     // a separately reconstructed cache row.
     let mut downloads = state.downloads.write().await;
-    Ok(downloads.entry(id.to_string()).or_insert(task).clone())
+    let task = downloads.entry(id.to_string()).or_insert(task).clone();
+    audio_cache::touch(&task.work_id);
+    Ok(task)
 }
 
 fn task_from_cache(
@@ -2641,6 +2663,109 @@ fn prepare_audio_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
     (out.len() <= 200 * 1024).then_some(out)
 }
 
+const AUDIO_CACHE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+fn spawn_audio_cache_sweeper(state: AppState) {
+    let policy = audio_cache::Policy::from_settings(&SETTINGS.audio_cache);
+    tokio::spawn(async move {
+        // The first tick fires at once, so a restart also tidies up.
+        let mut interval = tokio::time::interval(AUDIO_CACHE_SWEEP_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) = sweep_audio_cache(&state, policy, SystemTime::now()).await {
+                tracing::warn!("audio cache sweep failed: {error}");
+            }
+        }
+    });
+}
+
+/// Remove idle or excess song directories, then forget in-memory tasks that
+/// lost their only copy or have been idle as long; Telegram-backed tasks are
+/// rebuilt from MySQL on their next request.
+async fn sweep_audio_cache(
+    state: &AppState,
+    policy: audio_cache::Policy,
+    now: SystemTime,
+) -> std::io::Result<()> {
+    let root = state.data_dir.join("downloads");
+    let mut entries = audio_cache::scan(&root).await?;
+    let protected: std::collections::HashSet<String> = state
+        .downloads
+        .read()
+        .await
+        .values()
+        .filter(|task| {
+            !matches!(
+                task.status,
+                DownloadStatus::Completed | DownloadStatus::Failed
+            )
+        })
+        .map(|task| task.work_id.clone())
+        .collect();
+    for entry in &mut entries {
+        if let Some(accessed) = audio_cache::last_access(&entry.name) {
+            entry.last_used = entry.last_used.max(accessed);
+        }
+    }
+    let scanned = entries.len();
+    let bytes: u64 = entries.iter().map(|entry| entry.bytes).sum();
+    let mut freed = 0;
+    let mut evicted = std::collections::HashSet::new();
+    for name in audio_cache::select(entries.clone(), now, policy, &protected) {
+        match fs::remove_dir_all(root.join(&name)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(directory = %name, "audio cache eviction failed: {error}");
+                continue;
+            }
+        }
+        freed += entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map_or(0, |entry| entry.bytes);
+        evicted.insert(name);
+    }
+
+    let idle = |work_id: &str| {
+        audio_cache::last_access(work_id)
+            .is_none_or(|accessed| now.duration_since(accessed).unwrap_or_default() >= policy.idle)
+    };
+    let mut forgotten = Vec::new();
+    state.downloads.write().await.retain(|_, task| {
+        if !matches!(
+            task.status,
+            DownloadStatus::Completed | DownloadStatus::Failed
+        ) {
+            return true;
+        }
+        let telegram = task
+            .file_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
+        let keep = (telegram || !evicted.contains(&task.work_id)) && !idle(&task.work_id);
+        if !keep {
+            forgotten.push(task.work_id.clone());
+        }
+        keep
+    });
+    for work_id in evicted.iter().chain(&forgotten) {
+        audio_cache::forget(work_id);
+    }
+    if !evicted.is_empty() || !forgotten.is_empty() {
+        tracing::info!(
+            scanned,
+            evicted = evicted.len(),
+            freed_mib = freed / (1024 * 1024),
+            remaining_mib = (bytes - freed) / (1024 * 1024),
+            forgotten_tasks = forgotten.len(),
+            "audio cache sweep"
+        );
+    }
+    Ok(())
+}
+
 fn audio_work_dir(state: &AppState, task_id: &str) -> PathBuf {
     state.data_dir.join("downloads").join(task_id)
 }
@@ -2804,6 +2929,66 @@ mod tests {
             media_base_url: None,
         };
         (state, task)
+    }
+
+    #[tokio::test]
+    async fn audio_cache_sweep_evicts_idle_copies_but_never_running_tasks() {
+        let directory = tempfile::tempdir().unwrap();
+        let (state, mut cached) = test_cache_state(directory.path());
+        // Access times are process-wide; keep these generations unique.
+        cached.id = "sweep-telegram".into();
+        cached.work_id = "sweep-telegram--1".into();
+        let days_ago = SystemTime::now() - Duration::from_secs(4 * 24 * 3600);
+        let make_dir = |name: &str, old: bool| {
+            let dir = directory.path().join("downloads").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("audio.m4a"), vec![0; 64]).unwrap();
+            if old {
+                for path in [dir.join("audio.m4a"), dir.clone()] {
+                    std::fs::File::open(path)
+                        .unwrap()
+                        .set_modified(days_ago)
+                        .unwrap();
+                }
+            }
+            dir
+        };
+        let mut running = cached.clone();
+        running.id = "sweep-running".into();
+        running.work_id = "sweep-running--1".into();
+        running.status = DownloadStatus::Processing;
+        let mut local_only = cached.clone();
+        local_only.id = "sweep-local".into();
+        local_only.work_id = "sweep-local--1".into();
+        local_only.file_id = None;
+        let running_dir = make_dir(&running.work_id, true);
+        let local_dir = make_dir(&local_only.work_id, true);
+        let telegram_dir = make_dir(&cached.work_id, true);
+        let fresh_dir = make_dir("sweep-fresh--1", false);
+        {
+            let mut downloads = state.downloads.write().await;
+            for task in [&running, &local_only, &cached] {
+                downloads.insert(task.id.clone(), task.clone());
+            }
+        }
+
+        let policy = audio_cache::Policy {
+            idle: Duration::from_secs(72 * 3600),
+            max_bytes: 1 << 30,
+        };
+        sweep_audio_cache(&state, policy, SystemTime::now())
+            .await
+            .unwrap();
+
+        assert!(running_dir.exists(), "a running task keeps its files");
+        assert!(fresh_dir.exists(), "recently written files stay");
+        assert!(!local_dir.exists() && !telegram_dir.exists());
+        let downloads = state.downloads.read().await;
+        assert!(downloads.contains_key("sweep-running"));
+        assert!(
+            !downloads.contains_key("sweep-local") && !downloads.contains_key(&cached.id),
+            "idle tasks are forgotten and rebuilt from MySQL on demand"
+        );
     }
 
     #[test]

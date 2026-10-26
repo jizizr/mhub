@@ -58,3 +58,10 @@ turnstile_site_key = ""
 turnstile_secret = ""
 # session_days = 30
 # cookie_secure = true   # set false only for plain-HTTP local testing
+
+[audio_cache]
+# Local copies of finished songs (data/downloads). Telegram and the platforms
+# keep the real copy; a song's local files are removed after this many idle
+# hours, and the oldest go first once the directory passes max_gib.
+idle_hours = 72
+max_gib = 20
