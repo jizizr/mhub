@@ -29,13 +29,13 @@ test("offline Android retains the existing packet cache path without probing nat
   assert.equal(probes, 0);
 });
 
-test("a native Audio Session API retains the existing Web Audio path", () => {
+test("Audio Session API presence alone does not prove Android background media ownership", () => {
   let probes = 0;
   assert.equal(shouldPreferNativeBackgroundPlayback({
     navigatorObject: { ...android, audioSession: { type: "auto" } },
     canPlayNative: () => { probes += 1; return true; },
-  }), false);
-  assert.equal(probes, 0);
+  }), true);
+  assert.equal(probes, 1);
 });
 
 test("non-Android browsers are untouched and never perform the FLAC probe", () => {

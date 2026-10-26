@@ -30,8 +30,8 @@ function harness(theme, dark = false, blocked = false) {
       doc.documentElement.style.backgroundColor, metas['meta[name="color-scheme"]'].content, href],
   };
 }
-const expected = (dark) => [dark ? "dark" : "light", dark ? "#141416" : "#f6f5f3",
-  dark ? "#141416" : "#f6f5f3", dark ? "dark" : "light",
+const expected = (dark) => [dark ? "dark" : "light", dark ? "#1f1f1f" : "#ffffff",
+  dark ? "#1f1f1f" : "#ffffff", dark ? "dark" : "light",
   dark ? "/manifest-dark.webmanifest?v=29e8713a10" : "/manifest.webmanifest?v=29e8713a10"];
 
 test("first paint and runtime agree for explicit overrides and either system theme", () => {

@@ -20,6 +20,17 @@ const modes = [
 
 const currentMode = computed(() => modes.find((mode) => mode.key === player.playbackMode()) || modes[0]);
 
+// The desktop capsule shows Apple Music's separate shuffle and repeat
+// buttons; both map onto the same playback modes as the mode menu.
+const shuffleOn = computed(() => currentMode.value.key === "shuffle");
+const repeatMode = computed(() => ["list", "one"].includes(currentMode.value.key) ? currentMode.value.key : "off");
+function toggleShuffle() {
+  player.setPlaybackMode(shuffleOn.value ? "sequence" : "shuffle");
+}
+function cycleRepeat() {
+  player.setPlaybackMode(repeatMode.value === "off" ? "list" : repeatMode.value === "list" ? "one" : "sequence");
+}
+
 function selectMode(mode) {
   player.setPlaybackMode(mode.key);
   modeOpen.value = false;
@@ -76,17 +87,24 @@ onBeforeUnmount(() => {
     >
       <InfinityIcon :size="20" />
     </IconButton>
-    <IconButton class="player-control--secondary" title="上一首" @click="player.prevTrack()">
+    <IconButton class="player-control--shuffle" :title="shuffleOn ? '随机播放：开' : '随机播放：关'" :active="shuffleOn" :aria-pressed="shuffleOn" @click="toggleShuffle">
+      <Shuffle :size="16" />
+    </IconButton>
+    <IconButton class="player-control--secondary player-control--prev" title="上一首" @click="player.prevTrack()">
       <!-- Solid double triangles, like SF Symbols backward.fill. -->
       <svg class="transport-glyph" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.5 5v14L1.8 12zM22.2 5v14L12.5 12z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" /></svg>
     </IconButton>
-    <IconButton size="lg" :title="status.isBuffering ? '正在缓冲，点击暂停' : status.isPlaying ? '暂停' : '播放'" :active="status.isBuffering" @click="player.togglePlay()">
+    <IconButton class="player-control--play" size="lg" :title="status.isBuffering ? '正在缓冲，点击暂停' : status.isPlaying ? '暂停' : '播放'" :active="status.isBuffering" @click="player.togglePlay()">
       <LoaderCircle v-if="status.isBuffering" class="is-spinning" :size="24" />
       <Pause v-else-if="status.isPlaying" :size="24" fill="currentColor" />
       <Play v-else :size="24" fill="currentColor" />
     </IconButton>
-    <IconButton title="下一首" @click="player.nextTrack(true)">
+    <IconButton class="player-control--next" title="下一首" @click="player.nextTrack(true)">
       <svg class="transport-glyph" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M1.8 5v14l9.7-7zM12.5 5v14l9.7-7z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" /></svg>
+    </IconButton>
+    <IconButton class="player-control--repeat" :title="repeatMode === 'one' ? '重复：单曲' : repeatMode === 'list' ? '重复：全部' : '重复：关'" :active="repeatMode !== 'off'" :aria-pressed="repeatMode !== 'off'" @click="cycleRepeat">
+      <Repeat1 v-if="repeatMode === 'one'" :size="16" />
+      <Repeat v-else :size="16" />
     </IconButton>
     <IconButton class="player-control--secondary player-control--lyrics" title="歌词" :active="media.expanded" :disabled="!media.track" @click="media.expanded = true">
       <Mic2 :size="18" />

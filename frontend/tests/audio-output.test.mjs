@@ -17,7 +17,7 @@ class Node {
   disconnect(node) { if (node) this.connections.delete(node); else this.connections.clear(); }
 }
 
-async function harness({ rejectRate = false } = {}) {
+async function harness({ rejectRate = false, resumeFails = () => false } = {}) {
   const created = [];
   class Context {
     constructor(options = {}) {
@@ -31,7 +31,8 @@ async function harness({ rejectRate = false } = {}) {
       this.closes = 0;
       created.push(this);
     }
-    resume() { this.resumes += 1; this.state = "running"; return Promise.resolve(); }
+    resume() { this.resumes += 1; if (!resumeFails(this)) this.state = "running"; return Promise.resolve(); }
+    suspend() { this.suspends = (this.suspends || 0) + 1; this.state = "suspended"; return Promise.resolve(); }
     close() { this.closes += 1; this.state = "closed"; return Promise.resolve(); }
     createGain() { return new Node(); }
     createMediaElementSource(element) { const source = new Node(); this.sources.push({ element, source }); return source; }
@@ -182,4 +183,43 @@ test("restricted Audio Session access cannot prevent the existing audio graph fr
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { get audioSession() { throw new Error('Unavailable in embed'); } } });
   try { const h = await harness(); assert.doesNotThrow(() => h.preparePlaybackSession()); assert.equal(h.prepareOutput().state, 'running'); }
   finally { if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor); else delete globalThis.navigator; }
+});
+
+test("Hi-Res renders 44.1/48 kHz songs at 48 kHz and real Hi-Res at 192 kHz", async () => {
+  const h = await harness();
+  assert.deepEqual([44100, 48000, 88200, 96000, 192000].map(h.outputRateFor), [48000, 48000, 192000, 192000, 192000]);
+  const high = h.prepareOutput("hires");
+  const low = h.created.find((context) => context.sampleRate === 48000);
+  assert.equal(high.sampleRate, 192000);
+  assert.equal(low?.state, "running", "the play gesture unlocks both rates");
+  assert.equal(await h.acquireOutputContext(44100, [high]), low);
+  assert.equal(await h.acquireOutputContext(96000, [high]), high);
+});
+
+test("the idle rate is suspended, but never one a deck or native element still uses", async () => {
+  const h = await harness();
+  const high = h.prepareOutput("hires");
+  const low = h.created.find((context) => context.sampleRate === 48000);
+  const deck = h.createAlacOutput(high);
+  h.suspendIdleOutputs(low);
+  assert.equal(high.state, "running", "a live deck keeps its context");
+  deck.dispose();
+  h.suspendIdleOutputs(low);
+  assert.equal(high.state, "suspended", "an idle 192 kHz clock is stopped");
+  assert.equal(low.state, "running");
+  // A suspended rate is resumed when a song needs it again.
+  assert.equal(await h.acquireOutputContext(96000, [low]), high);
+  assert.equal(high.state, "running");
+  h.createNativeOutput({ id: "audio" });
+  h.suspendIdleOutputs(low);
+  assert.equal(high.state, "running", "native <audio> graphs are never suspended");
+});
+
+test("a context that cannot resume outside a gesture falls back to a running one", async () => {
+  const h = await harness({ resumeFails: (context) => context.sampleRate === 48000 && context.resumes > 1 });
+  const high = h.prepareOutput("hires");
+  const low = h.created.find((context) => context.sampleRate === 48000);
+  h.suspendIdleOutputs(high);
+  assert.equal(low.state, "suspended");
+  assert.equal(await h.acquireOutputContext(44100, [high]), high, "playback continues at 192 kHz instead of stalling");
 });

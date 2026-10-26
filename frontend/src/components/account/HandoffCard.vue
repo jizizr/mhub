@@ -3,10 +3,12 @@ import { computed } from "vue";
 import { MonitorSmartphone } from "lucide-vue-next";
 import * as player from "../../core/player";
 import { useAccountStore } from "../../stores/account";
+import { useStatusStore } from "../../stores/status";
 import { trackFromSearch } from "../../utils/track";
 
 const props = defineProps({ maxAgeMinutes: { type: Number, default: 12 * 60 } });
 const account = useAccountStore();
+const status = useStatusStore();
 
 // The most recent other device that has a queue, if it is recent enough.
 const session = computed(() => account.otherDevices.find((item) =>
@@ -25,12 +27,27 @@ async function continueHere() {
   const tracks = source.queue.map((item) => trackFromSearch({
     platform: item.platform, id: item.source_id, song: item.title, singer: item.artist, cover: item.cover,
   }, "high"));
+  // keepStart: this device's shuffle setting must not replace the song being
+  // continued with a random one.
   const started = await player.playFrom(tracks, source.play_index, {
     id: `handoff:${source.device_id}`,
     name: `来自 ${source.device_name}`,
     type: "handoff",
-  });
-  if (started && source.position_ms > 3000) player.seek(source.position_ms);
+  }, { keepStart: true });
+  const position = estimatedPosition(source);
+  if (started && position > 3000) player.seek(position);
+}
+
+// A playing device reports every 15 s; continue from where it is now. The cap
+// bounds clock skew and a device that stopped reporting.
+const MAX_ELAPSED_MS = 20_000;
+function estimatedPosition(source) {
+  const position = source.position_ms || 0;
+  if (!source.is_playing) return position;
+  const elapsed = Math.min(MAX_ELAPSED_MS, Math.max(0, Date.now() - (source.updated_at || 0) * 1000));
+  const duration = status.duration || 0;
+  const estimate = position + elapsed;
+  return duration > 0 ? Math.min(estimate, Math.max(position, duration - 5000)) : position;
 }
 </script>
 
@@ -48,11 +65,12 @@ async function continueHere() {
 </template>
 
 <style scoped>
-.handoff { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+/* A slim row over a hairline, as Apple Music shows device hand-off, instead of a boxed card. */
+.handoff { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; margin-bottom: 18px; padding: 6px 2px 12px; border-bottom: .5px solid var(--am-divider, var(--line)); }
 .handoff__icon { color: var(--accent); }
-.handoff__text { display: grid; gap: 2px; min-width: 0; }
-.handoff__text small { color: var(--text-muted); font-size: 11px; }
-.handoff__text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.handoff__text strong span { color: var(--text-muted); font-weight: 500; }
-.handoff__action { min-height: 32px; padding: 0 12px; font-size: 12px; }
+.handoff__text { display: grid; gap: 1px; min-width: 0; }
+.handoff__text small { color: var(--am-secondary, var(--text-muted)); font-size: 12px; }
+.handoff__text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--am-primary, var(--text)); font-size: 13px; font-weight: 600; }
+.handoff__text strong span { color: var(--am-secondary, var(--text-muted)); font-weight: 400; }
+.handoff__action { min-height: 28px; padding: 0 14px; border-radius: 999px; font-size: 13px; font-weight: 600; }
 </style>

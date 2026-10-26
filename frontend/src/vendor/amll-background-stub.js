@@ -1,7 +1,7 @@
 // AMLL core ships its lyric player and its WebGL/Pixi background renderers in
-// one module. MHub only uses the DOM lyric player, so Vite aliases the
-// background-only dependencies here. Nothing below is called at runtime except
-// the two module-level matrix constants AMLL evaluates on import.
+// one module. MHub uses the DOM lyric player and the WebGL mesh-gradient
+// backdrop, so Vite aliases only the Pixi renderer's dependencies here; the
+// matrix exports below are unused now that gl-matrix resolves normally.
 class MatrixStub {
   transpose() { return this; }
 }

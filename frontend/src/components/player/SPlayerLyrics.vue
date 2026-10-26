@@ -31,6 +31,7 @@ let scrollHoldUntil = 0;
 let lastScrollToIndex = -1;
 let userScrolledSinceAutoAlign = false;
 let renderReady = false;
+let initialLayoutSnapped = false;
 const openccModule = shallowRef(null);
 
 const SCROLL_HOLD_MS = 240;
@@ -107,7 +108,7 @@ function updateFrame(time) {
     }
   }
   player.update(time - lastFrameTime);
-  if (!renderReady) {
+  if (!renderReady && snapInitialLayout()) {
     const viewport = wrapperRef.value?.getBoundingClientRect();
     const line = [...(player.getElement().querySelectorAll("[class*='lyricMainLine']"))].find((element) => {
       const rect = element.getBoundingClientRect();
@@ -118,6 +119,21 @@ function updateFrame(time) {
   }
   lastFrameTime = time;
   rafId = window.requestAnimationFrame(updateFrame);
+}
+
+// AMLL lays lines out once while its element still measures 0px, which stacks
+// them near the top; the ResizeObserver pass then springs them to the align
+// position. Reporting ready before that showed the lyrics high and then jumping
+// on every open. Wait for real sizes, then place lines without springs once.
+function snapInitialLayout() {
+  if (initialLayoutSnapped) return true;
+  const groups = player.currentLyricGroups || [];
+  const index = Math.min(Math.max(player.timelineState?.scrollToIndex ?? 0, 0), groups.length - 1);
+  if (!(player.size?.[1] > 0) || !(player.lyricGroupSize?.get(groups[index])?.[1] > 0)) return false;
+  player.calcLayout(true, true);
+  initialLayoutSnapped = true;
+  // Check visibility on the next frame, after the forced positions render.
+  return false;
 }
 
 function startRaf() {

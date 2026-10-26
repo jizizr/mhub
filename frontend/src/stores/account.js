@@ -16,6 +16,7 @@ const loadSync = () => Promise.all([
 const FIRST_SYNC_TIMEOUT_MS = 8000;
 const PLAYBACK_DEBOUNCE_MS = 2000;
 const HANDOFF_QUEUE_LIMIT = 200;
+const HANDOFF_FLUSH_QUEUE_LIMIT = 120;
 
 let replica = null;
 let modules = null;
@@ -203,14 +204,14 @@ export const useAccountStore = defineStore("account", {
       } catch { /* Hand-off is optional. */ }
     },
 
-    playbackSnapshot() {
+    playbackSnapshot(limit = HANDOFF_QUEUE_LIMIT) {
       const queue = useQueueStore();
       const status = useStatusStore();
       const index = status.playIndex;
       if (index < 0 || !queue.queueLength) return null;
       // Keep the window around the current song when the queue is long.
-      const start = Math.max(0, Math.min(index - 20, queue.queueLength - HANDOFF_QUEUE_LIMIT));
-      const tracks = queue.queue.slice(start, start + HANDOFF_QUEUE_LIMIT).map((track) => ({
+      const start = Math.max(0, Math.min(index - 20, queue.queueLength - limit));
+      const tracks = queue.queue.slice(start, start + limit).map((track) => ({
         key: trackIdentity(track),
         platform: track.platform,
         source_id: track.source_id || track.selected_id || "",
@@ -234,14 +235,16 @@ export const useAccountStore = defineStore("account", {
       if (this.mode !== "linked") return;
       window.clearTimeout(playbackTimer);
       const send = () => {
-        const snapshot = this.playbackSnapshot();
+        // A keepalive body is size-limited. Shrink the window itself so
+        // play_index still points at the current song.
+        const snapshot = this.playbackSnapshot(flush ? HANDOFF_FLUSH_QUEUE_LIMIT : HANDOFF_QUEUE_LIMIT);
         if (!snapshot) return;
         void fetch(`/api/v1/sync/playback/${encodeURIComponent(deviceIdentity().id)}`, {
           method: "PUT",
           credentials: "same-origin",
           keepalive: flush,
           headers: { "content-type": "application/json", "x-mhub-client": "1" },
-          body: JSON.stringify(flush ? { ...snapshot, queue: snapshot.queue.slice(0, 120) } : snapshot),
+          body: JSON.stringify(snapshot),
         }).then((response) => { if (response.status === 401) this.expire(); }).catch(() => {});
       };
       if (flush) send();

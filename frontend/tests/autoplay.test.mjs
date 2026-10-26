@@ -105,6 +105,27 @@ test("tail next and natural ended share one request and start one new song", asy
   assert.equal(h.audioCalls.filter((item) => item === "play").length, 1);
 });
 
+test("Apple AutoPlay is seeded with the latest ten queue songs and reuses its station until the queue is replaced", async () => {
+  const tracks = Array.from({ length: 12 }, (_, index) => track(`q${index}`));
+  let batch = 0;
+  const h = await harness({ tracks, playIndex: 11, state: "paused", recommend: ({ station }) => ({ station: station || `ra.q-${batch}`, tracks: [raw(`a${++batch}`)] }) });
+  h.player.toggleAutoplay();
+  await h.player.nextTrack(true); await tick();
+  assert.deepEqual(h.requests[0].seedIds, tracks.slice(2).map((item) => item.source_id));
+  assert.equal(h.requests[0].station, "");
+  await h.player.nextTrack(true); await tick();
+  assert.equal(h.requests[1].station, "ra.q-0");
+  assert.equal(h.requests[1].seedIds.at(-1), "a1");
+  assert.ok(h.requests.slice(1).every((request) => request.station === "ra.q-0"));
+  const before = h.requests.length;
+  await h.player.playFrom([track("r1")]);
+  await h.player.nextTrack(true); await tick();
+  const replaced = h.requests.slice(before);
+  assert.ok(replaced.length >= 1);
+  assert.equal(replaced[0].station, "");
+  assert.deepEqual(replaced[0].seedIds, ["r1"]);
+});
+
 for (const operation of ["pause", "disable", "clear", "replace", "change track"]) {
   test(`${operation} during pending tail continuation cannot resurrect playback`, async () => {
     const h = await harness({ tracks: [track("older"), track("current")], playIndex: 1, state: "paused" });
@@ -298,3 +319,25 @@ for (const exitShuffle of ["toggle", "sequence"]) {
     assert.equal(h.queue.originalQueue, null);
   });
 }
+
+test("hand-off keeps the requested song under shuffle while a plain start stays random", async () => {
+  const h = await harness({ tracks: [track("old")], state: "paused" });
+  h.status.shuffleMode = "on";
+  const items = ["a", "b", "c", "d", "e"].map((id) => track(id));
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await h.player.playFrom(items, 3, { id: "handoff:phone", name: "来自 手机", type: "handoff" }, { keepStart: true });
+    assert.equal(h.status.playIndex, 0);
+    assert.equal(h.status.currentTrack.source_id, "d");
+    assert.equal(h.resolves.at(-1).source_id, "d");
+    assert.deepEqual(ids(h.queue.originalQueue), ["a", "b", "c", "d", "e"]);
+    assert.deepEqual([...ids(h.queue.queue)].sort(), ["a", "b", "c", "d", "e"]);
+  }
+  const random = Math.random;
+  Math.random = () => 0.99;
+  try {
+    await h.player.playFrom(items, 0);
+  } finally {
+    Math.random = random;
+  }
+  assert.equal(h.status.currentTrack.source_id, "e");
+});

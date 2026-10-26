@@ -1,6 +1,6 @@
 import processorUrl from "./alac-processor.js?url";
 import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.js";
-import { createAlacOutput, getOutputContext, prepareOutput } from "./audio-output.js";
+import { acquireOutputContext, createAlacOutput, getOutputContext, prepareOutput, suspendIdleOutputs } from "./audio-output.js";
 import { canRequestAlacWorklet, canUseAlacWorklet, isAlacWorkletSupported, isLosslessTrack } from "./alac-support.js";
 
 const PCM_QUEUE_SECONDS = 2;
@@ -121,12 +121,72 @@ function trustedCompletedPacketSource(value, policy) {
 }
 
 /**
- * Streaming sample-rate converter (Catmull-Rom cubic) for interleaved PCM.
- * Phase and the last input frames carry over between calls. Converting each
- * packet on its own pinned both of its ends to the packet edges, which jumped
- * time at every boundary: a 10-50 Hz flutter on 44.1 kHz -> 48 kHz music and
- * a half-sample jump per packet on 96 kHz -> 192 kHz Hi-Res.
+ * Band-limited streaming sample-rate converter (polyphase windowed sinc).
+ *
+ * Cubic interpolation was continuous across packets but a poor filter: at
+ * 44.1 -> 48 kHz (most Apple lossless tracks on a 48 kHz context) a 10 kHz
+ * tone came out with distortion only 26 dB below it, heard as a gritty hiss
+ * on cymbals and sibilants. Here every output frame is an exact rational
+ * phase (48000/44100 = 160/147) of a Kaiser-windowed sinc low-pass at the
+ * lower Nyquist rate, giving distortion below -90 dB across the audio band.
+ * State carries across packets, so packet boundaries are seamless.
  */
+const RESAMPLER_ZERO_CROSSINGS = 16;
+const RESAMPLER_KAISER_BETA = 9;
+const RESAMPLER_PASSBAND = 0.945;
+const resamplerTables = new Map();
+
+function besselI0(x) {
+  let sum = 1;
+  let term = 1;
+  for (let k = 1; k < 40; k += 1) {
+    term *= (x / (2 * k)) ** 2;
+    sum += term;
+    if (term < sum * 1e-12) break;
+  }
+  return sum;
+}
+
+function gcd(a, b) {
+  while (b) [a, b] = [b, a % b];
+  return a;
+}
+
+// taps[phase * width + j] weights input frame (base - half + 1 + j) for an
+// output at base + phase / up. Each phase is normalised to unity DC gain.
+function resamplerTable(sourceRate, targetRate) {
+  const key = `${sourceRate}:${targetRate}`;
+  if (resamplerTables.has(key)) return resamplerTables.get(key);
+  const divisor = gcd(sourceRate, targetRate);
+  const up = targetRate / divisor;
+  const down = sourceRate / divisor;
+  // Cut-off in cycles per input sample, just below the lower Nyquist rate.
+  const cutoff = 0.5 * Math.min(1, targetRate / sourceRate) * RESAMPLER_PASSBAND;
+  const reach = RESAMPLER_ZERO_CROSSINGS / (2 * cutoff);
+  const half = Math.ceil(reach);
+  const width = half * 2;
+  const taps = new Float32Array(up * width);
+  const norm = besselI0(RESAMPLER_KAISER_BETA);
+  for (let phase = 0; phase < up; phase += 1) {
+    const fraction = phase / up;
+    let sum = 0;
+    for (let j = 0; j < width; j += 1) {
+      const distance = fraction - (j - half + 1);
+      const ratio = distance / reach;
+      if (Math.abs(ratio) >= 1) continue;
+      const angle = 2 * Math.PI * cutoff * distance;
+      const sinc = distance === 0 ? 2 * cutoff : Math.sin(angle) / (Math.PI * distance);
+      const value = sinc * besselI0(RESAMPLER_KAISER_BETA * Math.sqrt(1 - ratio * ratio)) / norm;
+      taps[phase * width + j] = value;
+      sum += value;
+    }
+    for (let j = 0; j < width; j += 1) taps[phase * width + j] /= sum;
+  }
+  const table = { up, down, half, width, taps };
+  resamplerTables.set(key, table);
+  return table;
+}
+
 export function createStreamResampler(channels, sourceRate, targetRate) {
   if (!channels || !sourceRate || !targetRate || Math.abs(sourceRate - targetRate) <= 1) {
     return {
@@ -134,82 +194,95 @@ export function createStreamResampler(channels, sourceRate, targetRate) {
       flush: () => new Float32Array(0),
     };
   }
-  const step = sourceRate / targetRate;
-  let history = null;
-  let position = 1;
-  // Output frames for source positions [position, end) of `source`, where
-  // frame i reads frames i-1..i+2.
-  const interpolate = (source, end) => {
-    const count = Math.max(0, Math.ceil((end - position) / step));
+  const { up, down, half, width, taps } = resamplerTable(Math.round(sourceRate), Math.round(targetRate));
+  // Input frames not yet fully consumed; `start` is the absolute index of
+  // buffer frame 0. Stream edges are extended by point reflection, which
+  // keeps both the level and the slope continuous (no edge click).
+  let buffer = null;
+  let start = 0;
+  let received = 0;
+  let produced = 0;
+  let finished = false;
+
+  const append = (frames) => {
+    if (!buffer) { buffer = frames; return; }
+    const joined = new Float32Array(buffer.length + frames.length);
+    joined.set(buffer);
+    joined.set(frames, buffer.length);
+    buffer = joined;
+  };
+  // `count` virtual frames beyond edge frame `at`, stepping by `step` (-1
+  // before the stream, +1 after it): x[at + step*k] = 2*x[at] - x[at - step*k].
+  // Returned in time order.
+  const extend = (source, at, count, step) => {
     const output = new Float32Array(count * channels);
-    let time = position;
-    for (let index = 0; index < count; index += 1, time += step) {
-      const frame = Math.floor(time);
-      const fraction = time - frame;
-      const base = frame * channels;
+    const total = source.length / channels;
+    for (let k = 1; k <= count; k += 1) {
+      const mirror = Math.min(total - 1, Math.max(0, at - step * k));
+      const slot = step < 0 ? count - k : k - 1;
       for (let channel = 0; channel < channels; channel += 1) {
-        const p0 = source[base - channels + channel];
-        const p1 = source[base + channel];
-        const p2 = source[base + channels + channel];
-        const p3 = source[base + 2 * channels + channel];
-        output[index * channels + channel] = p1 + 0.5 * fraction * (p2 - p0 +
-          fraction * (2 * p0 - 5 * p1 + 4 * p2 - p3 + fraction * (3 * (p1 - p2) + p3 - p0)));
+        output[slot * channels + channel] = 2 * source[at * channels + channel] - source[mirror * channels + channel];
       }
     }
-    position = time;
     return output;
   };
-  // A virtual frame continuing the slope of its neighbours, so the stream
-  // edges interpolate like the interior instead of flattening.
-  const extrapolate = (target, at, from, toward) => {
-    for (let channel = 0; channel < channels; channel += 1) {
-      target[at * channels + channel] = 2 * target[from * channels + channel] - target[toward * channels + channel];
+  // Emit outputs whose whole filter window lies inside the buffer.
+  const render = (limit) => {
+    const frames = buffer ? buffer.length / channels : 0;
+    // Upper bound of outputs this call can produce.
+    const capacity = Math.max(0, Math.ceil((frames + start + half) * up / down) - produced + 1);
+    const outputs = new Float32Array(capacity * channels);
+    let count = 0;
+    for (;;) {
+      if (limit !== undefined && produced >= limit) break;
+      const position = produced * down;
+      const base = Math.floor(position / up);
+      const phase = position - base * up;
+      const first = base - half + 1 - start;
+      if (first < 0) throw new Error("resampler window underflow");
+      if (first + width > frames) break;
+      const row = phase * width;
+      for (let channel = 0; channel < channels; channel += 1) {
+        let sum = 0;
+        let index = first * channels + channel;
+        for (let j = 0; j < width; j += 1, index += channels) sum += taps[row + j] * buffer[index];
+        outputs[count * channels + channel] = sum;
+      }
+      count += 1;
+      produced += 1;
     }
+    // Drop frames no future output needs.
+    const nextBase = Math.floor(produced * down / up);
+    const keepFrom = Math.max(0, nextBase - half + 1 - start);
+    if (keepFrom > 0 && buffer) {
+      buffer = buffer.slice(keepFrom * channels);
+      start += keepFrom;
+    }
+    return outputs.slice(0, count * channels);
   };
+
   return {
     process(input) {
-      const inputFrames = Math.floor(input.length / channels);
-      if (!inputFrames) return new Float32Array(0);
-      const fresh = input.subarray(0, inputFrames * channels);
-      let source;
-      if (history) {
-        source = new Float32Array(history.length + fresh.length);
-        source.set(history);
-        source.set(fresh, history.length);
-      } else {
-        // Frame 0 is virtual; interpolation starts exactly on the first sample.
-        source = new Float32Array(fresh.length + channels);
-        source.set(fresh, channels);
-        if (inputFrames > 1) extrapolate(source, 0, 1, 2);
-        else source.set(fresh.subarray(0, channels));
-        position = 1;
+      const frames = Math.floor(input.length / channels);
+      if (!frames || finished) return new Float32Array(0);
+      const fresh = input.slice(0, frames * channels);
+      if (!buffer) {
+        // Virtual history before the first frame.
+        buffer = extend(fresh, 0, half - 1, -1);
+        start = -(half - 1);
       }
-      const frames = source.length / channels;
-      if (frames < 4) {
-        history = source;
-        return new Float32Array(0);
-      }
-      // Frame i needs i-1..i+2, so positions stay below frames - 2.
-      const output = interpolate(source, frames - 2);
-      history = source.slice((frames - 3) * channels);
-      position -= frames - 3;
-      return output;
+      append(fresh);
+      received += frames;
+      return render();
     },
     /** Emit the frames still held back at the end of the stream. */
     flush() {
-      if (!history) return new Float32Array(0);
-      const real = history.length / channels;
-      const source = new Float32Array((real + 2) * channels);
-      source.set(history);
-      for (let pad = real; pad < real + 2; pad += 1) {
-        if (pad >= 2) extrapolate(source, pad, pad - 1, pad - 2);
-        else source.set(source.subarray((pad - 1) * channels, pad * channels), pad * channels);
-      }
-      // Positions up to one source period past the last real frame.
-      const output = interpolate(source, real);
-      history = null;
-      position = 1;
-      return output;
+      if (!buffer || finished) return new Float32Array(0);
+      finished = true;
+      const frames = buffer.length / channels;
+      append(extend(buffer, frames - 1, half, 1));
+      const total = Math.ceil(received * up / down);
+      return render(total);
     },
   };
 }
@@ -354,12 +427,16 @@ export class AlacWorkletPlayer {
 
   async ensureContext(sampleRate, generation) {
     const requested = Number.isFinite(sampleRate) && sampleRate > 0 ? Math.round(sampleRate) : undefined;
-    let context = this.preparedContext;
-    if (!context || context.state === "closed") {
-      context = getOutputContext(requested);
-      this.preparedContext = context;
+    let prepared = this.preparedContext;
+    if (!prepared || prepared.state === "closed") {
+      prepared = getOutputContext(requested);
+      this.preparedContext = prepared;
       this.preparedSampleRate = requested;
     }
+    // Render at the source's own class of rate (48 kHz for 44.1/48 kHz songs
+    // even in Hi-Res mode), falling back to a context that is running.
+    const context = await acquireOutputContext(requested, [this.context, prepared]);
+    if (generation !== this.generation) throw new DOMException("ALAC 加载已取消", "AbortError");
     this.context = context;
     let output;
     try {
@@ -371,6 +448,7 @@ export class AlacWorkletPlayer {
       output.cancelFade(this.fadeGain);
       const node = new AudioWorkletNode(context, "splayer-alac-pcm", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
       node.connect(output.input);
+      suspendIdleOutputs(context);
       node.port.onmessage = (event) => {
         if (generation === this.generation) this.handleWorkletMessage(event.data || {});
       };

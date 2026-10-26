@@ -56,6 +56,10 @@ pub struct RecommendationHome {
 pub struct RecommendationContinuation {
     pub source: String,
     pub tracks: Vec<MusicSearchItem>,
+    /// Apple Music AutoPlay station to continue with `next-tracks`; the client
+    /// sends it back for the following batches of the same queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub station: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -208,12 +212,14 @@ pub async fn recommendation_home(
 pub async fn recommendation_continuation(
     platform: MusicPlatform,
     seed_id: &str,
+    seeds: &[String],
+    station: Option<&str>,
     exclude: &[String],
     limit: usize,
 ) -> ApiResult<RecommendationContinuation> {
     match platform {
         MusicPlatform::AppleMusic => {
-            applemusic::continuation_recommendations(seed_id, exclude, limit).await
+            applemusic::continuation_recommendations(seed_id, seeds, station, exclude, limit).await
         }
         _ => Err(ApiError::Custom(format!(
             "{} 暂不支持自动续播推荐",

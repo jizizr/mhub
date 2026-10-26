@@ -201,6 +201,15 @@ const cacheSummary = computed(() => cacheStats(cacheItems.value));
 const activePlaylist = computed(() =>
   status.activePlaylistId ? playlists.getById(status.activePlaylistId) : null,
 );
+// Detail pages are washed with their artwork, as Apple Music tints a playlist
+// page with the cover's colour; the blurred cover needs no CORS access.
+const pageTint = computed(() => {
+  const playlist = status.activeView === "recommendation" ? recommendationDetail.value
+    : status.activeView === "playlists" ? activePlaylist.value : null;
+  if (!playlist) return "";
+  return playlist.cover || playlist.cover_url || playlist.tracks?.find((track) => track.cover)?.cover || "";
+});
+const pendingPlaylistPlay = ref("");
 const themeController = createThemeController(() => status.theme);
 
 watch(() => status.theme, () => themeController.sync(), { immediate: true });
@@ -545,10 +554,6 @@ async function playTrack(track) {
   await player.playNow(trackForCurrentQuality(track));
 }
 
-async function openTrack(track) {
-  if (await player.playNow(trackForCurrentQuality(track))) media.expanded = true;
-}
-
 async function openQueueTrack(track) {
   if (await player.playAtIndex(queue.findTrackIndex(track))) media.expanded = true;
 }
@@ -829,6 +834,25 @@ async function replacePlaylistQueue(playlist) {
     }
   } finally {
     if (version === playlistActionVersion) playlistActionBusy.value = false;
+  }
+}
+
+// The play button on a shelf card replaces the queue without opening the page.
+async function playShelfPlaylist(playlist) {
+  if (!playlist?.id || pendingPlaylistPlay.value) return;
+  const local = playlists.getById(playlist.id);
+  pendingPlaylistPlay.value = playlist.id;
+  try {
+    const tracks = local ? local.tracks : uniqueTracks(await resolveRecommendationPlaylist(playlist));
+    if (!tracks?.length) {
+      status.toast(`“${playlist.name}”暂时没有可播放的歌曲`);
+      return;
+    }
+    await replacePlaylistQueue(local || { ...playlist, type: "recommendation", resource_type: playlist.resource_type || "playlists", tracks });
+  } catch (error) {
+    status.toast(error?.message || "歌单暂时无法播放，请重试");
+  } finally {
+    pendingPlaylistPlay.value = "";
   }
 }
 
@@ -1358,13 +1382,18 @@ watch(
 
 // Report this device's queue for hand-off whenever what plays changes.
 watch(
-  () => [status.playIndex, status.currentTrack && trackIdentity(status.currentTrack), status.isPlaying, queue.queueLength],
+  // The order matters too: turning shuffle on at index 0 keeps index, track
+  // and length but changes what comes next.
+  () => [status.playIndex, status.isPlaying, queue.queue.map(trackIdentity).join("\0")],
   () => account.publishPlayback(),
 );
 </script>
 
 <template>
-  <div class="app" :class="{ 'app--has-track': Boolean(media.track) }">
+  <div class="app" :class="{ 'app--has-track': Boolean(media.track), 'app--queue-open': status.queueOpen && !media.expanded && status.activeView !== 'queue' }">
+    <Transition name="page-tint">
+      <div v-if="pageTint" :key="pageTint" class="page-tint" aria-hidden="true"><img :src="pageTint" alt="" decoding="async" /></div>
+    </Transition>
     <Sidebar @navigate="navigate" @playlist-contextmenu="({ event, playlist }) => openPlaylistMenu(event, playlist)" />
     <main class="main">
       <Transition name="page" mode="out-in" @after-enter="handlePageEntered">
@@ -1383,14 +1412,15 @@ watch(
           :platform-label="platformLabel"
           :mood="recommendationMood"
           :personalized="recommendationPersonal"
+          :pending-playlist="pendingPlaylistPlay"
           @play="playTrack"
-          @open="openTrack"
           @menu="openSongMenu({ ...$event, recommend: true })"
           @more="openFeedMenu"
           @refresh="refreshRecommendations"
           @mood="chooseRecommendationMood"
           @play-all="playRecommendations"
           @playlist="openRecommendedPlaylist"
+          @play-playlist="playShelfPlaylist"
         />
       </section>
 
@@ -1430,7 +1460,6 @@ watch(
             @play="playTrack"
             @queue="queueTrack"
             @queue-next="queueTrackNext"
-            @open="openTrack"
             @menu="openSongMenu"
           />
         </template>
@@ -1456,7 +1485,6 @@ watch(
           @play="playTrack"
           @queue="queueTrack"
           @queue-next="queueTrackNext"
-          @open="openTrack"
           @menu="openSongMenu"
         />
       </section>
@@ -1489,7 +1517,6 @@ watch(
           @play="playTrack"
           @queue="queueTrack"
           @queue-next="queueTrackNext"
-          @open="openTrack"
           @menu="openSongMenu($event, activePlaylist.id)"
         />
         <template v-else>

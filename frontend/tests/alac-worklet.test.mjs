@@ -1097,6 +1097,25 @@ for (const [sourceRate, targetRate] of [[44100, 48000], [96000, 192000], [48000,
   });
 }
 
+for (const [sourceRate, targetRate, frequency] of [[44100, 48000, 10000], [44100, 48000, 15000], [44100, 192000, 15000]]) {
+  // Cubic interpolation left 10-15 kHz tones only 14-26 dB above their
+  // distortion at 44.1 -> 48 kHz: an audible hiss on cymbals and sibilants.
+  test(`resampling ${sourceRate} -> ${targetRate} keeps a ${frequency / 1000} kHz tone clean (< -80 dB error)`, () => {
+    const output = resampleInPackets(sourceRate, targetRate, 4096, 8, frequency);
+    const frames = output.length / 2;
+    let error = 0;
+    let power = 0;
+    // Skip the stream edges, which are extrapolated.
+    for (let frame = 200; frame < frames - 200; frame += 1) {
+      const ideal = Math.sin(2 * Math.PI * frequency * frame / targetRate);
+      error += (output[frame * 2] - ideal) ** 2;
+      power += ideal ** 2;
+    }
+    const db = 10 * Math.log10(error / power);
+    assert.ok(db < -80, `error ${db.toFixed(1)} dB`);
+  });
+}
+
 test("same-rate conversion copies samples unchanged", () => {
   const input = Float32Array.from([0.1, -0.1, 0.2, -0.2, 0.3]);
   const output = createStreamResampler(2, 48000, 48000).process(input);

@@ -212,9 +212,21 @@ export function createMediaSessionController({
     registered = false;
   }
 
+  function activate(track = state().track) {
+    // A new native player can acquire system audio ownership while the JS
+    // getters still expose the previous player's metadata/playing state.
+    // Republish on real rendering events, without clearing to "none" or
+    // unregistering controls in between. Ordinary time updates stay deduped.
+    registered = false;
+    metadataKey = null;
+    declaredState = null;
+    update(track);
+  }
+
   return {
     register,
     update,
+    activate,
     syncPosition,
     clear,
     dispose() { clear(); disposed = true; },

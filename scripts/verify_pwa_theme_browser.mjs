@@ -58,7 +58,7 @@ try {
           canvas: document.documentElement.style.backgroundColor,
           manifest: document.querySelector('link[rel="manifest"]').getAttribute("href"),
         }));
-        assert.deepEqual(state, { theme: dark ? "#141416" : "#f6f5f3", count: 1, scheme,
+        assert.deepEqual(state, { theme: dark ? "#1f1f1f" : "#ffffff", count: 1, scheme,
           canvas: dark ? "rgb(20, 20, 22)" : "rgb(246, 245, 243)",
           manifest: dark ? "/manifest-dark.webmanifest?v=29e8713a10" : "/manifest.webmanifest?v=29e8713a10" }, `${theme}/${os} ${phase}`);
         checks += 1;

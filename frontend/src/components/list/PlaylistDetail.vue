@@ -18,7 +18,7 @@ const props = defineProps({
   syncing: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "queue-next", "open", "menu", "delete", "sync"]);
+const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "queue-next", "menu", "delete", "sync"]);
 const syncable = computed(() => props.local && canSyncPlaylist(props.playlist));
 const syncedLabel = computed(() => {
   const at = props.playlist?.synced_at;
@@ -69,8 +69,9 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
       </div>
       <div class="playlist-detail__heading">
         <h1>{{ title }}</h1>
+        <p class="playlist-detail__source">{{ source }}</p>
         <p class="playlist-detail__meta">
-          {{ source }} · {{ loading ? "正在读取" : error ? "未加载" : `${tracks.length} 首` }}<template v-if="syncedLabel"> · {{ syncedLabel }}</template>
+          {{ loading ? "正在读取" : error ? "未加载" : `${tracks.length} 首歌曲` }}<template v-if="syncedLabel"> · {{ syncedLabel }}</template>
         </p>
         <div class="playlist-detail__actions" role="group" aria-label="歌单播放方式">
           <button type="button" class="playlist-detail__action playlist-detail__action--primary" :disabled="unavailable" :title="replaceHint" @click="emit('replace')">
@@ -118,7 +119,6 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
         @play="emit('play', $event)"
         @queue="emit('queue', $event)"
         @queue-next="emit('queue-next', $event)"
-        @open="emit('open', $event)"
         @menu="emit('menu', $event)"
       />
     </Transition>
@@ -132,17 +132,22 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
 .playlist-detail__sync { min-height: 34px; padding: 0 12px; border-radius: 999px; font-size: 13px; }
 .playlist-detail__delete { color: var(--text-muted); }
 .playlist-detail__delete:hover { color: var(--danger); }
-.playlist-detail__header { display: grid; grid-template-columns: 220px minmax(0, 1fr); align-items: end; gap: 28px; margin-bottom: 22px; }
-.playlist-detail__cover { aspect-ratio: 1; overflow: hidden; border-radius: 14px; background: var(--placeholder); box-shadow: var(--shadow-md); }
+/* Header after Apple Music: large artwork, bold title, the source in the key
+   colour, a small meta line, then pill buttons. */
+.playlist-detail__header { display: grid; grid-template-columns: clamp(200px, 22vw, 270px) minmax(0, 1fr); align-items: end; gap: 34px; margin-bottom: 40px; }
+.playlist-detail__cover { aspect-ratio: 1; overflow: hidden; border-radius: 8px; background: var(--placeholder); box-shadow: 0 0 0 .5px var(--am-divider), 0 4px 14px rgba(0, 0, 0, .1); }
 .playlist-detail__cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .playlist-detail__cover--empty { display: grid; place-items: center; color: var(--text-muted); background: linear-gradient(135deg, var(--accent-soft), var(--surface)); }
 .playlist-detail__heading { min-width: 0; }
-.playlist-detail__heading h1 { margin: 0; font-size: clamp(26px, 3.4vw, 40px); font-weight: 800; line-height: 1.15; letter-spacing: -.02em; overflow-wrap: anywhere; }
-.playlist-detail__meta { margin: 8px 0 0; color: var(--text-muted); font-size: 15px; }
-.playlist-detail__actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
-.playlist-detail__action { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 42px; padding: 0 20px; border: 0; border-radius: 999px; background: var(--surface-muted); color: var(--text); font-weight: 650; white-space: nowrap; cursor: pointer; }
-.playlist-detail__action:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 10%, transparent); }
-.playlist-detail__action--primary { min-width: 120px; color: var(--on-accent); background: var(--accent); }
+/* Apple Music: 26px bold title over a 26px regular key-colour subtitle, an
+   11px semibold meta line, then 36px key-colour pills. */
+.playlist-detail__heading h1 { margin: 0; color: var(--am-primary); font-size: 26px; font-weight: 700; line-height: 30px; letter-spacing: 0; overflow-wrap: anywhere; }
+.playlist-detail__source { margin: 0; color: var(--accent); font-size: 26px; line-height: 30px; }
+.playlist-detail__meta { margin: 6px 0 0; color: var(--am-secondary); font-size: 11px; font-weight: 600; line-height: 14px; text-transform: uppercase; }
+.playlist-detail__actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+.playlist-detail__action { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 130px; min-height: 36px; padding: 0 12px; border: 0; border-radius: 24px; background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; line-height: 20px; white-space: nowrap; cursor: pointer; }
+.playlist-detail__action:hover:not(:disabled) { background: var(--accent-hover); }
+.playlist-detail__action--primary { color: #fff; background: var(--accent); }
 .playlist-detail__action--primary:hover:not(:disabled) { background: var(--accent-hover); }
 .playlist-detail__feedback { display: flex; align-items: center; gap: 7px; min-height: 20px; margin: -8px 0 8px; color: var(--text-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .playlist-detail__spinner { flex: 0 0 auto; animation: playlist-detail-spin .9s linear infinite; }
@@ -168,10 +173,11 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
   .playlist-detail__header { grid-template-columns: 1fr; justify-items: center; gap: 16px; text-align: center; }
   .playlist-detail__cover { width: min(62vw, 260px); }
   .playlist-detail__heading { width: 100%; }
-  .playlist-detail__heading h1 { font-size: 24px; }
+  .playlist-detail__heading h1 { font-size: 22px; }
+  .playlist-detail__source { font-size: 20px; }
   .playlist-detail__meta { margin-top: 4px; }
   .playlist-detail__actions { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 8px; margin-top: 16px; }
-  .playlist-detail__action { min-width: 0; padding: 0 10px; font-size: 14px; }
+  .playlist-detail__action { min-width: 0; min-height: 42px; padding: 0 10px; font-size: 14px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .playlist-detail__action, .playlist-detail-state-enter-active, .playlist-detail-state-leave-active { transition: none; }

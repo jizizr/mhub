@@ -192,7 +192,8 @@ try {
       await (await settingsSelect(page, "歌词文字")).selectOption("original");
       await page.locator(".player-bar .track-info").click();
       check(`${scenario}: Original setting preserves source text and translation`, await expectText(page, "繁體傳統與愛") && (await text(page)).includes("這裡聽見溫柔"), await text(page));
-      check(`${scenario}: Original setting hides conversion toggle`, await page.locator(".lyric-script-toggle").count() === 0);
+      // Chinese lyrics always offer the switch; Traditional source text offers 简体.
+      check(`${scenario}: Original setting still offers the Simplified toggle`, await page.locator("button.lyric-script-toggle[title='切换为简体歌词']").count() === 1);
       await page.locator(".full-player button[title='收起']").click();
       await page.locator(".full-player").waitFor({ state: "detached" });
       await (await settingsSelect(page, "歌词文字")).selectOption("simplified");
@@ -307,7 +308,7 @@ try {
         await expectText(page, "繁體傳統與愛");
         release();
         await page.waitForTimeout(1000);
-        check("late Simplified module cannot overwrite a newer Original selection", (await text(page)).includes("繁體傳統與愛") && await page.locator(".lyric-script-toggle").count() === 0, await text(page));
+        check("late Simplified module cannot overwrite a newer Original selection", (await text(page)).includes("繁體傳統與愛") && await page.locator("button.lyric-script-toggle[title='切换为简体歌词']").count() === 1, await text(page));
         check("late conversion after component unmount produces no uncaught error", log.errors.length === 0, log.errors);
       } finally { release(); await context.close(); }
     }
@@ -339,6 +340,8 @@ try {
             release();
             await page.locator(".lyrics-view__animated.is-ready").waitFor();
             check(`${label}: delayed animation takes over at the current playback position`, await visibleLyric(page, "下一段测试歌词"));
+            // The fallback cross-fades out (LyricsView FALLBACK_FADE_MS) before it is removed.
+            await fallback.waitFor({ state: "detached", timeout: 2000 }).catch(() => {});
             check(`${label}: fallback retires after animated readiness`, await fallback.count() === 0);
           } else {
             await page.waitForTimeout(350);

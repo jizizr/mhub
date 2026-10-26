@@ -44,14 +44,23 @@ export function getRecommendationHome({ platform = "applemusic", limit = 40, ref
   return request(`${API}/recommendations/home?${params}`, { signal, cache: "no-store" }).then((res) => res.json());
 }
 
-export function getContinuationRecommendations({ platform = "applemusic", seedId, exclude = [], limit = 10, signal } = {}) {
+export function getContinuationRecommendations({ platform = "applemusic", seedId, seedIds = [], station = "", exclude = [], limit = 10, signal } = {}) {
   // A long queue must not overflow the browser/proxy URL limit or silently
   // lose its exclusions. This read-only recommendation query uses a JSON body.
   return request(`${API}/recommendations/continue`, {
     method: "POST",
     signal,
     cache: "no-store",
-    body: JSON.stringify({ platform, seed_id: String(seedId || ""), exclude: [...new Set(exclude.map(String))], limit }),
+    body: JSON.stringify({
+      platform,
+      seed_id: String(seedId || ""),
+      // Apple AutoPlay is seeded with the queue's latest songs and continues
+      // from the station the previous batch returned.
+      seed_ids: seedIds.map(String),
+      ...(station ? { station } : {}),
+      exclude: [...new Set(exclude.map(String))],
+      limit,
+    }),
   }).then((res) => res.json());
 }
 

@@ -53,6 +53,19 @@ let autoplayGeneration = 0;
 let autoplayRequest = null;
 let autoplayAdvance = null;
 let autoplayFailedSeed = "";
+// A cached next song whose Blob URL is resolved before the current one ends.
+// Starting it from the `ended` task leaves no silent gap in which a phone OS
+// may freeze the hidden page before the next source is attached.
+let armedNext = null;
+// Android hides the media notification as soon as the only player reaches
+// EOS while the device is locked, and a background browser cannot show it
+// again. The armed song therefore preloads on a second element and starts
+// muted just before the current song ends, so a player always stays active.
+let idleElement = null;
+const preparedElements = new WeakSet();
+const PREROLL_SECONDS = 1.2;
+// One reload per song after a MEDIA_ERR_NETWORK before the queue advances.
+let networkRetryKey = "";
 const autoplayRecent = new Map();
 
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -163,6 +176,7 @@ function finishRetiringDeck({ prepareNext = true } = {}) {
 }
 
 function cancelTransition({ resetFailure = true } = {}) {
+  stopPreroll();
   transitionGeneration += 1;
   if (transitionCandidate) stopDeck(transitionCandidate);
   transitionCandidate = null;
@@ -415,6 +429,7 @@ async function startTransition(candidate, seconds) {
     candidate.loudnessController = null;
     loadToken += 1;
     trackToken += 1;
+    disarmNext();
     playControlToken += 1;
     transitionCandidate = null;
     transitionPreparing = null;
@@ -446,7 +461,7 @@ async function startTransition(candidate, seconds) {
     status.persist();
     if (usingAlacWorklet) setupAlacWorkletCallbacks(trackToken);
     void loadLyrics(track);
-    updateMediaSession(track);
+    updateMediaSession(track, { activate: true });
     syncMediaSessionPosition();
     warmActiveLoudness(track);
     retiringDeck = old;
@@ -547,7 +562,113 @@ function replaceQueuedTrackWithQuality(index, track) {
 }
 
 function hasAudioSource() {
-  return Boolean(usingAlacWorklet || audio?.currentSrc || audio?.src);
+  return Boolean(usingAlacWorklet || (useStatusStore().currentSource && (audio?.currentSrc || audio?.src)));
+}
+
+function takeIdleElement() {
+  if (idleElement) { const element = idleElement; idleElement = null; return element; }
+  if (typeof document === "undefined" || !document.createElement) return null;
+  const element = document.createElement("audio");
+  element.crossOrigin = "anonymous";
+  element.preload = "auto";
+  element.hidden = true;
+  document.body?.appendChild?.(element);
+  return element;
+}
+
+// Destroys the element's media player; callers ensure another player is
+// already active or none is wanted.
+function releaseElement(element) {
+  if (!element) return;
+  element.pause();
+  const source = element.currentSrc || element.src;
+  if (source) {
+    element.removeAttribute("src");
+    element.load();
+  }
+  element.muted = false;
+  if (!idleElement && element !== audio) idleElement = element;
+}
+
+function stopPreroll() {
+  if (!armedNext?.prerolled) return;
+  armedNext.prerolled = false;
+  armedNext.element?.pause();
+}
+
+function disarmNext() {
+  const armed = armedNext;
+  armedNext = null;
+  if (armed?.element) releaseElement(armed.element);
+  if (armed?.source?.startsWith("blob:")) URL.revokeObjectURL(armed.source);
+}
+
+function armedStillNext(armed = armedNext) {
+  const { queue, status } = stores();
+  if (!armed || armed.token !== trackToken || autoplayAdvance || status.repeatMode === "one") return false;
+  const index = nextQueueIndex();
+  return index === armed.index && index === status.playIndex + 1 &&
+    prefetchKey(normalizeTrackForQuality(queue.getTrack(index))) === armed.key;
+}
+
+// Called from the current native element's time updates.
+function checkPreroll() {
+  const armed = armedNext;
+  if (!armed?.element || usingAlacWorklet || !audio) return;
+  const status = useStatusStore();
+  // The final timeupdate of a natural EOS already reports paused=true.
+  if (audio.ended) return;
+  if (!armedStillNext(armed) || status.state !== "playing" || audio.paused || retiringDeck || transitionStarting) {
+    stopPreroll();
+    return;
+  }
+  const remaining = (Number.isFinite(audio.duration) ? audio.duration : 0) - audio.currentTime;
+  if (armed.prerolled || !(remaining > 0) || remaining > PREROLL_SECONDS) return;
+  armed.prerolled = true;
+  armed.element.muted = true;
+  Promise.resolve(armed.element.play()).catch(() => { if (armedNext === armed) armed.prerolled = false; });
+}
+
+async function armNextTrack(myToken = trackToken) {
+  if (!resolveCachedTrackSource || myToken !== trackToken) return;
+  const { queue, status } = stores();
+  if (status.repeatMode === "one") return;
+  const index = nextQueueIndex();
+  const track = index === status.playIndex + 1 ? normalizeTrackForQuality(queue.getTrack(index)) : null;
+  const key = prefetchKey(track);
+  if (!key || trackIdentity(track) === trackIdentity(status.currentTrack)) return;
+  if (armedNext?.key === key && armedNext.token === myToken) return;
+  const resolved = await resolveCachedTrackSource(track).catch(() => null);
+  if (!resolved?.source) return;
+  // Only a native container can be attached synchronously. ALAC packet
+  // streams keep the normal decoder load path.
+  const nativeTrack = resolved.track?.streaming_mode !== "wasm_alac";
+  if (!nativeTrack || myToken !== trackToken || nextQueueIndex() !== index ||
+      prefetchKey(normalizeTrackForQuality(queue.getTrack(index))) !== key) {
+    if (resolved.source.startsWith("blob:")) URL.revokeObjectURL(resolved.source);
+    return;
+  }
+  disarmNext();
+  armedNext = { key, token: myToken, index, source: resolved.source, track: resolved.track, element: null, prerolled: false };
+  const element = takeIdleElement();
+  if (!element) return;
+  if (!preparedElements.has(element)) { preparedElements.add(element); attachAudioEvents(element); }
+  element.muted = false;
+  element.src = resolved.source;
+  element.load();
+  armedNext.element = element;
+}
+
+// Natural EOF only. Returns false when the regular resolve path must be used.
+function startArmedNext() {
+  const armed = armedNext;
+  if (!armedStillNext(armed)) return false;
+  const status = useStatusStore();
+  armedNext = null;
+  status.playIndex = armed.index;
+  status.persist();
+  void loadTrack(status.currentTrack, true, { resolved: { source: armed.source, track: armed.track, element: armed.element } });
+  return true;
 }
 
 function clearSavedProgress() {
@@ -566,7 +687,16 @@ function cancelActiveTrackCache() {
   activeTrackCache = null;
 }
 
-function detachCurrentAudio() {
+function releaseNativeSource() {
+  if (!audio) return;
+  const source = audio.currentSrc || audio.src;
+  if (!source) return;
+  audio.removeAttribute("src");
+  audio.load();
+  if (source.startsWith("blob:")) URL.revokeObjectURL(source);
+}
+
+function detachCurrentAudio({ keepNativeSource = false, previousCustomSource = usingAlacWorklet ? useStatusStore().currentSource : null } = {}) {
   cancelTransition();
   playControlToken += 1;
   if (alacPlayer) {
@@ -576,14 +706,10 @@ function detachCurrentAudio() {
     void alacPlayer.stop?.();
   }
   usingAlacWorklet = false;
+  if (previousCustomSource?.startsWith("blob:")) URL.revokeObjectURL(previousCustomSource);
   if (!audio) return;
-  const previousSource = audio.currentSrc || audio.src || useStatusStore().currentSource;
   audio.pause();
-  audio.removeAttribute("src");
-  audio.load();
-  if (typeof previousSource === "string" && previousSource.startsWith("blob:")) {
-    URL.revokeObjectURL(previousSource);
-  }
+  if (!keepNativeSource) releaseNativeSource();
 }
 
 function cancelPendingLoad() {
@@ -595,6 +721,7 @@ function cancelPendingLoad() {
   // promise. Neither may resurrect playback after an explicit pause.
   loadToken += 1;
   trackToken += 1;
+  disarmNext();
   clearPendingSeek();
   clearPrefetchRetry();
   cancelActiveTrackCache();
@@ -636,6 +763,15 @@ function prefetchNetworkPolicy() {
     return { disabled: false, targetSeconds: 45 };
   }
   return { disabled: false, targetSeconds: PREFETCH_BUFFER_TARGET_SECONDS };
+}
+
+// Apple Music AutoPlay station for the current queue. Like MusicKit, it is
+// created once from the queue's latest songs and then reused for refills; a
+// replaced or cleared queue, or toggling AutoPlay, starts a new one.
+let autoplayStation = "";
+const AUTOPLAY_SEEDS = 10;
+function resetAutoplayStation() {
+  autoplayStation = "";
 }
 
 function invalidateAutoplay({ resetFailure = true } = {}) {
@@ -684,10 +820,15 @@ async function ensureAutoplayRecommendations({ force = false } = {}) {
   status.autoplayState = "loading";
   status.autoplayError = "";
   const request = { seedKey, controller, promise: null };
+  const seedIds = queue.queue.slice(0, Math.max(0, status.playIndex) + 1)
+    .filter((item) => item.platform === seed.platform)
+    .map(sourceIdForTrack).filter(Boolean).slice(-AUTOPLAY_SEEDS);
+  const station = autoplayStation;
   request.promise = Promise.resolve().then(() => getContinuationRecommendations({
-    platform: seed.platform, seedId: sourceIdForTrack(seed), exclude, limit: 10, signal: controller.signal,
+    platform: seed.platform, seedId: sourceIdForTrack(seed), seedIds, station, exclude, limit: 10, signal: controller.signal,
   })).then((result) => {
     if (!isCurrent()) return 0;
+    if (typeof result?.station === "string" && station === autoplayStation) autoplayStation = result.station;
     const known = new Set([...queue.queue.map(trackIdentity), ...autoplayRecent.keys()]);
     const tracks = [];
     for (const item of result?.tracks || []) {
@@ -734,6 +875,7 @@ export function setAutoplayEnabled(enabled) {
   const { queue, status } = stores();
   const wasWaitingAtEnd = Boolean(autoplayAdvance);
   invalidateAutoplay();
+  resetAutoplayStation();
   if (wasWaitingAtEnd) {
     status.state = "paused";
     playback.setPlaying(false);
@@ -795,8 +937,9 @@ function canPrefetchWithoutStarvingPlayback() {
   );
 }
 
-function updateMediaSession(track = useMediaStore().track) {
-  systemMedia?.update(track);
+function updateMediaSession(track = useMediaStore().track, { activate = false } = {}) {
+  if (activate && systemMedia?.activate) systemMedia.activate(track);
+  else systemMedia?.update(track);
   playbackLifecycle?.update();
 }
 
@@ -861,17 +1004,19 @@ function resetForLoad(duration = 0) {
   const { status } = stores();
   recoveringAudio = false;
   recoveryReady = true;
-  // Stop the previous source before waiting for a cold playback task.  The
-  // old implementation left the <audio> element attached while
-  // resolveTrackSource polled the backend, so the previous song could keep
-  // playing underneath the newly selected track.
-  if (audio) detachCurrentAudio();
+  // Stop sound immediately, but retain the native player until its source can
+  // be replaced directly. Empty load() calls release Android's media owner;
+  // repeating them between songs loses notification/background eligibility.
+  // currentSource=null below makes the retained source inactive and prevents
+  // either events or Play from treating the previous song as the new one.
   status.trackLoading = true;
+  const previousCustomSource = usingAlacWorklet ? status.currentSource : null;
+  status.currentSource = null;
+  status.currentSourceTrackId = null;
+  if (audio) detachCurrentAudio({ keepNativeSource: true, previousCustomSource });
   status.position = pendingSeek?.token === trackToken ? pendingSeek.target : 0;
   status.duration = duration;
   status.state = "idle";
-  status.currentSource = null;
-  status.currentSourceTrackId = null;
   playback.setCurrentTime(status.position, { force: true });
   playback.setDuration(duration);
   playback.setPlaying(false);
@@ -886,6 +1031,7 @@ function syncPosition(force = false) {
   confirmRecoveredAudio(pos);
   syncMediaSessionPosition();
   checkTransition();
+  checkPreroll();
 }
 
 function syncDuration() {
@@ -905,7 +1051,7 @@ function syncDuration() {
 
 function attachAudioEvents(element = audio) {
   if (!element) return;
-  const active = () => element === audio && !usingAlacWorklet;
+  const active = () => element === audio && !usingAlacWorklet && Boolean(useStatusStore().currentSource);
   element.addEventListener("timeupdate", () => {
     if (!active()) return;
     const pos = Math.round(audio.currentTime * 1000);
@@ -955,11 +1101,12 @@ function attachAudioEvents(element = audio) {
     if (waitingForAudioRecovery()) { playback.setPlaying(false); return; }
     status.state = "playing";
     recoveringAudio = false;
+    networkRetryKey = "";
     playback.setPlaying(true);
     const title = useMediaStore().track?.title;
     if (title) status.setNotice(`${title} 正在播放`);
     syncPosition(true);
-    updateMediaSession();
+    updateMediaSession(undefined, { activate: true });
     // A weak connection may have aborted the background cache while the
     // current stream was stalled. Give it another chance once playback has
     // recovered and the buffer policy permits it.
@@ -987,6 +1134,10 @@ function attachAudioEvents(element = audio) {
   element.addEventListener("pause", () => {
     if (!active() || !element.paused || pendingSeek) return;
     const status = useStatusStore();
+    // Natural completion keeps playback intent through the handoff. A pause
+    // task from detaching the previous source may also arrive after the next
+    // source was attached but before its play() promise has settled.
+    if (element.ended || (status.trackLoading && loadWantsPlay)) return;
     // A source is detached at the beginning of a cold load.  Keep the state
     // idle while that queued pause event is delivered instead of briefly
     // reporting a paused track that has not loaded yet.
@@ -999,20 +1150,37 @@ function attachAudioEvents(element = audio) {
     updateMediaSession();
   });
   element.addEventListener("ended", () => {
+    // Events queued for an old source can be delivered after this reusable
+    // element has been reset. They must not advance the new track again.
+    if (!element.ended) return;
     if (retiringDeck?.audio === element && !retiringDeck.usingAlac) finishRetiringDeck();
     if (!active() || pendingSeek) return;
-    if (useStatusStore().repeatMode === "one") {
+    const status = useStatusStore();
+    if (status.trackLoading || !status.currentSource) return;
+    if (status.repeatMode === "one") {
       seek(0);
       void play();
       return;
     }
-    void nextTrack(false);
+    if (!startArmedNext()) void nextTrack(false);
   });
   element.addEventListener("error", () => {
-    if (!active()) return;
+    if (!active() || !element.error) return;
     const status = useStatusStore();
     if (!status.currentSource || audioErrorTrackToken === trackToken) return;
     audioErrorTrackToken = trackToken;
+    // A frozen/backgrounded phone can drop the stream's connection. Reload
+    // the same song once at its position instead of skipping to the next.
+    const track = status.currentTrack;
+    const key = prefetchKey(track);
+    if (element.error.code === 2 && track && key && networkRetryKey !== key) {
+      networkRetryKey = key;
+      const position = Math.round((element.currentTime || 0) * 1000);
+      const wantsPlay = status.isPlaying || (status.trackLoading && loadWantsPlay);
+      void loadTrack(track, wantsPlay);
+      if (position > 0) void seek(position);
+      return;
+    }
     clearPendingSeek();
     playback.setPlaying(false);
     status.state = "idle";
@@ -1106,10 +1274,13 @@ function setupAlacWorkletCallbacks(myToken) {
       status.state = "playing";
       playback.setPlaying(true);
       syncMediaSessionPosition();
-      updateMediaSession();
+      updateMediaSession(undefined, { activate: true });
       schedulePrefetchNextTrack(myToken);
       prepareAutoplayRecommendations();
     } else if (state === "paused") {
+      // EOF is followed synchronously by onEnded. Do not tell the system the
+      // user paused in the gap before the next source starts loading.
+      if (alacPlayer?.ended) return;
       status.state = "paused";
       playback.setPlaying(false);
       updateMediaSession();
@@ -1134,7 +1305,7 @@ function setupAlacWorkletCallbacks(myToken) {
     if (useStatusStore().repeatMode === "one") {
       // Worklet play() rewinds its complete packet cache after ended.
       void play();
-    } else void nextTrack(false);
+    } else if (!startArmedNext()) void nextTrack(false);
   };
   alacPlayer.onStreamComplete = ({ duration } = {}) => {
     if (myToken !== trackToken) return;
@@ -1170,6 +1341,9 @@ async function tryLoadAlacWorklet(source, autoPlay, track, myToken) {
     console.warn("[player] ALAC capability check failed", error);
   }
   if (!canUse || myToken !== trackToken) return null;
+  // Only an actual switch to the custom renderer releases the stopped native
+  // source. Normal native-to-native queue handoffs never load an empty URL.
+  releaseNativeSource();
   if (!alacPlayer) {
     try {
       await alacPlayerFactory.load?.();
@@ -1234,7 +1408,7 @@ async function tryLoadAlacWorklet(source, autoPlay, track, myToken) {
   }
 }
 
-export async function load(source, autoPlay = true, track = useMediaStore().track) {
+export async function load(source, autoPlay = true, track = useMediaStore().track, { element: preparedElement = null } = {}) {
   if (!audio || !source) return { ok: false };
   const status = useStatusStore();
   const token = ++loadToken;
@@ -1243,18 +1417,36 @@ export async function load(source, autoPlay = true, track = useMediaStore().trac
   playback.setSeeking(false);
   resetForLoad(track?.duration || 0);
   try {
-    detachCurrentAudio();
     const alacOutcome = await tryLoadAlacWorklet(source, autoPlay, track, trackToken);
     if (token !== loadToken) return { ok: false };
     if (alacOutcome) {
       consecutiveFailures = 0;
       return alacOutcome;
     }
+    const adopted = preparedElement && preparedElement !== audio && (preparedElement.currentSrc || preparedElement.src) === source;
+    if (adopted) {
+      // The preloaded element may already be rendering muted. Promote it,
+      // rewind to the first frame and only then let it be heard. The ended
+      // element is released after the new player is active.
+      const previous = audio;
+      const previousSource = previous.currentSrc || previous.src;
+      audio = preparedElement;
+      if (audio.currentTime > 0) {
+        audio.addEventListener("seeked", () => { if (audio === preparedElement) audio.muted = false; }, { once: true });
+        audio.currentTime = 0;
+      } else audio.muted = false;
+      releaseElement(previous);
+      if (previousSource?.startsWith("blob:")) URL.revokeObjectURL(previousSource);
+    } else if (preparedElement) releaseElement(preparedElement);
     audio.volume = status.volume;
     audio.playbackRate = status.speed;
-    audio.src = source;
+    if (!adopted) {
+      const previousSource = audio.currentSrc || audio.src;
+      audio.src = source;
+      if (previousSource !== source && previousSource?.startsWith("blob:")) URL.revokeObjectURL(previousSource);
+    }
     applyActiveLevels({ resetFade: true });
-    audio.load();
+    if (!adopted) audio.load();
     if (token !== loadToken) return { ok: false };
     status.currentSource = source;
     status.currentSourceTrackId = track?.id || null;
@@ -1269,6 +1461,8 @@ export async function load(source, autoPlay = true, track = useMediaStore().trac
     // allow this internal autoplay attempt while preventing a user click from
     // accidentally resuming the previous source during an in-flight load.
     const playOk = autoPlay ? await play({ duringLoad: true }) : true;
+    // A promoted element emitted `playing` while it was still inactive.
+    if (adopted && playOk && token === loadToken) updateMediaSession(track, { activate: true });
     return { ok: true, playOk, track };
   } catch (error) {
     if (token === loadToken) {
@@ -1282,8 +1476,9 @@ export async function load(source, autoPlay = true, track = useMediaStore().trac
   }
 }
 
-async function loadTrack(track, autoPlay = true) {
+async function loadTrack(track, autoPlay = true, { resolved: preResolved = null } = {}) {
   if (!track || !resolveTrackSource) return false;
+  disarmNext();
   invalidateAutoplay();
   rememberAutoplayTrack(track);
   if (autoPlay) prepareAudio();
@@ -1306,7 +1501,9 @@ async function loadTrack(track, autoPlay = true) {
   void loadLyrics(track);
   let resolved = null;
   try {
-    resolved = await resolveTrackSource(track);
+    // A pre-resolved local source continues without yielding to a task, so
+    // the native element receives its new src and play() inside `ended`.
+    resolved = preResolved || await resolveTrackSource(track);
   } catch (error) {
     if (myToken === trackToken) {
       clearPendingSeek();
@@ -1340,7 +1537,7 @@ async function loadTrack(track, autoPlay = true) {
   updateMediaSession(nextTrackData);
   status.setNotice(`${nextTrackData.title || "音乐"} 已就绪`);
   void loadLyrics(nextTrackData);
-  const outcome = await load(resolved.source, autoPlay, nextTrackData);
+  const outcome = await load(resolved.source, autoPlay, nextTrackData, { element: resolved.element });
   if (myToken !== trackToken) return false;
   if (!outcome.ok) {
     await skipOnFailure(myToken, () => trackToken);
@@ -1470,7 +1667,10 @@ async function prefetchNextTrack(myToken = trackToken) {
       return prefetchTrackSource(track);
     })
     .then((ready) => {
-      if (ready && myToken === trackToken) void prepareTransition(myToken);
+      if (ready && myToken === trackToken) {
+        void prepareTransition(myToken);
+        void armNextTrack(myToken);
+      }
       return ready;
     })
     .catch((error) => {
@@ -1563,7 +1763,12 @@ export async function play(options = {}) {
       return true;
     }
     const nativeOutput = effectOutput(audio);
-    if (nativeOutput?.context?.resume) {
+    // Start the authorized native element immediately. Waiting for Web Audio
+    // first can leave Android's background media session without an active
+    // transport while a suspended effects context waits to resume.
+    const nativePlay = audio.play();
+    const resumeOutput = async () => {
+      if (!nativeOutput?.context?.resume || nativeOutput.context.state === "running") return;
       let resumeTimer;
       try {
         await Promise.race([
@@ -1573,9 +1778,8 @@ export async function play(options = {}) {
           }),
         ]);
       } finally { window.clearTimeout(resumeTimer); }
-      if (requestToken !== loadToken || controlToken !== playControlToken) return false;
-    }
-    await audio.play();
+    };
+    await Promise.all([nativePlay, resumeOutput()]);
     // A new track may have replaced this element while the old play request
     // was pending.  Never let the stale promise mutate the new track's state.
     if (requestToken !== loadToken || controlToken !== playControlToken) return false;
@@ -1595,6 +1799,9 @@ export async function play(options = {}) {
     return true;
   } catch (error) {
     if (requestToken !== loadToken || controlToken !== playControlToken) return false;
+    // The element and effects resume in parallel. If either fails, leave no
+    // native transport running behind a paused UI (or through a silent graph).
+    if (!usingAlacWorklet && !audio.paused) audio.pause();
     playback.setPlaying(false);
     if (error?.name === "NotAllowedError") {
       status.state = "paused";
@@ -1653,6 +1860,7 @@ export function stop() {
   pause();
   loadToken += 1;
   trackToken += 1;
+  disarmNext();
   clearPendingSeek();
   clearPrefetchRetry();
   cancelActiveTrackCache();
@@ -1833,10 +2041,11 @@ export function setVolume(volume) {
   status.persist();
 }
 
-export async function playFrom(items, startIndex = 0, sourcePlaylist = null) {
+export async function playFrom(items, startIndex = 0, sourcePlaylist = null, { keepStart = false } = {}) {
   cancelTransition();
   if (!items.length) return false;
   invalidateAutoplay();
+  resetAutoplayStation();
   const { media, queue, status } = stores();
   const normalizedItems = items.map((item) => ({ ...normalizeTrackForQuality(item), autoplayRecommended: false }));
   const index = Math.max(0, Math.min(startIndex, normalizedItems.length - 1));
@@ -1847,8 +2056,9 @@ export async function playFrom(items, startIndex = 0, sourcePlaylist = null) {
     // Starting a playlist while shuffle is enabled should choose a random
     // first item as well. Keeping the requested first track here made
     // "随机播放" deterministic whenever callers passed startIndex = 0.
-    const randomIndex = Math.floor(Math.random() * queue.queueLength);
-    queue.shuffleQueue(randomIndex);
+    // Continuing a specific song (hand-off) keeps it and shuffles the rest.
+    const firstIndex = keepStart ? status.playIndex : Math.floor(Math.random() * queue.queueLength);
+    queue.shuffleQueue(firstIndex);
     status.playIndex = 0;
   }
   // The queue may have been shuffled above, so compare against the final
@@ -2145,8 +2355,10 @@ export async function removeFromQueue(index) {
 export async function clearQueue() {
   const { queue, status, media } = stores();
   invalidateAutoplay();
+  resetAutoplayStation();
   loadToken += 1;
   trackToken += 1;
+  disarmNext();
   clearPendingSeek();
   clearPrefetchRetry();
   cancelActiveTrackCache();

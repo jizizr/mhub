@@ -1,4 +1,4 @@
-const COLORS = { light: "#f6f5f3", dark: "#141416" };
+const COLORS = { light: "#ffffff", dark: "#1f1f1f" };
 
 // Keep one resolved theme-color, so an explicit app theme does not depend on
 // the browser host selecting the correct OS media query.

@@ -3,6 +3,9 @@
 // two decks at the same quality always share a render clock.
 const contexts = new Map();
 const nativeSources = new WeakMap();
+// Contexts that must keep running: native <audio> graphs and live ALAC decks.
+const nativeContexts = new WeakSet();
+const deckUsers = new Map();
 let preparedContext = null;
 
 // WebKit uses this category both for background audio and Now Playing
@@ -19,6 +22,15 @@ function requestedRate(quality) {
   return ["hires", "hi-res"].includes(String(quality || "").toLowerCase()) ? 192000 : 48000;
 }
 
+/**
+ * The render rate for a source: 44.1/48 kHz songs play on the 48 kHz context
+ * even when Hi-Res is selected, instead of being upsampled to 192 kHz and
+ * then resampled again by the browser; only real Hi-Res sources use 192 kHz.
+ */
+export function outputRateFor(sourceRate) {
+  return Number(sourceRate) > 48000 ? 192000 : 48000;
+}
+
 export function getOutputContext(qualityOrSampleRate = 48000) {
   const rate = requestedRate(qualityOrSampleRate);
   let context = contexts.get(rate);
@@ -26,7 +38,11 @@ export function getOutputContext(qualityOrSampleRate = 48000) {
   const Context = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
   if (!Context) throw new Error("当前浏览器不支持音频处理");
   try { context = new Context({ sampleRate: rate }); }
-  catch { context = new Context(); }
+  catch {
+    // Browsers that reject the rate share one default-rate context.
+    context = [...contexts.values()].find((existing) => existing.state !== "closed" && existing.defaultRate) || new Context();
+    context.defaultRate = true;
+  }
   contexts.set(rate, context);
   return context;
 }
@@ -35,9 +51,45 @@ export function getOutputContext(qualityOrSampleRate = 48000) {
 // awaited: native/ALAC playback retains its own recoverable permission check.
 export function prepareOutput(qualityOrSampleRate = 48000) {
   preparePlaybackSession();
-  preparedContext = getOutputContext(qualityOrSampleRate);
-  try { void Promise.resolve(preparedContext.resume()).catch(() => {}); } catch { /* retry on play */ }
+  const rate = requestedRate(qualityOrSampleRate);
+  // Hi-Res queues usually mix 44.1/48 kHz and higher-rate songs. Unlock both
+  // rates in this gesture so each song can use its own (see outputRateFor);
+  // the unused one is suspended again once a deck picks (suspendIdleOutputs).
+  const rates = rate === 192000 ? [48000, 192000] : [rate];
+  for (const each of rates) {
+    const context = getOutputContext(each);
+    try { void Promise.resolve(context.resume()).catch(() => {}); } catch { /* retry on play */ }
+    if (each === rate) preparedContext = context;
+  }
   return preparedContext;
+}
+
+const running = (context) => context && context.state === "running";
+
+/**
+ * A running context for a decoded source rate. A context suspended to save
+ * power is resumed; if that fails outside a user gesture (WebKit), playback
+ * falls back to a context that is already running rather than stalling.
+ */
+export async function acquireOutputContext(sourceRate, fallbacks = []) {
+  const preferred = contexts.get(outputRateFor(sourceRate));
+  if (preferred && preferred.state !== "closed" && !running(preferred)) {
+    try {
+      await Promise.race([preferred.resume(), new Promise((resolve) => setTimeout(resolve, 400))]);
+    } catch { /* fall back below */ }
+  }
+  const open = (context) => context && context.state !== "closed";
+  const candidates = [preferred, ...fallbacks, preparedContext, ...contexts.values()].filter(open);
+  // Nothing confirmed running: keep the gesture-prepared context, as before.
+  return candidates.find(running) || fallbacks.find(open) || (open(preparedContext) && preparedContext) || candidates[0] || getOutputContext(sourceRate);
+}
+
+/** Suspend unlocked contexts nothing renders on (an idle 192 kHz clock costs power). */
+export function suspendIdleOutputs(keep) {
+  for (const context of contexts.values()) {
+    if (context === keep || !running(context) || nativeContexts.has(context) || (deckUsers.get(context) || 0) > 0) continue;
+    try { void Promise.resolve(context.suspend()).catch(() => {}); } catch { /* optional */ }
+  }
 }
 
 function safeGain(value, fallback = 1) {
@@ -49,6 +101,7 @@ function unitGain(value) { return Math.min(1, safeGain(value)); }
 
 /** Independent normalization, transition and user volume for one deck. */
 export function createAlacOutput(context = preparedContext || getOutputContext()) {
+  deckUsers.set(context, (deckUsers.get(context) || 0) + 1);
   const normalizationGain = context.createGain();
   const fadeGain = context.createGain();
   const volumeGain = context.createGain();
@@ -117,6 +170,7 @@ export function createAlacOutput(context = preparedContext || getOutputContext()
       if (disposed) return;
       cancelFade(0);
       disposed = true;
+      deckUsers.set(context, Math.max(0, (deckUsers.get(context) || 1) - 1));
       normalizationGain.disconnect();
       fadeGain.disconnect();
       volumeGain.disconnect();
@@ -137,6 +191,7 @@ export function createNativeOutput(audioElement) {
   if (!entry) {
     const context = preparedContext || getOutputContext();
     entry = { context, source: context.createMediaElementSource(audioElement), output: null };
+    nativeContexts.add(context);
     nativeSources.set(audioElement, entry);
   }
   const output = createAlacOutput(entry.context);

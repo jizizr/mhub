@@ -1,5 +1,7 @@
-//! Read-only recommendation metadata. Media, credentials and listening history
-//! never travel through these responses or change the shared Apple account.
+//! Recommendation metadata. Media, credentials and listening history never
+//! travel through these responses. AutoPlay creates Apple's own ephemeral
+//! AutoPlay station for the account, exactly as the web player does; nothing
+//! is added to the library or played on the account.
 use super::*;
 use crate::music::RecommendationContinuation;
 use futures::{StreamExt, stream};
@@ -321,8 +323,18 @@ fn select_tracks(
     selected
 }
 
+/// Apple Music's AutoPlay, as MusicKit implements it: seed a personal station
+/// with the last songs of the queue (`POST /v1/me/stations/continuous`,
+/// at most `AUTOPLAY_SEEDS`), then keep drawing from the same station
+/// (`POST /v1/me/stations/next-tracks/{id}`). Without the account token, or if
+/// Apple returns nothing usable, the related-artist pool below is the fallback.
+const AUTOPLAY_SEEDS: usize = 10;
+const AUTOPLAY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn continuation_recommendations(
     seed_id: &str,
+    seeds: &[String],
+    station: Option<&str>,
     exclude: &[String],
     limit: usize,
 ) -> Result<RecommendationContinuation, BotError> {
@@ -335,9 +347,166 @@ pub async fn continuation_recommendations(
     let limit = limit.clamp(1, 50);
     let mut excluded = exclude.to_vec();
     excluded.push(seed_id.to_string());
+    let seeds = autoplay_seeds(seed_id, seeds);
+    let mut station_id = None;
+    match autoplay_station_tracks(&seeds, station, limit).await {
+        Ok((id, pool)) => {
+            let tracks = select_tracks(pool, limit, &excluded);
+            if !tracks.is_empty() {
+                return Ok(RecommendationContinuation {
+                    source: "applemusic-autoplay".into(),
+                    tracks,
+                    station: Some(id),
+                });
+            }
+            station_id = Some(id);
+        }
+        Err(error) => tracing::info!("Apple Music AutoPlay station unavailable: {error}"),
+    }
+    let mut result = related_continuation(seed_id, &mut excluded, exclude, limit).await?;
+    result.station = station_id;
+    Ok(result)
+}
+
+/// The last `AUTOPLAY_SEEDS` distinct catalog songs of the queue, oldest
+/// first, always ending with the song that is playing.
+fn autoplay_seeds(seed_id: &str, seeds: &[String]) -> Vec<String> {
+    let mut ordered = Vec::new();
+    for id in seeds
+        .iter()
+        .map(|id| id.trim())
+        .chain(std::iter::once(seed_id))
+    {
+        if !valid_catalog_id(id) {
+            continue;
+        }
+        ordered.retain(|item: &String| item != id);
+        ordered.push(id.to_string());
+    }
+    let skip = ordered.len().saturating_sub(AUTOPLAY_SEEDS);
+    ordered.split_off(skip)
+}
+
+/// AutoPlay station ids look like `ra.<kind>-<id>`; anything else is not
+/// interpolated into a request path.
+fn valid_station_id(id: &str) -> bool {
+    id.starts_with("ra.")
+        && id.len() <= 160
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+#[derive(Deserialize)]
+struct AutoplayStationEnvelope {
+    results: Option<AutoplayStationResults>,
+}
+#[derive(Deserialize)]
+struct AutoplayStationResults {
+    station: Option<CatalogId>,
+    #[serde(default)]
+    tracks: Vec<serde_json::Value>,
+}
+#[derive(Deserialize)]
+struct StationTracksResponse {
+    #[serde(default)]
+    data: Vec<serde_json::Value>,
+}
+
+/// Station items are catalog songs; anything that is not (a video, a library
+/// song without catalog metadata) is skipped rather than failing the batch.
+fn station_items(values: Vec<serde_json::Value>) -> Vec<MusicSearchItem> {
+    values
+        .into_iter()
+        .filter(|value| {
+            value
+                .get("type")
+                .and_then(|kind| kind.as_str())
+                .is_none_or(|kind| kind == "songs")
+        })
+        .filter_map(|value| serde_json::from_value::<AppleMusicResource>(value).ok())
+        .map(song_to_item)
+        .filter(|item| valid_catalog_id(&item.id))
+        .collect()
+}
+
+async fn autoplay_station_tracks(
+    seeds: &[String],
+    station: Option<&str>,
+    limit: usize,
+) -> Result<(String, Vec<MusicSearchItem>), BotError> {
+    let token = normalize_media_user_token(SETTINGS.music.applemusic.media_user_token.trim());
+    if token.is_empty() {
+        return Err(BotError::Custom(
+            "未配置 Apple Music 账号，无法使用 AutoPlay".into(),
+        ));
+    }
+    // A few extra tracks cover songs that are already in the queue.
+    let wanted = (limit + 5).min(30).to_string();
+    if let Some(id) = station.filter(|id| valid_station_id(id)) {
+        let mut url = Url::parse(&format!(
+            "{APPLE_MUSIC_API}/v1/me/stations/next-tracks/{id}"
+        ))?;
+        url.query_pairs_mut()
+            .append_pair("limit", &wanted)
+            .append_pair("l", &apple_language());
+        let next = tokio::time::timeout(
+            AUTOPLAY_TIMEOUT,
+            apple_post_json_with_media_user_token::<StationTracksResponse>(
+                url.as_str(),
+                None,
+                &token,
+                true,
+            ),
+        )
+        .await;
+        if let Ok(Ok(response)) = next {
+            let tracks = station_items(response.data);
+            if !tracks.is_empty() {
+                return Ok((id.to_string(), tracks));
+            }
+        }
+        // An expired or exhausted station is recreated from the queue.
+    }
+    if seeds.is_empty() {
+        return Err(BotError::Custom("没有可用于 AutoPlay 的歌曲".into()));
+    }
+    let mut url = Url::parse(&format!("{APPLE_MUSIC_API}/v1/me/stations/continuous"))?;
+    url.query_pairs_mut()
+        .append_pair("limit[results:tracks]", &wanted)
+        .append_pair("with", "tracks")
+        .append_pair("l", &apple_language());
+    let body = serde_json::json!({
+        "data": seeds.iter().map(|id| serde_json::json!({ "id": id, "type": "songs" })).collect::<Vec<_>>()
+    });
+    let response: AutoplayStationEnvelope = tokio::time::timeout(
+        AUTOPLAY_TIMEOUT,
+        apple_post_json_with_media_user_token(url.as_str(), Some(&body), &token, true),
+    )
+    .await
+    .map_err(|_| BotError::Custom("Apple Music AutoPlay 请求超时".into()))??;
+    let results = response
+        .results
+        .ok_or_else(|| BotError::Custom("Apple Music 未返回 AutoPlay 电台".into()))?;
+    let station = results
+        .station
+        .map(|station| station.id)
+        .filter(|id| valid_station_id(id))
+        .ok_or_else(|| BotError::Custom("Apple Music 未返回 AutoPlay 电台".into()))?;
+    Ok((station, station_items(results.tracks)))
+}
+
+/// The previous algorithm, kept as the fallback: the seed artist and similar
+/// artists' top songs, then the account's own recommendations.
+async fn related_continuation(
+    seed_id: &str,
+    excluded: &mut Vec<String>,
+    exclude: &[String],
+    limit: usize,
+) -> Result<RecommendationContinuation, BotError> {
     let related = related_pool(seed_id).await;
     let mut upstream_failed = related.is_err();
-    let mut tracks = sample_tracks(related.unwrap_or_default(), limit, &excluded);
+    let mut tracks = sample_tracks(related.unwrap_or_default(), limit, excluded);
     let source = if tracks.is_empty() {
         "applemusic-personal"
     } else {
@@ -349,7 +518,7 @@ pub async fn continuation_recommendations(
         match recommendation_pool(false).await {
             Ok(home) => {
                 excluded.extend(tracks.iter().map(|item| item.id.clone()));
-                let additional = sample_tracks(home.tracks, limit - tracks.len(), &excluded);
+                let additional = sample_tracks(home.tracks, limit - tracks.len(), excluded);
                 tracks.extend(additional);
                 tracks = select_tracks(tracks, limit, exclude);
             }
@@ -373,6 +542,7 @@ fn finish_continuation(
     Ok(RecommendationContinuation {
         source: source.into(),
         tracks,
+        station: None,
     })
 }
 
@@ -540,6 +710,59 @@ mod tests {
             result.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             ["100002", "100004"]
         );
+    }
+    #[test]
+    fn autoplay_seeds_keep_the_latest_ten_ending_with_the_current_song() {
+        let queue = (100001..100015)
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        let seeds = autoplay_seeds("100003", &queue);
+        assert_eq!(seeds.len(), AUTOPLAY_SEEDS);
+        assert_eq!(seeds.last().map(String::as_str), Some("100003"));
+        assert!(!seeds[..seeds.len() - 1].contains(&"100003".to_string()));
+        let invalid = autoplay_seeds("100001", &["abc".into(), "0".into(), "100002".into()]);
+        assert_eq!(invalid, ["100002", "100001"]);
+    }
+    #[test]
+    fn station_ids_are_checked_before_use_in_a_path() {
+        assert!(valid_station_id("ra.cp-1055074639"));
+        assert!(valid_station_id("ra.q-GAI6IDE2OTM0ODY1MjI0MGM2Zjg0"));
+        assert!(!valid_station_id("pl.123"));
+        assert!(!valid_station_id("ra.../../v1/me/library"));
+        assert!(!valid_station_id("ra.a?b=c"));
+    }
+    #[test]
+    fn station_items_keep_catalog_songs_and_skip_others() {
+        let items = station_items(vec![
+            serde_json::json!({ "id": "100001", "type": "songs", "attributes": { "name": "A", "artistName": "X" } }),
+            serde_json::json!({ "id": "100002", "type": "music-videos", "attributes": { "name": "V", "artistName": "X" } }),
+            serde_json::json!({ "id": "i.abc", "type": "library-songs", "attributes": { "name": "L" } }),
+            serde_json::json!({ "id": "100003", "type": "songs" }),
+            serde_json::json!({ "id": "100004", "attributes": { "name": "B", "artistName": "" } }),
+        ]);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["100001", "100004"]
+        );
+        assert_eq!(items[1].singer, "未知歌手");
+    }
+    #[test]
+    fn autoplay_station_responses_parse_like_musickit() {
+        let created: AutoplayStationEnvelope = serde_json::from_value(serde_json::json!({
+            "results": { "station": { "id": "ra.q-abc", "type": "stations" }, "tracks": [
+                { "id": "100001", "type": "songs", "attributes": { "name": "A", "artistName": "X" } }
+            ] }
+        }))
+        .unwrap();
+        let results = created.results.unwrap();
+        assert_eq!(results.station.unwrap().id, "ra.q-abc");
+        assert_eq!(station_items(results.tracks).len(), 1);
+        let next: StationTracksResponse =
+            serde_json::from_value(serde_json::json!({ "data": [] })).unwrap();
+        assert!(next.data.is_empty());
     }
     #[test]
     fn exhausted_pool_returns_empty_without_repeats() {

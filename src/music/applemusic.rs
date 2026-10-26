@@ -3000,6 +3000,45 @@ async fn apple_get_json_with_media_user_token<T: serde::de::DeserializeOwned>(
     Ok(response.json().await?)
 }
 
+/// POST with the account's media-user-token, as MusicKit does for the
+/// `/v1/me/stations/*` AutoPlay endpoints. `body` is omitted when `None`.
+async fn apple_post_json_with_media_user_token<T: serde::de::DeserializeOwned>(
+    url: &str,
+    body: Option<&serde_json::Value>,
+    media_user_token: &str,
+    retry: bool,
+) -> Result<T, BotError> {
+    let token = ensure_developer_token().await?;
+    let mut request = CLIENT
+        .post(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Origin", APPLE_MUSIC_ORIGIN)
+        .header("User-Agent", APPLE_MUSIC_UA)
+        .header("media-user-token", media_user_token)
+        .header("Cookie", format!("media-user-token={media_user_token}"));
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    let response = request.send().await?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED && retry {
+        clear_developer_token();
+        return Box::pin(apple_post_json_with_media_user_token(
+            url,
+            body,
+            media_user_token,
+            false,
+        ))
+        .await;
+    }
+    if !response.status().is_success() {
+        return Err(BotError::Custom(format!(
+            "Apple Music API 请求失败：HTTP {}",
+            response.status()
+        )));
+    }
+    Ok(response.json().await?)
+}
+
 async fn ensure_developer_token() -> Result<String, BotError> {
     if let Some(token) = DEVELOPER_TOKEN.read().unwrap().clone() {
         return Ok(token);

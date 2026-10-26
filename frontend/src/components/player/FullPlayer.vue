@@ -2,7 +2,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ChevronDown, Languages } from "lucide-vue-next";
 import { coverUrl } from "../../apis/music";
-import { loadLyricConverter } from "../../utils/opencc-loader.js";
 import * as player from "../../core/player";
 import { useMediaStore } from "../../stores/media";
 import { useStatusStore } from "../../stores/status";
@@ -10,6 +9,7 @@ import PlayerControls from "./PlayerControls.vue";
 import QueuePanel from "./QueuePanel.vue";
 import SeekSlider from "./SeekSlider.vue";
 import LyricsView from "./LyricsView.vue";
+import LyricsBackground from "./LyricsBackground.vue";
 
 // 歌词渲染器依赖 Pixi 和 AMLL，体积较大。只有展开播放器且确实有歌词时才加载，
 // 避免无歌词歌曲和普通播放场景下载这部分代码。
@@ -19,7 +19,6 @@ const status = useStatusStore();
 const draft = ref(null);
 const isMobileLayout = ref(false);
 const lyricScriptOverride = ref("");
-const lyricScriptDifference = ref(false);
 const lyricScriptCheckFailed = ref(false);
 const lyricConversionState = ref({ script: "original", state: "original" });
 const lyricConversionRetry = ref(0);
@@ -38,12 +37,24 @@ const duration = computed(() => Math.max(status.duration || media.track?.duratio
 const sliderValue = computed(() => draft.value ?? status.position);
 const lyricAlignPosition = computed(() => (isMobileLayout.value ? 0.24 : 0.36));
 const lyricScript = computed(() => lyricScriptOverride.value || status.lyricScript || "original");
-const canToggleLyricScript = computed(
-    () =>
-      status.lyricScript !== "original" &&
-      media.lyricLines.length > 0 &&
-      lyricScriptDifference.value,
-);
+// The toggle is always offered for Chinese lyrics, as Apple Music offers its
+// lyric-script switch. Under the "original" setting it targets the other
+// script; a dictionary loads only once a conversion is actually chosen.
+// Japanese lyrics also use Han characters; kana marks them as not Chinese.
+const HAN = /\p{Script=Han}/u;
+const KANA = /[\p{Script=Hiragana}\p{Script=Katakana}]/u;
+const lyricText = (line) => [...(Array.isArray(line.words) ? line.words.map((word) => String(word.word || "")) : []), String(line.translatedLyric || "")].join("");
+const lyricsHaveHan = computed(() => {
+  const text = media.lyricLines.map(lyricText).join("");
+  return HAN.test(text) && !KANA.test(text);
+});
+const lyricsAreTraditional = ref(false);
+const toggleTarget = computed(() => {
+  if (lyricScript.value === "simplified") return "traditional";
+  if (lyricScript.value === "traditional") return "simplified";
+  return lyricsAreTraditional.value ? "simplified" : "traditional";
+});
+const canToggleLyricScript = computed(() => media.lyricLines.length > 0 && lyricsHaveHan.value);
 const lyricConversionFailed = computed(() => lyricScript.value !== "original" && (
   lyricScriptCheckFailed.value ||
   (lyricConversionState.value.script === lyricScript.value && lyricConversionState.value.state === "error")
@@ -51,29 +62,19 @@ const lyricConversionFailed = computed(() => lyricScript.value !== "original" &&
 const lyricConversionLoading = computed(() => lyricScript.value !== "original" &&
   lyricConversionState.value.script === lyricScript.value && lyricConversionState.value.state === "loading");
 
-let lyricCheckToken = 0;
-async function refreshLyricScriptDifference() {
-  const lines = media.lyricLines;
-  const script = status.lyricScript;
-  const token = ++lyricCheckToken;
-  lyricScriptDifference.value = false;
+// Under "original" no dictionary is downloaded just to label the button:
+// frequent Traditional-only characters tell Traditional lyrics apart.
+const TRADITIONAL_ONLY = /[這們個來說會為與對時國學還進過裡體麼後發開關問題經點應當見愛聽讓從誰樣頭邊壞夢歲謝謊輕嘗給濃歡樣溫護擔擁淚憶戀遠離總覺讀寫話語]/u;
+function refreshLyricScriptDifference() {
   lyricScriptCheckFailed.value = false;
-  if (script === "original" || !lines.length) return;
-  try {
-    // Share the same statically discoverable, lazy modules as the renderer.
-    const module = await loadLyricConverter(script);
-    if (token !== lyricCheckToken) return;
-    lyricScriptDifference.value = Boolean(module?.hasLyricScriptDifference(lines));
-  } catch {
-    if (token === lyricCheckToken) lyricScriptCheckFailed.value = true;
-  }
+  lyricsAreTraditional.value = media.lyricLines.some((line) => TRADITIONAL_ONLY.test(lyricText(line)));
 }
 
 function retryLyricConversion() {
   lyricScriptCheckFailed.value = false;
   lyricConversionState.value = { script: lyricScript.value, state: "loading" };
   lyricConversionRetry.value += 1;
-  void refreshLyricScriptDifference();
+  refreshLyricScriptDifference();
 }
 
 function handleLyricConversionState(state) {
@@ -82,13 +83,13 @@ function handleLyricConversionState(state) {
   // The renderer may recover after an earlier toggle check failed. Refresh
   // that check from the shared, now-ready dictionary instead of a stale error.
   if (state.state === "ready" && lyricScriptCheckFailed.value) {
-    void refreshLyricScriptDifference();
+    refreshLyricScriptDifference();
   }
 }
 
 function toggleLyricScript() {
   if (!canToggleLyricScript.value) return;
-  lyricScriptOverride.value = lyricScript.value === "simplified" ? "traditional" : "simplified";
+  lyricScriptOverride.value = toggleTarget.value;
 }
 
 function syncMobileLayout(event) {
@@ -100,14 +101,14 @@ watch(
   () => {
     lyricScriptOverride.value = "";
     lyricConversionState.value = { script: lyricScript.value, state: "original" };
-    void refreshLyricScriptDifference();
+    refreshLyricScriptDifference();
   },
   { immediate: true },
 );
 
 watch(
   () => media.lyricLines,
-  () => void refreshLyricScriptDifference(),
+  () => refreshLyricScriptDifference(),
 );
 
 onMounted(() => {
@@ -117,7 +118,6 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  lyricCheckToken += 1;
   mobileQuery?.removeEventListener("change", syncMobileLayout);
   mobileQuery = null;
 });
@@ -129,6 +129,7 @@ onBeforeUnmount(() => {
     <div class="full-player__bg">
       <img v-if="cover" :src="cover" alt="" />
     </div>
+    <LyricsBackground :cover="cover" :playing="status.isPlaying" />
     <button class="collapse-button" title="收起" @click="media.expanded = false">
       <ChevronDown :size="24" />
     </button>
@@ -156,11 +157,11 @@ onBeforeUnmount(() => {
             v-else-if="canToggleLyricScript"
             class="lyric-script-toggle"
             type="button"
-            :title="lyricScript === 'simplified' ? '切换为繁体歌词' : '切换为简体歌词'"
+            :title="toggleTarget === 'traditional' ? '切换为繁体歌词' : '切换为简体歌词'"
             @click="toggleLyricScript"
           >
             <Languages :size="15" />
-            {{ lyricScript === "simplified" ? "繁體" : "简体" }}
+            {{ toggleTarget === "traditional" ? "繁體" : "简体" }}
           </button>
           <LyricsView
             v-if="media.lyricLines.length"

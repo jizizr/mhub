@@ -135,7 +135,9 @@ async function createFixture(base, viewport, { homeIds = ["current"], searchIds 
     localStorage.setItem("music-web-splayer-playlists-v1", JSON.stringify([local]));
     window.__playlistAudioEvents = [];
     for (const type of ["loadstart", "pause", "playing", "emptied"]) document.addEventListener(type, event => {
-      if (event.target instanceof HTMLAudioElement) window.__playlistAudioEvents.push({ type, at: performance.now(), time: event.target.currentTime });
+      // The player pre-loads the next cached song into a second, hidden
+      // <audio> (preroll); only the primary element's events are interruptions.
+      if (event.target instanceof HTMLAudioElement && event.target === document.querySelector("audio")) window.__playlistAudioEvents.push({ type, at: performance.now(), time: event.target.currentTime });
     }, true);
     // Reproducible shuffle selection, without changing player/store state.
     Math.random = () => .73;
@@ -307,8 +309,8 @@ try {
       check(scenario, "next moves every overlap behind the active song in collection order", JSON.stringify(next.ids) === JSON.stringify(expectedNext) && next.playIndex === 0, next.ids);
       check(scenario, "next preserves the current transport and advancing position", next.audioSrc === appended.audioSrc && !next.audioPaused && next.audioTime >= appended.audioTime && next.events.filter(event => ["pause", "emptied", "loadstart"].includes(event.type)).length === appended.events.filter(event => ["pause", "emptied", "loadstart"].includes(event.type)).length, { appended, next });
       if (viewport.width >= 880) {
-        await page.locator(".player-bar button[title^='播放顺序：']").click();
-        await page.locator(".player-bar .play-mode-option").filter({ hasText: "随机播放" }).click();
+        // The desktop capsule has Apple Music's separate shuffle button.
+        await page.locator(".player-bar .player-control--shuffle").click();
       }
       await page.locator(".playlist-detail__action--primary").click();
       await page.waitForFunction(() => { const audio = document.querySelector("audio"); return audio && !audio.paused && audio.currentTime > .15; });

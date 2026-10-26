@@ -1,11 +1,13 @@
 <script setup>
 import { computed } from "vue";
-import { ChevronLeft, ChevronRight, Ellipsis, ListMusic, Play, RefreshCcw, Shuffle, Sparkles } from "lucide-vue-next";
+import { ChevronLeft, ChevronRight, Ellipsis, ListMusic, LoaderCircle, Play, RefreshCcw, Shuffle, Sparkles } from "lucide-vue-next";
 import { trackIdentity } from "../../stores/queue";
 
 // Per-song actions (next, queue, like, less, add to playlist) live in the
 // song menu: `menu` opens it, `more` opens the batch menu for the whole pool.
-const emit = defineEmits(["play", "open", "menu", "more", "refresh", "mood", "play-all", "playlist"]);
+// As in Apple Music, a card opens its playlist and its play button plays it;
+// a song plays where it is, without opening the full player.
+const emit = defineEmits(["play", "menu", "more", "refresh", "mood", "play-all", "playlist", "play-playlist"]);
 
 const moods = [
   { id: "relax", label: "放松一下", query: "chill" },
@@ -28,26 +30,26 @@ const props = defineProps({
   platformLabel: { type: String, default: "当前平台" },
   mood: { type: String, default: "" },
   personalized: { type: Boolean, default: false },
+  pendingPlaylist: { type: String, default: "" },
 });
 
 // Keep horizontal rails discoverable and usable without relying on the OS
-// overlay scrollbar. A wheel over a rail maps vertical wheel input to the
-// horizontal axis. Only mouse dragging is handled here: touch/pen scrolling
-// stays native so vertical page scrolling, momentum and pinch zoom can coexist.
+// overlay scrollbar. A vertical mouse wheel is never captured: the home page
+// is mostly rails, so it always scrolls the page; trackpad swipes, Shift+wheel,
+// the arrow buttons and mouse dragging move a rail. Only mouse dragging is
+// handled here: touch/pen scrolling stays native.
 const railDragState = new WeakMap();
 const railTimers = new WeakMap();
 
-// Mouse wheel and drag move the rail with CSS snapping paused, then glide to
-// the nearest card once. Snapping while the position is being set by script
-// made every wheel tick snap back and every drag end jump.
+// A mouse drag moves the rail with CSS snapping paused, then glides to the
+// nearest card once. Snapping while the position is being set by script made
+// every drag end jump.
 function pauseSnap(rail) {
   window.clearTimeout(railTimers.get(rail));
   rail.classList.add("is-free-scrolling");
 }
 
-// `from` (wheel) makes settling directional: a deliberate wheel movement
-// always reaches the next card instead of gliding back to where it began.
-function settleRail(rail, velocity = 0, from = null) {
+function settleRail(rail, velocity = 0) {
   const cards = [...rail.children];
   if (!cards.length) { rail.classList.remove("is-free-scrolling"); return; }
   const origin = cards[0].offsetLeft;
@@ -57,12 +59,10 @@ function settleRail(rail, velocity = 0, from = null) {
   const capped = Math.max(-2.5, Math.min(2.5, velocity));
   const projected = Math.min(max, Math.max(0, rail.scrollLeft + capped * 220));
   let target = projected >= max - 2 ? max : 0;
-  const travel = from === null ? 0 : rail.scrollLeft - from;
-  if (target !== max || travel) {
+  if (target !== max) {
     let best = Infinity;
     for (const card of cards) {
       const left = Math.min(max, card.offsetLeft - origin);
-      if (Math.abs(travel) > 12 && (travel > 0 ? left <= from + 1 : left >= from - 1)) continue;
       if (Math.abs(left - projected) < best) { best = Math.abs(left - projected); target = left; }
     }
   }
@@ -147,27 +147,6 @@ function handleRailClick(event) {
   delete rail.dataset.suppressClick;
 }
 
-function handleRailWheel(event) {
-  const rail = event.currentTarget;
-  if (rail.scrollWidth <= rail.clientWidth || event.ctrlKey) return;
-  // Horizontal trackpad swipes scroll natively, with the browser's own
-  // momentum and snapping. Only a vertical wheel is mapped to the rail.
-  if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
-  const delta = event.deltaY * (event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? rail.clientWidth : 1);
-  const max = rail.scrollWidth - rail.clientWidth;
-  // At either end the wheel keeps scrolling the page.
-  if ((delta < 0 && rail.scrollLeft <= 0) || (delta > 0 && rail.scrollLeft >= max - 1)) return;
-  event.preventDefault();
-  if (!rail.classList.contains("is-free-scrolling")) rail.dataset.wheelFrom = String(rail.scrollLeft);
-  pauseSnap(rail);
-  rail.scrollLeft += delta;
-  railTimers.set(rail, window.setTimeout(() => {
-    const from = Number(rail.dataset.wheelFrom);
-    delete rail.dataset.wheelFrom;
-    settleRail(rail, 0, Number.isFinite(from) ? from : null);
-  }, 140));
-}
-
 function scrollRail(button, direction) {
   const rail = button?.parentElement?.querySelector(".artwork-rail");
   if (!rail) return;
@@ -240,16 +219,23 @@ function keyFor(track, index) {
           @pointerleave="endRailDrag"
           @click.capture="handleRailClick"
           @dragstart.prevent
-          @wheel="handleRailWheel"
         >
-          <button v-for="playlist in recommendationPlaylists" :key="playlist.id" class="artwork-card" :data-recommendation-id="playlist.id" type="button" :aria-label="`查看${playlist.resource_type === 'albums' ? '专辑' : '歌单'}：${playlist.name}`" @click="emit('playlist', playlist)">
-            <span class="artwork-card__cover">
-              <img v-if="playlist.cover" :src="playlist.cover" alt="" loading="lazy" />
-              <Sparkles v-else :size="24" />
-            </span>
-            <strong>{{ playlist.name }}</strong>
-            <small>{{ playlist.curator || "Apple Music" }}</small>
-          </button>
+          <article v-for="playlist in recommendationPlaylists" :key="playlist.id" class="artwork-card">
+            <div class="artwork-card__art">
+              <button class="artwork-card__cover" :data-recommendation-id="playlist.id" type="button" :aria-label="`查看${playlist.resource_type === 'albums' ? '专辑' : '歌单'}：${playlist.name}`" @click="emit('playlist', playlist)">
+                <img v-if="playlist.cover" :src="playlist.cover" alt="" loading="lazy" />
+                <Sparkles v-else :size="24" />
+              </button>
+              <button class="artwork-card__play" :class="{ 'is-pending': pendingPlaylist === playlist.id }" type="button" title="播放" :aria-label="`播放${playlist.resource_type === 'albums' ? '专辑' : '歌单'}：${playlist.name}`" @click="emit('play-playlist', playlist)">
+                <LoaderCircle v-if="pendingPlaylist === playlist.id" class="is-spinning" :size="16" />
+                <Play v-else :size="15" fill="currentColor" />
+              </button>
+            </div>
+            <button class="artwork-card__text" type="button" tabindex="-1" aria-hidden="true" @click="emit('playlist', playlist)">
+              <strong>{{ playlist.name }}</strong>
+              <small>{{ playlist.curator || "Apple Music" }}</small>
+            </button>
+          </article>
         </div>
         <button class="recommend-rail-control recommend-rail-control--next" type="button" aria-label="向右浏览" @click="scrollRail($event.currentTarget, 1)"><ChevronRight :size="18" /></button>
       </div>
@@ -268,15 +254,17 @@ function keyFor(track, index) {
         @pointerleave="endRailDrag"
         @click.capture="handleRailClick"
         @dragstart.prevent
-        @wheel="handleRailWheel"
       >
         <article v-for="(track, index) in recentTracks.slice(0, 10)" :key="keyFor(track, index)" class="artwork-card" @contextmenu.prevent="emit('menu', { event: $event, track })">
-          <button class="artwork-card__cover" type="button" :aria-label="`播放 ${track.title}`" @click="emit('play', track)">
-            <img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" />
-            <Play v-else :size="24" />
-          </button>
+          <div class="artwork-card__art">
+            <button class="artwork-card__cover" type="button" :aria-label="`播放 ${track.title}`" @click="emit('play', track)">
+              <img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" />
+              <Play v-else :size="24" />
+            </button>
+            <span class="artwork-card__play" aria-hidden="true"><Play :size="15" fill="currentColor" /></span>
+          </div>
           <div class="artwork-card__meta">
-            <button class="artwork-card__text" type="button" @click="emit('open', track)">
+            <button class="artwork-card__text" type="button" tabindex="-1" @click="emit('play', track)">
               <strong>{{ track.title }}</strong>
               <small>{{ track.artist || "未知艺人" }}</small>
             </button>
@@ -299,16 +287,23 @@ function keyFor(track, index) {
         @pointerleave="endRailDrag"
         @click.capture="handleRailClick"
         @dragstart.prevent
-        @wheel="handleRailWheel"
       >
-        <button v-for="playlist in playlists.slice(0, 10)" :key="playlist.id" class="artwork-card" type="button" @click="emit('playlist', playlist)">
-          <span class="artwork-card__cover">
-            <img v-if="playlist.cover" :src="playlist.cover" alt="" loading="lazy" />
-            <ListMusic v-else :size="24" />
-          </span>
-          <strong>{{ playlist.name }}</strong>
-          <small>{{ playlist.tracks?.length || 0 }} 首</small>
-        </button>
+        <article v-for="playlist in playlists.slice(0, 10)" :key="playlist.id" class="artwork-card">
+          <div class="artwork-card__art">
+            <button class="artwork-card__cover" type="button" :aria-label="`查看歌单：${playlist.name}`" @click="emit('playlist', playlist)">
+              <img v-if="playlist.cover" :src="playlist.cover" alt="" loading="lazy" />
+              <ListMusic v-else :size="24" />
+            </button>
+            <button v-if="playlist.tracks?.length" class="artwork-card__play" :class="{ 'is-pending': pendingPlaylist === playlist.id }" type="button" title="播放" :aria-label="`播放歌单：${playlist.name}`" @click="emit('play-playlist', playlist)">
+              <LoaderCircle v-if="pendingPlaylist === playlist.id" class="is-spinning" :size="16" />
+              <Play v-else :size="15" fill="currentColor" />
+            </button>
+          </div>
+          <button class="artwork-card__text" type="button" tabindex="-1" aria-hidden="true" @click="emit('playlist', playlist)">
+            <strong>{{ playlist.name }}</strong>
+            <small>{{ playlist.tracks?.length || 0 }} 首</small>
+          </button>
+        </article>
       </div>
     </section>
 
@@ -325,7 +320,7 @@ function keyFor(track, index) {
             <img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" />
             <Play class="recommend-list-row__play" :size="16" />
           </button>
-          <button class="recommend-list-row__text" type="button" @click="emit('open', track)"><strong>{{ track.title }}</strong><small>{{ track.artist || "未知艺人" }}</small></button>
+          <button class="recommend-list-row__text" type="button" @click="emit('play', track)"><strong>{{ track.title }}</strong><small>{{ track.artist || "未知艺人" }}</small></button>
           <button class="mini-button" type="button" aria-label="更多操作" aria-haspopup="menu" @click="emit('menu', { event: $event, track })"><Ellipsis :size="18" /></button>
         </article>
       </div>

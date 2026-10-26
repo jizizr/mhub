@@ -7,6 +7,7 @@ const props = defineProps({
   lyricLines: { type: Array, default: () => [] },
   script: { type: String, default: "original" },
   retryToken: { type: Number, default: 0 },
+  alignPosition: { type: Number, default: 0.36 },
 });
 const emit = defineEmits(["seek", "conversion-state"]);
 const status = useStatusStore();
@@ -45,7 +46,9 @@ watch([currentIndex, lines], async () => {
   await nextTick();
   if (disposed || !viewport.value) return;
   const line = viewport.value.children[currentIndex.value];
-  if (line) viewport.value.scrollTop = Math.max(0, line.offsetTop - viewport.value.clientHeight * 0.3);
+  // Same anchor as the animated renderer (line top at alignPosition), so the
+  // hand-over between the two does not move the current line.
+  if (line) viewport.value.scrollTop = Math.max(0, line.offsetTop - viewport.value.clientHeight * props.alignPosition);
 }, { immediate: true });
 onBeforeUnmount(() => { disposed = true; generation += 1; });
 </script>
@@ -62,7 +65,7 @@ onBeforeUnmount(() => { disposed = true; generation += 1; });
 </template>
 
 <style scoped>
-.lyrics-fallback { position: absolute; inset: 0; overflow: auto; overscroll-behavior: contain; padding: 22vh 20px 30vh; scrollbar-width: none; }
+.lyrics-fallback { position: absolute; inset: 0; overflow: auto; overscroll-behavior: contain; padding: 60vh 20px; scrollbar-width: none; }
 .lyrics-fallback::-webkit-scrollbar { display: none; }
 .lyrics-fallback__line { display: block; width: 100%; border: 0; background: none; color: rgba(255,255,255,.48); padding: .5em 0; text-align: left; font: inherit; line-height: 1.3; cursor: pointer; overflow-wrap: anywhere; }
 .lyrics-fallback__line.is-current { color: rgba(255,255,255,.92); }

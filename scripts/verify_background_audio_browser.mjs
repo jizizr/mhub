@@ -47,8 +47,12 @@ setActivePinia(createPinia());
 const mode = new URL(location.href).searchParams.get('mode');
 const status = useStatusStore(), media = useMediaStore();
 status.quality = mode === 'alac' ? 'hires' : 'high'; status.volume = .3; status.repeatMode = 'off';
-const tracks = ['alpha', 'beta'].map(id => ({ id:'applemusic--'+id+'--'+status.quality, playback_id:'applemusic--'+id+'--'+status.quality, source_id:id, selected_id:id, platform:'applemusic', title:'Synthetic '+id, artist:'Test signal', album:'Public fixture', quality:status.quality, duration:60000, status:'completed', format:mode==='alac'?'m4a':'wav', ...(mode==='alac'?{streaming_mode:'wasm_alac',streaming_codec:'alac',streaming_protocol:'splayer-alac-v2'}:{}) }));
+const tracks = ['alpha', 'beta', 'gamma'].map(id => ({ id:'applemusic--'+id+'--'+status.quality, playback_id:'applemusic--'+id+'--'+status.quality, source_id:id, selected_id:id, platform:'applemusic', title:'Synthetic '+id, artist:'Test signal', album:'Public fixture', quality:status.quality, duration:60000, status:'completed', format:mode==='alac'?'m4a':'wav', ...(mode==='alac'?{streaming_mode:'wasm_alac',streaming_codec:'alac',streaming_protocol:'splayer-alac-v2'}:{}) }));
 const audio = document.createElement('audio'); audio.id = 'native-audio'; audio.preload = 'auto'; audio.crossOrigin = 'anonymous'; audio.playsInline = true; document.body.append(audio);
+let emptyNativeLoads=0;
+const nativeLoad=audio.load.bind(audio);
+audio.load=()=>{if(!audio.getAttribute('src'))emptyNativeLoads++;return nativeLoad();};
+const sessionActivations=[];
 const outputs = [], worklets = [], contexts = [];
 function observeOutput(output) {
   if (!output || outputs.some(record=>record.output===output)) return;
@@ -64,15 +68,17 @@ function createAlac() {
   return instance;
 }
 const source = '/media.'+(mode==='alac'?'alacstream':'wav');
+const resolutions = [];
 player.initPlayer({audio,
-  mediaSessionFactory:createMediaSessionController,lifecycleFactory:createPlaybackLifecycle,
+  mediaSessionFactory:options=>{const controller=createMediaSessionController(options),activate=controller.activate;controller.activate=track=>{sessionActivations.push(track?.source_id);return activate(track);};return controller;},lifecycleFactory:createPlaybackLifecycle,
   outputFactory:{prepare:prepareOutput,prepareSession:preparePlaybackSession,createNative(element){const output=createNativeOutput(element);observeOutput(output);return output;}},
   alacPlayerFactory:{create:createAlac,canRequest:track=>AlacWorkletPlayer.canRequest(track),canHandle:track=>AlacWorkletPlayer.canHandle(track)},
-  resolveTrackSource:async track=>({source,track}),
+  resolveTrackSource:async track=>{resolutions.push(track.source_id);if(track.source_id==='gamma')await fetch('/resolve');return {source,track};},
 });
 function rms(analyser) {const values=new Float32Array(analyser.fftSize);analyser.getFloatTimeDomainData(values);return Math.sqrt(values.reduce((sum,v)=>sum+v*v,0)/values.length);}
 function snapshot(){const session=navigator.mediaSession;return {mode,state:status.state,position:status.position,current:media.track?.source_id,notice:status.notice,metadata:session?.metadata?{title:session.metadata.title,artist:session.metadata.artist,album:session.metadata.album}:null,mediaState:session?.playbackState,actions:Object.keys(window.fixtureActions||{}),audioSession:navigator.audioSession?.type,contexts:contexts.map(c=>({state:c.state,time:c.currentTime,rate:c.sampleRate})),outputs:outputs.map(({output,analyser})=>({disposed:output.disposed,rms:rms(analyser)})),elements:[...document.querySelectorAll('audio')].map(el=>({id:el.id,paused:el.paused,src:el.getAttribute('src'),stream:el.srcObject instanceof MediaStream,tracks:el.srcObject?.getAudioTracks?.().map(t=>({state:t.readyState,enabled:t.enabled}))||[],time:el.currentTime})),worklets:worklets.map(w=>({playing:w.playing,loaded:w.loaded,eof:w.eof,queue:w.queuedFrames,rate:w.outputSampleRate,position:w.consumedFrames}))};}
-window.fixture={player,status,tracks,audio,contexts,worklets,snapshot,
+window.fixture={player,status,tracks,audio,contexts,worklets,snapshot,resolutions,
+  ownership:()=>({emptyNativeLoads,sessionActivations}),
   async interrupt(){await Promise.all(contexts.filter(c=>c.state==='running').map(c=>c.suspend()));},
   lifecycle(){window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}));document.dispatchEvent(new Event('visibilitychange'));},
   async action(name,details={}){const handler=window.fixtureActions?.[name];if(!handler)throw new Error('No '+name+' handler');await handler(details);}
@@ -96,6 +102,7 @@ window.fixtureReady=true;
   const html = '<!doctype html><html><head><meta charset="utf-8"><title>Synthetic background audio fixture</title></head><body><h1>Synthetic background audio fixture</h1><button id="play">Play</button><button id="pause">Pause</button><button id="resume">Resume</button><script type="module" src="/fixture.js"></script></body></html>';
   server = http.createServer((request,response)=>{
     const url=new URL(request.url,'http://localhost');
+    if(url.pathname==='/resolve'){setTimeout(()=>response.writeHead(200,{'cache-control':'no-store'}).end('{}'),300);return;}
     if(url.pathname==='/')return response.writeHead(200,{'content-type':'text/html','content-security-policy':"default-src 'self' blob: data:; script-src 'self' 'unsafe-eval'; connect-src 'self' blob:; worker-src 'self' blob:; media-src 'self' blob:"}).end(html);
     const asset=assets.get(url.pathname);if(!asset)return response.writeHead(404).end();
     const bytes=asset.bytes,headers={'content-type':asset.type,'cache-control':'no-store','accept-ranges':'bytes'};
@@ -116,7 +123,7 @@ window.fixtureReady=true;
         const context=await browser.newContext({serviceWorkers:'block'}),page=await context.newPage(),errors=[],external=[];
         page.on('pageerror',error=>errors.push(error.message));
         page.on('request',request=>{const url=new URL(request.url());if(url.origin!==origin&&!['blob:','data:'].includes(url.protocol))external.push(url.origin);});
-        await page.addInitScript(()=>{window.fixtureActions={};const session=navigator.mediaSession;if(session){const original=session.setActionHandler.bind(session);session.setActionHandler=(name,handler)=>{const result=original(name,handler);if(handler)window.fixtureActions[name]=handler;else delete window.fixtureActions[name];return result;};}});
+        await page.addInitScript(()=>{window.fixtureActions={};const session=navigator.mediaSession;if(session){const prototype=Object.getPrototypeOf(session),original=prototype.setActionHandler;prototype.setActionHandler=function(name,handler){const result=original.call(this,name,handler);if(handler)window.fixtureActions[name]=handler;else delete window.fixtureActions[name];return result;};}});
         const snapshot=()=>page.evaluate(()=>fixture.snapshot());
         const until=async(predicate,timeout=12000)=>{const deadline=Date.now()+timeout;while(Date.now()<deadline){const value=await snapshot();if(predicate(value))return value;await page.waitForTimeout(70);}throw new Error('State timeout: '+JSON.stringify(await snapshot()));};
         try{
@@ -149,6 +156,22 @@ window.fixtureReady=true;
           await page.evaluate(()=>fixture.action('nexttrack'));
           const next=await until(v=>v.current==='beta'&&v.state==='playing'&&v.position>250&&v.metadata?.title==='Synthetic beta');
           check(mode+': next action updates native metadata',next.mediaState==='playing',next);
+          // Deterministic hidden-document policy, with the real native/WASM
+          // EOF (not a dispatched ended event) and delayed source resolution.
+          // No user gesture or play() retry is issued during this handoff.
+          await page.evaluate(()=>{
+            Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});
+            Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});
+            document.dispatchEvent(new Event('visibilitychange'));
+            fixture.player.seek(58000);
+          });
+          const automatic=await until(v=>v.current==='gamma'&&v.state==='playing'&&v.position>250&&v.outputs.some(o=>!o.disposed&&o.rms>.001));
+          const resolutions=await page.evaluate(()=>fixture.resolutions);
+          check(mode+': hidden EOF advances exactly once and renders the next song',automatic.mediaState==='playing'&&automatic.metadata?.title==='Synthetic gamma'&&JSON.stringify(resolutions)===JSON.stringify(['alpha','beta','gamma']),{automatic,resolutions});
+          const ownership=await page.evaluate(()=>fixture.ownership());
+          check(mode+': actual rendering republishes the new system session',ownership.sessionActivations.includes('gamma'),ownership);
+          if(mode==='native')check('native: queue handoffs never load an empty source',ownership.emptyNativeLoads===0,ownership);
+          evidence.push({mode,phase:'hidden-natural-next',snapshot:automatic,resolutions});
           await page.evaluate(()=>fixture.action('pause'));
           await until(v=>v.state==='paused'&&v.mediaState==='paused');
           if(next.actions.includes('stop')){

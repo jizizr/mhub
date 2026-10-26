@@ -5,8 +5,10 @@ function supportsNativeFlac() {
   return support === "probably" || support === "maybe";
 }
 
-// Android browsers without an Audio Session API need a native media element
-// to own the system media session. Select the existing native lossless path;
+// Android needs an actual native media player to own system playback controls.
+// Audio Session controls focus/category, not notification ownership; exposing
+// that optional API alone is not evidence that a worklet can play in the
+// background. Select the existing native lossless path;
 // this policy never changes the requested quality or a track's metadata.
 // Offline playback keeps access to already cached WASM packet streams.
 export function shouldPreferNativeBackgroundPlayback({
@@ -18,7 +20,6 @@ export function shouldPreferNativeBackgroundPlayback({
     const platform = String(navigatorObject.userAgentData?.platform || "");
     const userAgent = String(navigatorObject.userAgent || "");
     if (!/\bandroid\b/i.test(platform) && !/\bandroid\b/i.test(userAgent)) return false;
-    if (navigatorObject.audioSession) return false;
     const support = canPlayNative();
     return support === true || support === "probably" || support === "maybe";
   } catch {

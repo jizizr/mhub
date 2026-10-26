@@ -244,6 +244,12 @@ pub struct RecommendationContinuationRequest {
     #[serde(default = "default_apple_platform")]
     pub platform: String,
     pub seed_id: String,
+    /// The queue's latest songs, oldest first, used to seed Apple AutoPlay.
+    #[serde(default)]
+    pub seed_ids: Vec<String>,
+    /// AutoPlay station returned by an earlier batch for the same queue.
+    #[serde(default)]
+    pub station: Option<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
     #[serde(default = "default_search_limit")]
@@ -620,6 +626,8 @@ async fn recommendation_continuation(
         music::recommendation_continuation(
             platform,
             &params.seed_id,
+            &[],
+            None,
             &exclude,
             params.limit.clamp(1, 50),
         )
@@ -632,10 +640,13 @@ async fn recommendation_continuation_post(
 ) -> ApiResult<RecommendationJson<music::RecommendationContinuation>> {
     let platform = music::parse_platform(&params.platform)?;
     let exclude = recommendation_excludes(params.exclude.iter().map(String::as_str), 10_000);
+    let seeds = recommendation_excludes(params.seed_ids.iter().map(String::as_str), 50);
     Ok(recommendation_json(
         music::recommendation_continuation(
             platform,
             &params.seed_id,
+            &seeds,
+            params.station.as_deref(),
             &exclude,
             params.limit.clamp(1, 50),
         )

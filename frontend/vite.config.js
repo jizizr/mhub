@@ -52,8 +52,9 @@ export default defineConfig({
   plugins: [vue(), precompress()],
   resolve: {
     alias: [
+      // gl-matrix stays real: the full player uses AMLL's WebGL mesh-gradient
+      // backdrop (no Pixi). Only the Pixi renderer remains stubbed.
       { find: /^@pixi\/.+$/, replacement: backgroundStub },
-      { find: /^gl-matrix$/, replacement: backgroundStub },
     ],
   },
   server: {

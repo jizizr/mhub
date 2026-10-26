@@ -65,6 +65,22 @@ test("buffering retains playing controls until the user pauses; state changes im
   assert.equal(h.values.playbackState.at(-1), "playing", "a cold source can still be paused from the OS");
 });
 
+test("a new native transport republishes controls and metadata even when DOM session state still says playing", () => {
+  const h = fixture(); h.controller.update();
+  const previous = { metadata: h.values.metadata.length, actions: h.values.actions.length, state: h.values.playbackState.length };
+  // Android may release the old native player without changing the JS
+  // MediaSession getters. The real playing event must republish its session.
+  h.controller.activate();
+  assert.equal(h.values.metadata.length, previous.metadata + 1);
+  assert.equal(h.values.actions.length, previous.actions + 8);
+  assert.equal(h.values.playbackState.length, previous.state + 1);
+  assert.equal(h.values.playbackState.at(-1), 'playing');
+  assert.ok(h.values.actions.slice(previous.actions).every(([, handler]) => typeof handler === 'function'));
+  h.current.state = 'paused'; h.current.wantsPlay = false;
+  h.controller.activate();
+  assert.equal(h.values.playbackState.at(-1), 'paused', 'activation never overrides user intent');
+});
+
 test("position clamps seeks, validates rates and duration, and clears stale progress for unknown duration", () => {
   const h = fixture();
   h.controller.update();

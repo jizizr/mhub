@@ -29,10 +29,10 @@ test("continuation keeps large queue exclusions in JSON instead of the URL", asy
       assert.equal(options.method, "POST");
       assert.equal(options.signal, controller.signal);
       assert.equal(options.headers["content-type"], "application/json");
-      assert.deepEqual(JSON.parse(options.body), { platform: "applemusic", seed_id: "99", exclude, limit: 10 });
+      assert.deepEqual(JSON.parse(options.body), { platform: "applemusic", seed_id: "99", seed_ids: ["97", "98"], station: "ra.q-test", exclude, limit: 10 });
       return Response.json({ source: "applemusic-related", tracks: [] });
     };
-    await getContinuationRecommendations({ seedId: "99", exclude: [...exclude, exclude[0]], signal: controller.signal });
+    await getContinuationRecommendations({ seedId: "99", seedIds: [97, 98], station: "ra.q-test", exclude: [...exclude, exclude[0]], signal: controller.signal });
   } finally { globalThis.fetch = previous; }
 });
 

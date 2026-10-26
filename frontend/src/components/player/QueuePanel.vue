@@ -1,13 +1,14 @@
 <script setup>
-import { computed, onBeforeUnmount, onBeforeUpdate, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from "vue";
 import { ArrowUpRight, GripVertical, Infinity as InfinityIcon, ListMusic, LoaderCircle, Trash2, X } from "lucide-vue-next";
 import * as player from "../../core/player";
 import { trackIdentity, useQueueStore } from "../../stores/queue";
 import { useStatusStore } from "../../stores/status";
 import ListeningSettings from "./ListeningSettings.vue";
 import { queueDropIndex, queueScrollStep } from "../../utils/queue-drag";
+import { formatTime } from "../../utils/format";
 
-defineProps({
+const props = defineProps({
   embedded: { type: Boolean, default: false },
 });
 
@@ -23,6 +24,14 @@ let dragFrame = 0;
 let lastLayoutOrder = "";
 const rowPositions = new WeakMap();
 const sourcePlaylist = computed(() => queue.sourcePlaylist);
+const sourceLabel = computed(() => sourcePlaylist.value
+  ? `${sourcePlaylist.value.type === "recommendation" ? "来自推荐：" : "来自歌单："}${sourcePlaylist.value.name}` : "");
+// The queue page is laid out as an Apple Music song table; it only adds an
+// album column when the queue carries albums.
+const hasAlbums = computed(() => queue.queue.some((track) => track?.album));
+const hasDurations = computed(() => queue.queue.some((track) => track?.duration));
+// On the page the autoplay explanation only appears when it needs attention.
+const autoplayNotice = computed(() => status.autoplayEnabled && ["loading", "error", "empty"].includes(status.autoplayState));
 const autoplayMessage = computed(() => {
   if (!status.autoplayEnabled) return "队列结束后，继续发现新歌曲";
   if (status.autoplayState === "loading") return "正在挑选接下来听的歌曲…";
@@ -168,6 +177,23 @@ watch(() => queue.queue.map(trackIdentity).join("\0"), endDrag, { flush: "sync" 
 watch(() => status.queueOpen, endDrag);
 onBeforeUnmount(endDrag);
 
+// Opening the drawer should land on what is playing, centred in the list,
+// instead of at the top of a long queue. The queue page keeps the page
+// scroll position that App restores.
+function revealCurrentTrack() {
+  const row = queueList.value?.querySelector(".queue-item.is-current");
+  const scroller = row && scrollParent(row);
+  if (!scroller || scroller === document.scrollingElement) return;
+  const view = scroller.getBoundingClientRect();
+  const rect = row.getBoundingClientRect();
+  scroller.scrollTop += rect.top - view.top - (scroller.clientHeight - rect.height) / 2;
+}
+onMounted(async () => {
+  if (props.embedded) return;
+  await nextTick();
+  revealCurrentTrack();
+});
+
 async function clearQueue() {
   if (!queue.queueLength) return;
   if (!window.confirm("清空当前播放队列？正在播放的歌曲也会停止。")) return;
@@ -210,9 +236,17 @@ function openSourcePlaylist() {
     <div class="panel-head">
       <div>
         <h2 v-if="!embedded">播放队列</h2>
-        <p>{{ queue.queueLength }} 首音乐 · 拖动左侧手柄排序</p>
+        <p :title="embedded ? '拖动左侧手柄排序' : undefined">
+          {{ queue.queueLength }} 首音乐<template v-if="!embedded"> · 拖动左侧手柄排序</template>
+          <template v-if="embedded && sourcePlaylist"> · <button class="queue-source-link" type="button" @click="openSourcePlaylist">{{ sourceLabel }}</button></template>
+        </p>
       </div>
       <div class="panel-head__actions">
+        <button v-if="embedded" class="queue-autoplay__toggle queue-autoplay__toggle--compact" type="button" :class="{ 'is-active': status.autoplayEnabled }" :aria-pressed="status.autoplayEnabled" :title="autoplayMessage" @click="player.toggleAutoplay()">
+          <InfinityIcon :size="17" aria-hidden="true" />
+          <span>自动续播</span>
+          <span class="queue-autoplay__switch" aria-hidden="true"><i /></span>
+        </button>
         <button v-if="!embedded" class="mini-button" title="打开队列页" @click="openQueuePage">
           <ArrowUpRight :size="16" />
         </button>
@@ -226,13 +260,13 @@ function openSourcePlaylist() {
     </div>
 
     <div class="queue-panel__body">
-      <button v-if="sourcePlaylist" class="queue-source" type="button" @click="openSourcePlaylist">
+      <button v-if="sourcePlaylist && !embedded" class="queue-source" type="button" @click="openSourcePlaylist">
         <ListMusic :size="15" />
-        <span>{{ sourcePlaylist.type === "recommendation" ? "来自推荐：" : "来自歌单：" }}{{ sourcePlaylist.name }}</span>
+        <span>{{ sourceLabel }}</span>
         <ArrowUpRight :size="14" />
       </button>
 
-      <div class="queue-autoplay">
+      <div v-if="!embedded" class="queue-autoplay">
         <button class="queue-autoplay__toggle" type="button" :class="{ 'is-active': status.autoplayEnabled }" :aria-pressed="status.autoplayEnabled" @click="player.toggleAutoplay()">
           <InfinityIcon :size="21" />
           <span>自动续播</span>
@@ -244,11 +278,24 @@ function openSourcePlaylist() {
           <button v-if="status.autoplayEnabled && ['error', 'empty'].includes(status.autoplayState)" class="queue-autoplay__retry" type="button" @click="player.retryAutoplay()">重试</button>
         </div>
       </div>
+      <div v-else class="queue-autoplay__status queue-autoplay__status--inline" role="status" aria-live="polite">
+        <template v-if="autoplayNotice">
+          <LoaderCircle v-if="status.autoplayState === 'loading'" :size="14" class="is-spinning" />
+          <span>{{ autoplayMessage }}</span>
+          <button v-if="['error', 'empty'].includes(status.autoplayState)" class="queue-autoplay__retry" type="button" @click="player.retryAutoplay()">重试</button>
+        </template>
+      </div>
 
-      <ListeningSettings />
+      <ListeningSettings v-if="!embedded" />
 
       <p class="queue-drag-announcement" role="status" aria-live="polite">{{ dragAnnouncement }}</p>
-      <div ref="queueList" class="queue-list">
+      <div ref="queueList" class="queue-list" :class="{ 'queue-list--albums': hasAlbums }">
+        <div v-if="embedded && queue.queueLength" class="queue-head" aria-hidden="true">
+          <span class="queue-head__song">歌曲</span>
+          <span class="queue-head__artist">艺人</span>
+          <span v-if="hasAlbums" class="queue-head__album">专辑</span>
+          <span class="queue-head__time">{{ hasDurations ? "时长" : "" }}</span>
+        </div>
         <TransitionGroup name="queue" tag="div" class="queue-list__rows" @before-leave="pinLeavingRow" @after-leave="clearLeavingRow" @leave-cancelled="clearLeavingRow">
           <div
             v-for="(track, index) in queue.queue"
@@ -269,6 +316,11 @@ function openSourcePlaylist() {
               <span>{{ track.title }}</span>
               <small>{{ track.artist || "未知艺人" }}<span v-if="track.autoplayRecommended" class="queue-item__recommended"> · ∞ 推荐</span></small>
             </button>
+            <template v-if="embedded">
+              <span class="queue-item__artist-col" aria-hidden="true">{{ track.artist || "未知艺人" }}</span>
+              <span v-if="hasAlbums" class="queue-item__album" aria-hidden="true">{{ track.album }}</span>
+              <span class="queue-item__time">{{ track.duration ? formatTime(track.duration) : "" }}</span>
+            </template>
             <button class="mini-button queue-item__remove" title="从队列移除" @click.stop="removeTrack(track)">
               <Trash2 :size="15" />
             </button>
@@ -297,5 +349,13 @@ function openSourcePlaylist() {
 .queue-autoplay__status > svg { flex: 0 0 auto; }
 .queue-autoplay__retry { flex: 0 0 auto; padding: 3px 0 3px 6px; border: 0; background: transparent; color: var(--accent); cursor: pointer; }
 .queue-item__recommended { color: var(--accent); font-size: 11px; }
+/* Queue page: the toggle sits in the header row as a small control. */
+.queue-autoplay__toggle--compact { gap: 6px; width: auto; min-height: 30px; padding: 0 4px 0 10px; border-radius: 999px; color: var(--am-secondary, var(--text-muted)); font-size: 13px; font-weight: 600; }
+.queue-autoplay__toggle--compact:hover { background: var(--nav-selected, var(--surface-muted)); }
+.queue-autoplay__toggle--compact .queue-autoplay__switch { margin-left: 2px; transform: scale(.85); }
+.queue-autoplay__status--inline { min-height: 0; margin: 0 0 8px; }
+.queue-autoplay__status--inline:empty { display: none; }
+.queue-source-link { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.queue-source-link:hover { color: var(--accent); text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) { .queue-autoplay__switch, .queue-autoplay__switch i { transition: none; } }
 </style>

@@ -128,14 +128,15 @@ test("offline Android reuses its cached Hi-Res packet Blob without provider requ
   assert.equal(h.entries.get(h.packetKey).blob, h.packetBlob);
 });
 
-test("Android with native Audio Session support retains the cached WASM path while online", async (t) => {
+test("Android exposing Audio Session still negotiates native playback online and preserves offline WASM bytes", async (t) => {
   environment(t, { audioSession: { type: "playback" } });
   const h = resolverFixture();
   const resolved = await h.resolve(h.track);
-  t.after(() => URL.revokeObjectURL(resolved.source));
-  assert.match(resolved.source, /^blob:/);
-  assert.equal(h.creations.length, 0);
-  assert.equal(h.polls(), 0);
+  assert.match(resolved.source, /\/audio\?/);
+  assert.equal(h.creations.length, 1);
+  assert.equal(h.creations[0].streamingMode, null);
+  assert.equal(h.polls(), 1);
   assert.equal(resolved.track.quality, "hires");
-  assert.equal(canUseAlacWorklet(resolved.track), true);
+  assert.equal(canUseAlacWorklet(resolved.track), false);
+  assert.equal(h.entries.get(h.packetKey).blob, h.packetBlob);
 });

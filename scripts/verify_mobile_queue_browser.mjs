@@ -139,8 +139,14 @@ async function inspectOverlay(page, scenario, full = false) {
   await page.locator(selector).waitFor();
   await settle(page);
   const bounds = await page.locator(selector).boundingBox();
-  const footer = await page.locator(full ? ".full-player__bottom" : ".player-bar").boundingBox();
-  check(scenario, "queue overlay stays above the player controls", bounds.y >= 0 && bounds.y + bounds.height <= footer.y - 6, { bounds, footer });
+  // Desktop uses Apple Music's full-height side panel: the player controls
+  // must sit entirely beside it (the capsule re-centres to its left). Phones
+  // keep the sheet above the dock.
+  const footer = await page.locator(full ? ".full-player__transport" : ".player-bar").boundingBox();
+  const sidePanel = bounds.height >= (await page.evaluate(() => innerHeight)) - 1 && bounds.y === 0;
+  check(scenario, "queue overlay does not cover the player controls", bounds.y >= 0 && (sidePanel
+    ? footer.x + footer.width <= bounds.x
+    : bounds.y + bounds.height <= footer.y - 6), { bounds, footer });
   const body = page.locator(`${selector} .queue-panel__body`);
   await body.evaluate(element => { element.scrollTop = element.scrollHeight; });
   await settle(page);

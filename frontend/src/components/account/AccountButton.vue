@@ -21,12 +21,13 @@ const tone = computed(() => account.mode === "expired" || account.sync === "erro
 </script>
 
 <template>
-  <button v-if="account.enabled || account.mode !== 'guest'" class="account-button" :class="{ 'account-button--compact': compact }"
+  <button v-if="account.enabled || account.mode !== 'guest'" class="account-button" :class="{ 'account-button--compact': compact, 'account-button--guest': account.mode === 'guest' }"
     type="button" :title="`${label} · ${detail}`" :aria-label="`${label}，${detail}`" @click="account.openDialog()">
     <span class="account-button__avatar" :class="tone && `is-${tone}`">
       <template v-if="account.user">{{ account.user.username.slice(0, 1).toUpperCase() }}</template>
       <CircleUserRound v-else :size="compact ? 18 : 20" />
     </span>
+    <span v-if="!compact && account.mode === 'guest'" class="account-button__pill-label">登录</span>
     <span v-if="!compact" class="account-button__text">
       <strong>{{ label }}</strong>
       <small>{{ detail }}</small>
@@ -46,6 +47,14 @@ const tone = computed(() => account.mode === "expired" || account.sync === "erro
 .account-button__text strong, .account-button__text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-button__text strong { font-size: 13px; }
 .account-button__text small { color: var(--text-muted); font-size: 11px; }
+/* Signed out, the full button is Apple Music's red 36px "登录" pill. */
+.account-button__pill-label { display: none; }
+.account-button--guest:not(.account-button--compact) { justify-content: center; gap: 6px; min-height: 36px; padding: 0 16px; border: 0; border-radius: 1000px; background: var(--accent); color: #fff; }
+.account-button--guest:not(.account-button--compact):hover { background: var(--accent-hover); }
+.account-button--guest:not(.account-button--compact) .account-button__avatar { flex-basis: auto; width: auto; height: auto; background: none; }
+.account-button--guest:not(.account-button--compact) .account-button__avatar svg { width: 14px; height: 14px; }
+.account-button--guest:not(.account-button--compact) .account-button__avatar::after, .account-button--guest:not(.account-button--compact) .account-button__text { display: none; }
+.account-button--guest:not(.account-button--compact) .account-button__pill-label { display: inline; font-size: 14px; line-height: 17px; }
 .account-button--compact { width: 36px; height: 36px; padding: 0; justify-content: center; border-radius: 50%; }
 .account-button--compact .account-button__avatar { flex-basis: 28px; width: 28px; height: 28px; font-size: 12px; }
 </style>
