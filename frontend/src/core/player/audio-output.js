@@ -37,10 +37,18 @@ export function getOutputContext(qualityOrSampleRate = 48000) {
   if (context && context.state !== "closed") return context;
   const Context = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
   if (!Context) throw new Error("当前浏览器不支持音频处理");
-  try { context = new Context({ sampleRate: rate }); }
+  // "playback" trades a few ms of latency for a larger render buffer. The
+  // default "interactive" (~6 ms in Chromium) leaves too little slack for
+  // GC, Hi-Res output resampling or a busy device: missed render deadlines
+  // are heard as intermittent crackle.
+  try { context = new Context({ sampleRate: rate, latencyHint: "playback" }); }
   catch {
     // Browsers that reject the rate share one default-rate context.
-    context = [...contexts.values()].find((existing) => existing.state !== "closed" && existing.defaultRate) || new Context();
+    context = [...contexts.values()].find((existing) => existing.state !== "closed" && existing.defaultRate);
+    if (!context) {
+      try { context = new Context({ latencyHint: "playback" }); }
+      catch { context = new Context(); }
+    }
     context.defaultRate = true;
   }
   contexts.set(rate, context);

@@ -23,6 +23,7 @@ async function harness({ rejectRate = false, resumeFails = () => false } = {}) {
     constructor(options = {}) {
       if (rejectRate && options.sampleRate) throw new Error("Unsupported sample rate");
       this.sampleRate = options.sampleRate || 44100;
+      this.latencyHint = options.latencyHint;
       this.currentTime = 0;
       this.state = "suspended";
       this.destination = {};
@@ -65,8 +66,15 @@ test("unsupported requested sample rate uses the browser's context fallback", as
   const h = await harness({ rejectRate: true });
   const context = h.prepareOutput("hires");
   assert.equal(context.sampleRate, 44100);
+  assert.equal(context.latencyHint, "playback");
   assert.equal(h.prepareOutput("hires"), context);
   assert.equal(h.created.length, 1);
+});
+
+test("music contexts request the playback latency class to avoid render underruns", async () => {
+  const h = await harness();
+  h.prepareOutput("hires");
+  assert.deepEqual(h.created.map((context) => [context.sampleRate, context.latencyHint]), [[48000, "playback"], [192000, "playback"]]);
 });
 
 test("each deck routes normalization, transition and volume in order without affecting other gains", async () => {

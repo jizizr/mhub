@@ -30,6 +30,10 @@ class AlacPcmProcessor extends AudioWorkletProcessor {
     this.lowWaterFrames = 24000;
     this.reportFrames = 4800;
     this.disposed = false;
+    // ~2 ms ramps at underrun edges: a waveform cut off mid-cycle (or
+    // restarted mid-cycle) is a full-scale step, heard as a click or crackle.
+    this.declickFrames = Math.max(16, Math.round((typeof sampleRate === "number" ? sampleRate : 48000) * 0.002));
+    this.fadeInRemaining = 0;
     this.port.onmessage = (event) => this.handleMessage(event.data || {});
   }
 
@@ -52,6 +56,7 @@ class AlacPcmProcessor extends AudioWorkletProcessor {
         this.bytesPerChannel = this.bits === 24 ? 3 : 2;
         this.queue = [];
         this.pendingFrames = 0;
+        this.fadeInRemaining = 0;
         this.position = Number(message.position) || 0;
         this.lastReport = this.position;
         this.consumedFrames = 0;
@@ -81,7 +86,9 @@ class AlacPcmProcessor extends AudioWorkletProcessor {
         this.queue.push({ bytes, floats, frames, offset: 0 });
         this.pendingFrames += frames;
         this.needDataSent = false;
-        this.report("queued");
+        // No acknowledgement per packet: every message from the render
+        // thread allocates there, and position reports already carry
+        // consumedFrames back at a fixed cadence.
         break;
       }
       case "eof":
@@ -99,6 +106,7 @@ class AlacPcmProcessor extends AudioWorkletProcessor {
       case "flush":
         this.queue = [];
         this.pendingFrames = 0;
+        this.fadeInRemaining = 0;
         this.eof = false;
         this.ended = false;
         this.position = Number(message.position) || 0;
@@ -142,6 +150,26 @@ class AlacPcmProcessor extends AudioWorkletProcessor {
     return (value & 0x8000 ? value - 0x10000 : value) / 32768;
   }
 
+  fadeIn(output, frames) {
+    const total = this.declickFrames;
+    const start = total - this.fadeInRemaining;
+    const count = Math.min(frames, this.fadeInRemaining);
+    for (const channel of output) {
+      for (let index = 0; index < count; index += 1) channel[index] *= (start + index + 1) / total;
+    }
+    this.fadeInRemaining -= count;
+  }
+
+  // The queue ran dry before EOF: ramp the last rendered frames down so the
+  // following silence does not start with a step.
+  fadeOut(output, frames) {
+    const count = Math.min(frames, this.declickFrames);
+    const first = frames - count;
+    for (const channel of output) {
+      for (let index = 0; index < count; index += 1) channel[first + index] *= (count - index - 1) / count;
+    }
+  }
+
   process(_inputs, outputs) {
     if (this.disposed) return false;
     const output = outputs[0];
@@ -153,7 +181,12 @@ class AlacPcmProcessor extends AudioWorkletProcessor {
       const previousPosition = this.position;
       // After an underrun, accumulate a useful cushion before resuming. One
       // packet at a time otherwise alternates tiny sound bursts and silence.
-      if (this.needsBuffer && (this.pendingFrames >= this.bufferTargetFrames || this.eof)) this.needsBuffer = false;
+      if (this.needsBuffer && (this.pendingFrames >= this.bufferTargetFrames || this.eof)) {
+        this.needsBuffer = false;
+        // Only a mid-song underrun resumes inside a waveform; a track start
+        // or seek keeps its exact first samples.
+        if (this.bufferTargetFrames === this.rebufferFrames && this.consumedFrames > 0) this.fadeInRemaining = this.declickFrames;
+      }
       // Copy whole runs from each queued block. The audio thread has well
       // under a millisecond per quantum at 192 kHz; per-sample calls risked
       // missing it on slower phones.
@@ -184,6 +217,8 @@ class AlacPcmProcessor extends AudioWorkletProcessor {
         this.consumedFrames += run;
         if (item.offset >= item.frames) this.queue.shift();
       }
+      if (this.fadeInRemaining > 0 && frame > 0) this.fadeIn(output, frame);
+      if (!this.pendingFrames && !this.eof && frame > 0) this.fadeOut(output, frame);
       if (!this.pendingFrames && !this.eof && !this.needsBuffer) {
         this.needsBuffer = true;
         this.bufferTargetFrames = this.rebufferFrames;

@@ -640,6 +640,25 @@ test("underrun recovery waits for a cushion but always renders a short EOF tail"
   assert.equal(processor.ended, true);
 });
 
+test("mid-song underruns ramp out and back in instead of stepping to silence", () => {
+  const processor = new Processor();
+  processor.handleMessage({ type: "configure", epoch: 1, channels: 2, resumeFrames: 128, rebufferFrames: 256, lowWaterFrames: 64 });
+  const add = (frames) => processor.handleMessage({ type: "data", epoch: 1, format: "f32", frames, data: new Float32Array(frames * 2).fill(0.5).buffer });
+  const render = () => { const output = [new Float32Array(128), new Float32Array(128)]; processor.process([], [output]); return output[0]; };
+  processor.handleMessage({ type: "play", epoch: 1 });
+  add(256);
+  assert.equal(render()[0], 0.5, "a track start keeps its exact first sample");
+  const dry = render();
+  assert.equal(dry[0], 0.5);
+  assert.equal(dry[127], 0, "the last frame before an underrun reaches silence");
+  assert.ok(dry[100] > 0 && dry[100] < 0.5);
+  add(256);
+  const resumed = render();
+  assert.ok(resumed[0] > 0 && resumed[0] < 0.05, "recovery starts near silence");
+  assert.equal(resumed[127], 0.5);
+  assert.equal(processor.position, 384, "ramps never drop or repeat frames");
+});
+
 test("queue changes retire worklets and release their PCM while preserving the authorized context", async () => {
   const player = new AlacWorkletPlayer();
   player.prepare(192000);
