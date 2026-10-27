@@ -6,6 +6,8 @@ import { useStatusStore } from "../../stores/status";
 
 defineProps({
   compact: { type: Boolean, default: false },
+  /** A labelled pill for toolbars; its panel floats below like a menu. */
+  pill: { type: Boolean, default: false },
   /** Compact panels open above the player bar, or below a page header. */
   placement: { type: String, default: "above" },
 });
@@ -16,6 +18,7 @@ const trigger = ref(null);
 const open = ref(false);
 const id = useId();
 const QUALITY_LABELS = { standard: "标准", high: "高品质", lossless: "无损", hires: "Hi-Res" };
+const qualityLabel = computed(() => QUALITY_LABELS[status.quality] || status.quality);
 const summary = computed(() => {
   const enabled = [QUALITY_LABELS[status.quality] || status.quality];
   if (status.crossfadeEnabled) enabled.push(`渐入渐出 ${status.crossfadeSeconds} 秒`);
@@ -84,7 +87,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="root" class="listening-settings" :class="{ 'listening-settings--compact': compact, 'listening-settings--below': placement === 'below', 'is-open': open }">
+  <div ref="root" class="listening-settings" :class="{ 'listening-settings--compact': compact, 'listening-settings--pill': pill, 'listening-settings--below': placement === 'below' || pill, 'is-open': open }">
     <button
       :id="`${id}-trigger`"
       ref="trigger"
@@ -97,12 +100,13 @@ onBeforeUnmount(() => {
       @click="open = !open"
     >
       <SlidersHorizontal :size="18" aria-hidden="true" />
-      <span v-if="!compact" class="listening-settings__intro">
+      <span v-if="pill" class="listening-settings__pill-label">播放设置<small>{{ qualityLabel }}</small></span>
+      <span v-else-if="!compact" class="listening-settings__intro">
         <strong>播放设置</strong>
         <small>{{ summary }}</small>
       </span>
-      <ChevronDown v-if="!compact" :size="15" class="listening-settings__chevron" aria-hidden="true" />
-      <i v-if="compact && (status.crossfadeEnabled || status.soundCheckEnabled)" class="listening-settings__indicator" aria-hidden="true" />
+      <ChevronDown v-if="!compact && !pill" :size="15" class="listening-settings__chevron" aria-hidden="true" />
+      <i v-if="(compact || pill) && (status.crossfadeEnabled || status.soundCheckEnabled)" class="listening-settings__indicator" aria-hidden="true" />
     </button>
 
     <Transition name="listening-settings">
@@ -205,6 +209,14 @@ onBeforeUnmount(() => {
 .listening-settings--compact .listening-settings__heading { display: flex; }
 .listening-settings--below .listening-settings__panel { top: calc(100% + 8px); bottom: auto; max-height: min(560px, calc(100dvh - 120px)); background: var(--bar-solid, var(--surface-raised)); box-shadow: var(--shadow-lg); }
 .listening-settings--below .listening-settings__trigger { width: 38px; min-height: 38px; color: var(--text); background: var(--surface-muted); }
+.listening-settings--pill { margin: 0; border: 0; border-radius: 999px; background: transparent; }
+.listening-settings--pill .listening-settings__trigger { gap: 6px; width: auto; min-height: 30px; padding: 0 10px; border-radius: 999px; color: var(--am-secondary, var(--text-muted)); background: transparent; font-size: 13px; font-weight: 600; }
+.listening-settings--pill .listening-settings__trigger:hover, .listening-settings--pill.is-open .listening-settings__trigger { background: var(--nav-selected, var(--surface-muted)); color: var(--am-primary, var(--text)); }
+.listening-settings__pill-label { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.listening-settings__pill-label small { color: var(--am-tertiary, var(--text-muted)); font-size: 12px; font-weight: 500; }
+.listening-settings--pill .listening-settings__indicator { top: 4px; right: 4px; }
+.listening-settings--pill .listening-settings__panel { position: absolute; z-index: 5; right: 0; width: min(300px, calc(100vw - 32px)); padding: 14px 16px 16px; border: 1px solid var(--line); border-radius: 18px; color: var(--text); }
+.listening-settings--pill .listening-settings__heading { display: flex; }
 .listening-settings-enter-active, .listening-settings-leave-active { transition: opacity var(--motion-fast), transform var(--motion-fast) var(--ease-standard); }
 .listening-settings-enter-from, .listening-settings-leave-to { opacity: 0; transform: translateY(5px); }
 @media (prefers-reduced-motion: reduce) { .listening-settings__chevron, .listening-settings-enter-active, .listening-settings-leave-active { transition: none; } }

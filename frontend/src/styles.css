@@ -2140,9 +2140,8 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
   .queue-panel:not(.queue-panel--embedded) .panel-head .mini-button { width: 28px; height: 28px; color: var(--am-secondary); }
   .queue-panel:not(.queue-panel--embedded) .panel-head .mini-button:hover { background: var(--nav-selected); color: var(--am-primary); }
   .queue-panel:not(.queue-panel--embedded) .queue-panel__body { padding: 0 10px 24px; }
-  .queue-panel:not(.queue-panel--embedded) .queue-source,
-  .queue-panel:not(.queue-panel--embedded) .queue-autoplay,
-  .queue-panel:not(.queue-panel--embedded) .listening-settings { margin: 0 0 10px; border: 0; border-radius: 8px; background: var(--nav-selected); }
+  .queue-panel:not(.queue-panel--embedded) .queue-controls { margin: 0; padding: 0 12px 8px 14px; }
+  .queue-panel:not(.queue-panel--embedded) .queue-autoplay__status--drawer { margin: 0; padding: 0 20px 8px; }
   .queue-panel:not(.queue-panel--embedded) .queue-list__rows { gap: 0; }
   .queue-panel:not(.queue-panel--embedded) .queue-item { position: relative; min-height: 55px; gap: 10px; padding: 0 6px 0 2px; border-radius: 6px; background: transparent; }
   .queue-panel:not(.queue-panel--embedded) .queue-item + .queue-item::before { content: ""; position: absolute; top: 0; left: 82px; right: 6px; border-top: .5px solid var(--am-divider); }

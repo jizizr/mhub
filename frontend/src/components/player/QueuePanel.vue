@@ -236,9 +236,8 @@ function openSourcePlaylist() {
     <div class="panel-head">
       <div>
         <h2 v-if="!embedded">播放队列</h2>
-        <p :title="embedded ? '拖动左侧手柄排序' : undefined">
-          {{ queue.queueLength }} 首音乐<template v-if="!embedded"> · 拖动左侧手柄排序</template>
-          <template v-if="embedded && sourcePlaylist"> · <button class="queue-source-link" type="button" @click="openSourcePlaylist">{{ sourceLabel }}</button></template>
+        <p title="拖动左侧手柄排序">
+          {{ queue.queueLength }} 首音乐<template v-if="sourcePlaylist"> · <button class="queue-source-link" type="button" @click="openSourcePlaylist">{{ sourceLabel }}</button></template>
         </p>
       </div>
       <div class="panel-head__actions">
@@ -247,6 +246,7 @@ function openSourcePlaylist() {
           <span>自动续播</span>
           <span class="queue-autoplay__switch" aria-hidden="true"><i /></span>
         </button>
+        <ListeningSettings v-if="embedded" class="queue-settings--page" pill />
         <button v-if="!embedded" class="mini-button" title="打开队列页" @click="openQueuePage">
           <ArrowUpRight :size="16" />
         </button>
@@ -259,35 +259,25 @@ function openSourcePlaylist() {
       </div>
     </div>
 
-    <div class="queue-panel__body">
-      <button v-if="sourcePlaylist && !embedded" class="queue-source" type="button" @click="openSourcePlaylist">
-        <ListMusic :size="15" />
-        <span>{{ sourceLabel }}</span>
-        <ArrowUpRight :size="14" />
+    <!-- Pinned above the list, so opening the drawer at the current song
+         never scrolls the controls away. -->
+    <div v-if="!embedded" class="queue-controls">
+      <button class="queue-autoplay__toggle queue-autoplay__toggle--compact" type="button" :class="{ 'is-active': status.autoplayEnabled }" :aria-pressed="status.autoplayEnabled" :title="autoplayMessage" @click="player.toggleAutoplay()">
+        <InfinityIcon :size="17" aria-hidden="true" />
+        <span>自动续播</span>
+        <span class="queue-autoplay__switch" aria-hidden="true"><i /></span>
       </button>
+      <ListeningSettings pill />
+    </div>
+    <div class="queue-autoplay__status queue-autoplay__status--inline" :class="{ 'queue-autoplay__status--drawer': !embedded }" role="status" aria-live="polite">
+      <template v-if="autoplayNotice">
+        <LoaderCircle v-if="status.autoplayState === 'loading'" :size="14" class="is-spinning" />
+        <span>{{ autoplayMessage }}</span>
+        <button v-if="['error', 'empty'].includes(status.autoplayState)" class="queue-autoplay__retry" type="button" @click="player.retryAutoplay()">重试</button>
+      </template>
+    </div>
 
-      <div v-if="!embedded" class="queue-autoplay">
-        <button class="queue-autoplay__toggle" type="button" :class="{ 'is-active': status.autoplayEnabled }" :aria-pressed="status.autoplayEnabled" @click="player.toggleAutoplay()">
-          <InfinityIcon :size="21" />
-          <span>自动续播</span>
-          <span class="queue-autoplay__switch" aria-hidden="true"><i /></span>
-        </button>
-        <div class="queue-autoplay__status" role="status" aria-live="polite">
-          <LoaderCircle v-if="status.autoplayEnabled && status.autoplayState === 'loading'" :size="14" class="is-spinning" />
-          <span>{{ autoplayMessage }}</span>
-          <button v-if="status.autoplayEnabled && ['error', 'empty'].includes(status.autoplayState)" class="queue-autoplay__retry" type="button" @click="player.retryAutoplay()">重试</button>
-        </div>
-      </div>
-      <div v-else class="queue-autoplay__status queue-autoplay__status--inline" role="status" aria-live="polite">
-        <template v-if="autoplayNotice">
-          <LoaderCircle v-if="status.autoplayState === 'loading'" :size="14" class="is-spinning" />
-          <span>{{ autoplayMessage }}</span>
-          <button v-if="['error', 'empty'].includes(status.autoplayState)" class="queue-autoplay__retry" type="button" @click="player.retryAutoplay()">重试</button>
-        </template>
-      </div>
-
-      <ListeningSettings v-if="!embedded" />
-
+    <div class="queue-panel__body">
       <p class="queue-drag-announcement" role="status" aria-live="polite">{{ dragAnnouncement }}</p>
       <div ref="queueList" class="queue-list" :class="{ 'queue-list--albums': hasAlbums }">
         <div v-if="embedded && queue.queueLength" class="queue-head" aria-hidden="true">
@@ -355,6 +345,12 @@ function openSourcePlaylist() {
 .queue-autoplay__toggle--compact .queue-autoplay__switch { margin-left: 2px; transform: scale(.85); }
 .queue-autoplay__status--inline { min-height: 0; margin: 0 0 8px; }
 .queue-autoplay__status--inline:empty { display: none; }
+.queue-controls { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 6px; margin: 0 0 8px; }
+.queue-autoplay__status--drawer { flex: 0 0 auto; padding: 0 4px; }
+.panel-head > div:first-child { min-width: 0; }
+.panel-head > div:first-child p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Phones already reach these settings from the page header. */
+@media (max-width: 880px) { .queue-settings--page { display: none; } }
 .queue-source-link { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .queue-source-link:hover { color: var(--accent); text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) { .queue-autoplay__switch, .queue-autoplay__switch i { transition: none; } }
