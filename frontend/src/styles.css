@@ -1326,6 +1326,9 @@ button.artwork-card__play:hover { background: rgba(255, 255, 255, .86); color: v
   --surface-hover: rgba(255, 255, 255, 0.06);
   --surface-muted: rgba(255, 255, 255, 0.08);
   --surface-raised: rgba(43, 43, 43, 0.97);
+  /* Popovers here (the queue drawer's settings panel) sit on --bar-solid;
+     keep it dark like the text tokens above, whatever the page theme. */
+  --bar-solid: #262628;
   --input-bg: rgba(255, 255, 255, 0.06);
   --am-primary: rgba(255, 255, 255, 0.92);
   --am-secondary: rgba(255, 255, 255, 0.64);
