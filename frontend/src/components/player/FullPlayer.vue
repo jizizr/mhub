@@ -5,6 +5,7 @@ import { coverUrl } from "../../apis/music";
 import * as player from "../../core/player";
 import { useMediaStore } from "../../stores/media";
 import { useStatusStore } from "../../stores/status";
+import { COVER_TONE_FALLBACK, coverTone } from "../../utils/cover-tone";
 import PlayerControls from "./PlayerControls.vue";
 import QueuePanel from "./QueuePanel.vue";
 import SeekSlider from "./SeekSlider.vue";
@@ -14,6 +15,7 @@ import LyricsBackground from "./LyricsBackground.vue";
 // 歌词渲染器依赖 Pixi 和 AMLL，体积较大。只有展开播放器且确实有歌词时才加载，
 // 避免无歌词歌曲和普通播放场景下载这部分代码。
 
+const emit = defineEmits(["chrome-color"]);
 const media = useMediaStore();
 const status = useStatusStore();
 const draft = ref(null);
@@ -28,6 +30,21 @@ const cover = computed(() => {
   if (!media.track || media.coverBroken) return "";
   return media.track.cover || (media.track.cover_url ? coverUrl(media.track) : "");
 });
+
+// While open, the status and gesture bars take the backdrop's tone instead of
+// the page theme, so the view reads as edge to edge.
+const open = computed(() => Boolean(media.expanded && media.track));
+let toneToken = 0;
+watch([open, cover], async ([isOpen, url]) => {
+  const token = ++toneToken;
+  if (!isOpen) {
+    emit("chrome-color", "");
+    return;
+  }
+  emit("chrome-color", COVER_TONE_FALLBACK);
+  const tone = await coverTone(url);
+  if (token === toneToken) emit("chrome-color", tone);
+}, { immediate: true });
 
 function onLineClick(event) {
   if (Number.isFinite(event)) player.seek(event);
@@ -118,6 +135,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  toneToken += 1;
+  emit("chrome-color", "");
   mobileQuery?.removeEventListener("change", syncMobileLayout);
   mobileQuery = null;
 });

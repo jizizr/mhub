@@ -4,6 +4,10 @@ const COLORS = { light: "#ffffff", dark: "#1f1f1f" };
 // the browser host selecting the correct OS media query.
 export function createThemeController(readTheme, win = window, doc = document) {
   const media = win.matchMedia("(prefers-color-scheme: dark)");
+  // A full-screen surface (the now-playing view) may take over the system
+  // bars: theme-color tints the status bar, and the root background is what
+  // Chromium shows in the gesture-bar area when it does not draw under it.
+  let chrome = "";
   function sync() {
     const theme = readTheme();
     const explicit = theme === "light" || theme === "dark";
@@ -12,8 +16,8 @@ export function createThemeController(readTheme, win = window, doc = document) {
     if (explicit) root.dataset.theme = theme;
     else delete root.dataset.theme;
     root.style.colorScheme = scheme;
-    root.style.backgroundColor = COLORS[scheme];
-    doc.querySelector('meta[name="theme-color"]').content = COLORS[scheme];
+    root.style.backgroundColor = chrome || COLORS[scheme];
+    doc.querySelector('meta[name="theme-color"]').content = chrome || COLORS[scheme];
     doc.querySelector('meta[name="color-scheme"]').content = scheme;
     // The stable manifest id/start_url preserve app identity across variants.
     const manifest = doc.querySelector('link[rel="manifest"]');
@@ -26,6 +30,11 @@ export function createThemeController(readTheme, win = window, doc = document) {
   doc.addEventListener("visibilitychange", onVisible);
   return {
     sync,
+    setChrome(color) {
+      if ((color || "") === chrome) return;
+      chrome = color || "";
+      sync();
+    },
     dispose() {
       media.removeEventListener("change", sync);
       win.removeEventListener("pageshow", sync);

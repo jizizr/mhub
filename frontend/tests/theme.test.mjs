@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { createThemeController } from "../src/utils/theme.js";
+import { COVER_TONE_FALLBACK, toneFromPixels } from "../src/utils/cover-tone.js";
 
 const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const bootstrap = html.match(/<script>([\s\S]*?)<\/script>/)[1];
@@ -76,6 +77,26 @@ test("OS changes, explicit overrides, resume and disposal update browser chrome"
   h.win.dispatchEvent(new Event("pageshow"));
   h.doc.dispatchEvent(new Event("visibilitychange"));
   assert.deepEqual(h.actual(), expected(true));
+});
+
+test("a full-screen surface tints the system bars until it releases them", () => {
+  const h = harness("light");
+  h.controller.setChrome("#203040");
+  const [, themeColor, background] = h.actual();
+  assert.deepEqual([themeColor, background], ["#203040", "#203040"]);
+  h.media.dispatchEvent(new Event("change"));
+  assert.equal(h.actual()[1], "#203040", "theme changes keep the override");
+  h.setTheme("dark");
+  assert.equal(h.actual()[0], "dark");
+  assert.equal(h.actual()[1], "#203040");
+  h.controller.setChrome("");
+  assert.deepEqual(h.actual(), expected(true));
+  h.controller.dispose();
+});
+
+test("cover tone is the dimmed alpha-weighted average", () => {
+  assert.equal(toneFromPixels(new Uint8ClampedArray([200, 100, 0, 255, 0, 100, 200, 255, 9, 9, 9, 0])), "#2a2a2a");
+  assert.equal(toneFromPixels(new Uint8ClampedArray([255, 255, 255, 0])), COVER_TONE_FALLBACK);
 });
 
 test("light and dark install manifests share identity, launch URL, icons and features", async () => {

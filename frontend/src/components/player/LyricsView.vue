@@ -66,7 +66,18 @@ onBeforeUnmount(clearFallbackTimer);
 </template>
 
 <style scoped>
-.lyrics-view { position: relative; width: 100%; height: 100%; }
+/* Feathered edges as on Apple Music Web, whose full-screen lyrics mask with
+   linear-gradient(180deg, transparent, #000 80px, #000 50%, transparent): a
+   short fade under the top edge and a long one toward the bottom (started a
+   little lower than Apple's 50% so the next lines stay readable), so lines
+   dissolve instead of being clipped. The top fade is capped so the current
+   line, aligned high on phones, stays fully opaque. */
+.lyrics-view {
+  --lyrics-view-mask: linear-gradient(180deg, transparent, #000 min(80px, 14%), #000 60%, transparent);
+  position: relative; width: 100%; height: 100%;
+  -webkit-mask-image: var(--lyrics-view-mask);
+  mask-image: var(--lyrics-view-mask);
+}
 .lyrics-view > .is-pending { visibility: hidden; }
 .lyrics-view__animated { position: absolute; inset: 0; opacity: 0; pointer-events: none; transition: opacity 180ms ease-out; }
 .lyrics-view__animated.is-ready { opacity: 1; pointer-events: auto; }

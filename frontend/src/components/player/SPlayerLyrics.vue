@@ -13,7 +13,7 @@ const props = defineProps({
   alignPosition: { type: Number, default: 0.36 },
   wordFadeWidth: { type: Number, default: 0.5 },
   hidePassedLines: { type: Boolean, default: false },
-  enableBlur: { type: Boolean, default: false },
+  enableBlur: { type: Boolean, default: true },
   showTranslation: { type: Boolean, default: true },
   showLineRomanization: { type: Boolean, default: true },
   showWordRomanization: { type: Boolean, default: true },

@@ -1661,7 +1661,7 @@ watch(
       <QueuePanel v-if="status.queueOpen && !media.expanded && status.activeView !== 'queue'" />
     </Transition>
     <PlayerBar />
-    <FullPlayer v-if="fullPlayerMounted" />
+    <FullPlayer v-if="fullPlayerMounted" @chrome-color="themeController.setChrome($event)" />
     <Transition name="toast">
       <div v-if="status.toastMessage" :key="status.toastId" class="toast" role="status" aria-live="polite" @click="status.dismissToast()">
         {{ status.toastMessage }}
