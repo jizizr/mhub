@@ -17,8 +17,15 @@ test("completed packet/native audio use configured media origin and preserve rev
   assert.equal(playbackAudioUrl({ ...task, streaming_mode: null }, config), "https://media.example.test/api/v1/playbacks/applemusic--123--hires/audio?rev=native-a&download=1&v=applemusic--123--hires");
 });
 
-test("noncompleted requests stay on API origin even with a previous absolute media URL", () => {
-  for (const status of ["queued", "processing", "streaming", "failed"]) {
+test("growing streams use the media origin like completed audio", () => {
+  const url = playbackAudioUrl({ ...task, status: "streaming" }, config);
+  assert.equal(url, "https://media.example.test/api/v1/playbacks/applemusic--123--hires/audio/stream?rev=packet-a&v=applemusic--123--hires");
+  assert.equal(playbackAudioUrl({ ...task, status: "streaming", streaming_mode: null }, config),
+    "https://media.example.test/api/v1/playbacks/applemusic--123--hires/audio?rev=native-a&download=1&v=applemusic--123--hires");
+});
+
+test("tasks without playable audio stay on API origin even with a previous absolute media URL", () => {
+  for (const status of ["queued", "processing", "failed"]) {
     const url = playbackAudioUrl({ ...task, status, streaming_url: `https://media.example.test${task.streaming_url}` }, config);
     assert.equal(url, "/api/v1/playbacks/applemusic--123--hires/audio/stream?rev=packet-a&v=applemusic--123--hires");
   }

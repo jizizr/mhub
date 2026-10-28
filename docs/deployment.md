@@ -17,7 +17,7 @@
 | `MUSIC_MEDIA_BASE_URL` | 已完成媒体的独立源；默认同源 | 改动后 `docker compose up -d --build` |
 | `MUSIC_LEGACY_MEDIA_BASE_URL` | 迁移后旧队列媒体地址的兼容源 | 改动后重新构建前端 |
 
-媒体域必须是无用户名、密码、路径、查询参数的 HTTP(S) origin。启用独立媒体域时，应配置正确 CORS、Range、版本查询参数与缓存策略。只缓存已完成的成功媒体响应，不能缓存播放任务状态、未就绪流或错误响应。
+媒体域必须是无用户名、密码、路径、查询参数的 HTTP(S) origin。配置后，前端把正在生成（`streaming`）和已完成的音频都发往媒体域，接口、封面、歌词等小请求仍走主站，避免音频占用页面带宽。启用独立媒体域时，应配置正确 CORS、Range、版本查询参数与缓存策略；CDN 必须遵循源站的 `Cache-Control`：生成中的流返回 `no-store, no-transform`，同一 URL 完成后才返回可缓存的完整文件。只缓存已完成的成功媒体响应，不能缓存播放任务状态、未就绪流或错误响应，也不能对音频路径强制覆盖边缘缓存时间或缓冲响应。
 
 `config.toml` 中空字符串表示未配置。按需填写平台 Cookie 或 `music.applemusic`，不需要把模板中每个平台都启用。YouTube Music Cookie 可通过后端环境变量 `YOUTUBE_MUSIC_COOKIE` 注入；其他环境覆盖见源码 `settings.rs` 及各平台适配器。
 

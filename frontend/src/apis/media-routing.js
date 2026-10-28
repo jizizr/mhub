@@ -42,7 +42,11 @@ export function playbackAudioUrl(task, { mediaBaseUrl = buildMediaBase, legacyMe
   // Only these two audio representations may use a configured media origin. API, artwork,
   // lyrics, modules and unknown paths must never be rewritten here.
   if (url.pathname !== expected && url.pathname !== `${expected}/stream`) return versioned;
-  if (task.status !== "completed") return `${url.pathname}${url.search}${url.hash}`;
+  // A growing stream also uses the media origin, so audio never competes with
+  // the API origin's page bandwidth. The server marks it `no-store,
+  // no-transform` and the CDN bypasses it; once completed, the same URL serves
+  // the cacheable file. Tasks without playable audio stay on the API origin.
+  if (task.status !== "completed" && task.status !== "streaming") return `${url.pathname}${url.search}${url.hash}`;
   const origin = mediaOrigin(mediaBaseUrl);
   if (origin) return `${origin}${url.pathname}${url.search}${url.hash}`;
   // Persisted tasks and in-flight old status responses may still contain the
