@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Check, ChevronDown, CircleAlert, CircleHelp, Search, X } from "lucide-vue-next";
+import { Check, ChevronDown, CircleAlert, CircleHelp, Clock, Search, X } from "lucide-vue-next";
 import { matchCollection, resolveCollection } from "../../apis/music";
 import { usePlaylistStore } from "../../stores/playlists";
 import { useStatusStore } from "../../stores/status";
@@ -30,7 +30,10 @@ const filter = ref("all");
 const name = ref("");
 const mode = ref("create");
 const mergeId = ref(playlists.items[0]?.id || "");
+// { done, total, waitMs } while songs are being matched.
+const progress = ref(null);
 let requestVersion = 0;
+let controller = null;
 
 const platformName = (id) => props.platforms.find((item) => item.id === id)?.label || id;
 const sourcePlatform = (value) => platformFromUrl(value) || status.searchPlatform;
@@ -50,7 +53,7 @@ const rows = computed(() => (matches.value?.items || []).map((item, index) => ({
   decided: selections.value[index] !== undefined,
 })));
 // Songs that need a decision come first; the import keeps playlist order.
-const ORDER = { review: 0, missing: 1, matched: 2 };
+const ORDER = { review: 0, deferred: 1, missing: 2, matched: 3 };
 const visibleRows = computed(() => rows.value
   .filter((row) => filter.value === "all" || row.item.status === filter.value)
   .sort((left, right) => ORDER[left.item.status] - ORDER[right.item.status] || left.index - right.index));
@@ -58,6 +61,7 @@ const counts = computed(() => ({
   all: rows.value.length,
   review: rows.value.filter((row) => row.item.status === "review").length,
   missing: rows.value.filter((row) => row.item.status === "missing").length,
+  deferred: rows.value.filter((row) => row.item.status === "deferred").length,
   matched: rows.value.filter((row) => row.item.status === "matched").length,
   pending: rows.value.filter((row) => row.item.status === "review" && !row.decided).length,
 }));
@@ -90,6 +94,18 @@ async function resolve() {
   }
 }
 
+function runMatch(items, version) {
+  controller?.abort();
+  controller = new AbortController();
+  return matchCollection({
+    sourcePlatform: collection.value.platform,
+    targetPlatform: target.value,
+    items,
+    signal: controller.signal,
+    onProgress: (value) => { if (version === requestVersion) progress.value = value; },
+  });
+}
+
 async function match(version = ++requestVersion) {
   if (!collection.value) return;
   loading.value = true;
@@ -98,18 +114,50 @@ async function match(version = ++requestVersion) {
   selections.value = {};
   expanded.value = {};
   try {
-    const result = await matchCollection({
-      sourcePlatform: collection.value.platform,
-      targetPlatform: target.value,
-      items: collection.value.items,
-    });
+    const result = await runMatch(collection.value.items, version);
     if (version !== requestVersion) return;
     matches.value = result;
-    filter.value = result.review_count ? "review" : "all";
+    filter.value = result.review_count ? "review" : result.deferred_count ? "deferred" : "all";
   } catch (reason) {
     if (version === requestVersion) error.value = reason?.message || "跨平台匹配失败";
   } finally {
-    if (version === requestVersion) loading.value = false;
+    if (version === requestVersion) {
+      loading.value = false;
+      progress.value = null;
+    }
+  }
+}
+
+// Resends only the songs the platform was too busy to search; finished rows
+// and the choices made on them stay as they are.
+async function retryDeferred() {
+  const deferred = rows.value.filter((row) => row.item.status === "deferred");
+  if (!deferred.length || loading.value) return;
+  const version = ++requestVersion;
+  loading.value = true;
+  error.value = "";
+  try {
+    const result = await runMatch(deferred.map((row) => row.item.source), version);
+    if (version !== requestVersion) return;
+    const items = [...matches.value.items];
+    deferred.forEach((row, position) => { items[row.index] = result.items[position]; });
+    const count = (value) => items.filter((item) => item.status === value).length;
+    matches.value = {
+      ...matches.value,
+      items,
+      matched_count: count("matched"),
+      review_count: count("review"),
+      missing_count: count("missing"),
+      deferred_count: count("deferred"),
+    };
+    if (!count("deferred") && filter.value === "deferred") filter.value = count("review") ? "review" : "all";
+  } catch (reason) {
+    if (version === requestVersion) error.value = reason?.message || "跨平台匹配失败";
+  } finally {
+    if (version === requestVersion) {
+      loading.value = false;
+      progress.value = null;
+    }
   }
 }
 
@@ -151,7 +199,10 @@ function submit() {
 }
 
 function close() {
-  if (loading.value && !matches.value) requestVersion += 1;
+  if (loading.value) {
+    requestVersion += 1;
+    controller?.abort();
+  }
   emit("close");
 }
 
@@ -168,6 +219,7 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   requestVersion += 1;
+  controller?.abort();
   document.removeEventListener("keydown", keydown);
 });
 </script>
@@ -202,17 +254,25 @@ onBeforeUnmount(() => {
           </label>
         </div>
 
-        <div v-if="loading && !matches" class="import__loading" role="status">正在 {{ platformName(target) }} 中逐首匹配，歌曲较多时需要一点时间…</div>
+        <div v-if="loading && progress" class="import__loading" role="status">
+          <span>正在 {{ platformName(target) }} 中匹配 {{ progress.done }} / {{ progress.total }}<template v-if="progress.waitMs">，平台繁忙，{{ Math.ceil(progress.waitMs / 1000) }} 秒后继续</template></span>
+          <span class="import__progress" aria-hidden="true"><i :style="{ width: `${(progress.done / progress.total) * 100}%` }" /></span>
+        </div>
 
         <template v-if="matches">
           <nav class="import__tabs" aria-label="筛选匹配结果">
-            <button v-for="tab in [['review', '待确认'], ['missing', '未找到'], ['matched', '已匹配'], ['all', '全部']]"
+            <button v-for="tab in [['review', '待确认'], ['deferred', '未完成'], ['missing', '未找到'], ['matched', '已匹配'], ['all', '全部']]"
+              v-show="tab[0] !== 'deferred' || counts.deferred"
               :key="tab[0]" type="button" :class="{ 'is-active': filter === tab[0], [`is-${tab[0]}`]: true }"
               :disabled="!counts[tab[0]]" @click="filter = tab[0]">
               {{ tab[1] }} <b>{{ counts[tab[0]] }}</b>
             </button>
           </nav>
-          <div v-if="counts.review && filter !== 'matched' && filter !== 'missing'" class="import__bulk">
+          <div v-if="counts.deferred && !loading" class="import__bulk">
+            <span>{{ platformName(target) }} 暂时限制了搜索，还有 {{ counts.deferred }} 首没有匹配</span>
+            <button type="button" class="ghost-action" @click="retryDeferred">继续匹配</button>
+          </div>
+          <div v-if="counts.review && filter !== 'matched' && filter !== 'missing' && filter !== 'deferred'" class="import__bulk">
             <span>{{ counts.pending ? `还有 ${counts.pending} 首待确认，未选择的不会导入` : "待确认歌曲已全部处理" }}</span>
             <button type="button" class="ghost-action" @click="chooseAllReview(true)">全部选用最佳</button>
             <button type="button" class="ghost-action" @click="chooseAllReview(false)">全部跳过</button>
@@ -221,9 +281,10 @@ onBeforeUnmount(() => {
           <ol class="import__list">
             <li v-for="row in visibleRows" :key="row.index" class="import-row" :class="`is-${row.item.status}`">
               <div class="import-row__head">
-                <span class="import-row__badge" :title="row.item.status === 'matched' ? '自动匹配' : row.item.status === 'review' ? '需要确认' : '目标平台没有可信结果'">
+                <span class="import-row__badge" :title="row.item.status === 'matched' ? '自动匹配' : row.item.status === 'review' ? '需要确认' : row.item.status === 'deferred' ? '平台繁忙，尚未匹配' : '目标平台没有可信结果'">
                   <Check v-if="row.item.status === 'matched'" :size="14" />
                   <CircleHelp v-else-if="row.item.status === 'review'" :size="14" />
+                  <Clock v-else-if="row.item.status === 'deferred'" :size="14" />
                   <CircleAlert v-else :size="14" />
                 </span>
                 <div class="import-row__source">
@@ -233,6 +294,7 @@ onBeforeUnmount(() => {
                 <div v-if="row.choice && !(row.item.status === 'review' || expanded[row.index])" class="import-row__choice">
                   <span><strong>{{ row.choice.song }}</strong><small>{{ row.choice.singer }}</small></span>
                 </div>
+                <span v-else-if="row.item.status === 'deferred'" class="import-row__none">尚未匹配</span>
                 <span v-else-if="!row.item.candidates?.length" class="import-row__none">目标平台未找到</span>
                 <span v-else-if="row.item.status === 'missing' && !expanded[row.index]" class="import-row__none">没有可信结果</span>
                 <button v-if="row.item.candidates?.length && row.item.status !== 'review'" type="button" class="import-row__toggle"
@@ -291,7 +353,9 @@ onBeforeUnmount(() => {
 .import__source small { color: var(--text-muted); font-size: 12px; }
 .import__target { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
 .import__target select, .import__field { height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; color: var(--text); background: var(--input-bg); font: inherit; }
-.import__loading { margin: 18px 22px; color: var(--text-muted); font-size: 13px; text-align: center; }
+.import__loading { display: grid; gap: 8px; margin: 18px 22px; color: var(--text-muted); font-size: 13px; text-align: center; }
+.import__progress { height: 4px; overflow: hidden; border-radius: 999px; background: var(--surface-muted); }
+.import__progress i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.3s ease; }
 .import__tabs { display: flex; gap: 6px; margin: 14px 22px 0; overflow-x: auto; scrollbar-width: none; }
 .import__tabs button { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--text-muted); font-size: 13px; cursor: pointer; }
 .import__tabs button b { font-weight: 700; color: var(--text); }
@@ -305,7 +369,7 @@ onBeforeUnmount(() => {
 .import-row__head { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .import-row__badge { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); }
 .is-review .import-row__badge { color: var(--accent); background: var(--accent-soft); }
-.is-missing .import-row__badge { color: var(--text-muted); background: var(--surface-muted); }
+.is-missing .import-row__badge, .is-deferred .import-row__badge { color: var(--text-muted); background: var(--surface-muted); }
 .import-row__source, .import-row__choice span, .import-candidate__text { display: grid; gap: 2px; min-width: 0; }
 .import-row__source strong, .import-row__choice strong, .import-candidate__text strong { font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; }
 .import-row__source small, .import-row__choice small, .import-candidate__text small { color: var(--text-muted); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }

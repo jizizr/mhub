@@ -22,18 +22,65 @@ function matchResponse(request) {
   };
 }
 
-test("imports over 200 tracks with bounded requests and original order", async () => {
+test("imports large playlists in small requests and original order", async () => {
   const sizes = [];
   globalThis.fetch = async (_path, options) => {
     const request = JSON.parse(options.body);
     sizes.push(request.items.length);
     return Response.json(matchResponse(request));
   };
-  const items = sourceItems(501);
-  const result = await matchCollection({ sourcePlatform: "netease", targetPlatform: "netease", items });
-  assert.deepEqual(sizes, [200, 200, 101]);
-  assert.equal(result.matched_count, 501);
+  const items = sourceItems(60);
+  const progress = [];
+  const result = await matchCollection({
+    sourcePlatform: "netease", targetPlatform: "netease", items, onProgress: ({ done }) => progress.push(done),
+  });
+  assert.deepEqual(sizes, [25, 25, 10]);
+  assert.equal(result.matched_count, 60);
+  assert.equal(progress.at(-1), 60);
   assert.deepEqual(result.items.map((item) => item.source.id), items.map((item) => item.id));
+});
+
+test("resends deferred songs after the server's wait and keeps their place", async () => {
+  const requests = [];
+  const waits = [];
+  globalThis.fetch = async (_path, options) => {
+    const request = JSON.parse(options.body);
+    requests.push(request.items.map((item) => item.id));
+    const response = matchResponse(request);
+    // The first round can only search the first two songs.
+    if (requests.length === 1) {
+      response.items.slice(2).forEach((item) => { item.status = "deferred"; item.candidates = []; });
+      response.retry_after_ms = 1200;
+    }
+    return Response.json(response);
+  };
+  const items = sourceItems(5);
+  const result = await matchCollection({
+    sourcePlatform: "netease", targetPlatform: "applemusic", items, batchSize: 4,
+    wait: async (ms) => { waits.push(ms); },
+  });
+  assert.deepEqual(requests, [["1", "2", "3", "4"], ["3", "4", "5"]]);
+  assert.deepEqual(waits, [1200]);
+  assert.equal(result.matched_count, 5);
+  assert.equal(result.deferred_count, 0);
+  assert.deepEqual(result.items.map((item) => item.source.id), items.map((item) => item.id));
+});
+
+test("leaves songs deferred, not missing, while the platform stays throttled", async () => {
+  let calls = 0;
+  globalThis.fetch = async (_path, options) => {
+    calls += 1;
+    const response = matchResponse(JSON.parse(options.body));
+    response.items.forEach((item) => { item.status = "deferred"; item.candidates = []; });
+    return Response.json(response);
+  };
+  const result = await matchCollection({
+    sourcePlatform: "netease", targetPlatform: "applemusic", items: sourceItems(3), maxStalls: 3, wait: async () => {},
+  });
+  assert.equal(calls, 3);
+  assert.equal(result.deferred_count, 3);
+  assert.equal(result.missing_count, 0);
+  assert.deepEqual(result.items.map((item) => item.status), ["deferred", "deferred", "deferred"]);
 });
 
 test("never returns a partial import when a later batch fails", async () => {
@@ -43,7 +90,7 @@ test("never returns a partial import when a later batch fails", async () => {
     return Response.json(matchResponse(JSON.parse(options.body)));
   };
   await assert.rejects(matchCollection({
-    sourcePlatform: "netease", targetPlatform: "applemusic", items: sourceItems(201),
+    sourcePlatform: "netease", targetPlatform: "applemusic", items: sourceItems(30),
   }), /Fixture network failure/);
   assert.equal(calls, 2);
 });

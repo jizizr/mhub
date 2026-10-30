@@ -299,7 +299,7 @@ struct MediaVersionQuery {
     rev: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SearchItem {
     pub platform: String,
     pub id: String,
@@ -340,10 +340,14 @@ pub struct MatchCollectionResponse {
     pub matched_count: usize,
     pub review_count: usize,
     pub missing_count: usize,
+    pub deferred_count: usize,
+    /// Suggested wait before resending the deferred items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
     pub items: Vec<MatchCollectionItem>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MatchCollectionItem {
     pub source: MatchSourceItem,
     pub status: MatchStatus,
@@ -351,7 +355,7 @@ pub struct MatchCollectionItem {
     pub candidates: Vec<MatchCandidate>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MatchCandidate {
     #[serde(flatten)]
     pub item: SearchItem,
@@ -359,12 +363,14 @@ pub struct MatchCandidate {
     pub score: u8,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchStatus {
     Matched,
     Review,
     Missing,
+    /// Not searched yet because the platform asked to slow down; resend later.
+    Deferred,
 }
 
 #[derive(Debug, Serialize)]
@@ -709,6 +715,11 @@ async fn resolve_collection(
     }))
 }
 
+/// How long one match request may spend waiting for paced searches.
+const MATCH_BUDGET: Duration = Duration::from_secs(20);
+/// Resend hint for items deferred by timeouts or transient errors.
+const DEFERRED_RETRY: Duration = Duration::from_secs(3);
+
 async fn match_collection(
     Json(request): Json<MatchCollectionRequest>,
 ) -> ApiResult<Json<MatchCollectionResponse>> {
@@ -733,19 +744,35 @@ async fn match_collection(
             items,
         )));
     }
-    let items = stream::iter(request.items.into_iter().enumerate())
-        .map(|(index, source)| async move {
+    // One request answers within this budget; whatever the paced search
+    // could not reach comes back as `deferred` for the client to resend.
+    let deadline = std::time::Instant::now() + MATCH_BUDGET;
+    // Repeats of the same song in a playlist cost one search.
+    let mut groups: Vec<(MatchSourceItem, Vec<(usize, MatchSourceItem)>)> = Vec::new();
+    let mut seen: HashMap<(String, String), usize> = HashMap::new();
+    for (index, source) in request.items.into_iter().enumerate() {
+        let key = (
+            source.song.trim().to_lowercase(),
+            source.singer.trim().to_lowercase(),
+        );
+        match seen.get(&key) {
+            Some(&group) => groups[group].1.push((index, source)),
+            None => {
+                seen.insert(key, groups.len());
+                groups.push((source.clone(), vec![(index, source)]));
+            }
+        }
+    }
+    let sources = groups
+        .iter()
+        .map(|(source, _)| source.clone())
+        .collect::<Vec<_>>();
+    let outcomes = stream::iter(sources)
+        .map(|source| async move {
             let search = |query: String| async move {
-                tokio::time::timeout(
-                    Duration::from_secs(12),
-                    music::search(target_platform, &query, 8),
-                )
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or_default()
+                music::search_bulk(target_platform, &query, 8, deadline).await
             };
-            let candidates = search(format!("{} {}", source.song, source.singer)).await;
+            let candidates = search(format!("{} {}", source.song, source.singer)).await?;
             let mut item = match_collection_item(source.clone(), candidates.clone());
             // Long annotated titles or several artists can hide the song from
             // a platform's search; retry once with "title first-artist".
@@ -753,22 +780,51 @@ async fn match_collection(
                 && let Some(query) = matching::fallback_query(&source.song, &source.singer)
             {
                 let mut combined = candidates;
-                combined.extend(search(query).await);
+                combined.extend(search(query).await?);
                 item = match_collection_item(source, combined);
             }
-            (index, item)
+            Ok::<_, ApiError>(item)
         })
-        .buffer_unordered(6)
+        .buffered(6)
         .collect::<Vec<_>>()
         .await;
-    let mut items = items;
-    items.sort_by_key(|(index, _)| *index);
-    let items = items.into_iter().map(|(_, item)| item).collect::<Vec<_>>();
-    Ok(Json(match_collection_response(
-        source_platform.id(),
-        target_id,
-        items,
-    )))
+    // An unfinished search is never reported as "missing": that would turn a
+    // throttled platform into a list of songs it supposedly lacks.
+    let mut retry_after: Option<Duration> = None;
+    let mut slots: Vec<Option<MatchCollectionItem>> = Vec::new();
+    slots.resize_with(groups.iter().map(|(_, rows)| rows.len()).sum(), || None);
+    for ((source, rows), outcome) in groups.into_iter().zip(outcomes) {
+        let item = outcome.unwrap_or_else(|err| {
+            let wait = match err {
+                ApiError::RateLimited {
+                    retry_after: Some(wait),
+                    ..
+                } => wait,
+                _ => DEFERRED_RETRY,
+            };
+            retry_after = Some(retry_after.map_or(wait, |current| current.min(wait)));
+            deferred_collection_item(source)
+        });
+        for (index, source) in rows {
+            slots[index] = Some(MatchCollectionItem {
+                source,
+                ..item.clone()
+            });
+        }
+    }
+    let items = slots.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+    let mut response = match_collection_response(source_platform.id(), target_id, items);
+    response.retry_after_ms = retry_after.map(|wait| wait.as_millis() as u64);
+    Ok(Json(response))
+}
+
+fn deferred_collection_item(source: MatchSourceItem) -> MatchCollectionItem {
+    MatchCollectionItem {
+        source,
+        status: MatchStatus::Deferred,
+        confidence: 0,
+        candidates: Vec::new(),
+    }
 }
 
 fn direct_match_collection_item(source: MatchSourceItem, platform: &str) -> MatchCollectionItem {
@@ -807,12 +863,18 @@ fn match_collection_response(
         .iter()
         .filter(|item| matches!(item.status, MatchStatus::Missing))
         .count();
+    let deferred_count = items
+        .iter()
+        .filter(|item| matches!(item.status, MatchStatus::Deferred))
+        .count();
     MatchCollectionResponse {
         source_platform: source_platform.to_string(),
         target_platform,
         matched_count,
         review_count,
         missing_count,
+        deferred_count,
+        retry_after_ms: None,
         items,
     }
 }
@@ -2480,11 +2542,25 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self {
             ApiError::Http { status, .. } => status,
+            ApiError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Custom(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        let retry_after = match &self {
+            ApiError::RateLimited {
+                retry_after: Some(wait),
+                ..
+            } => Some(wait.as_secs_f64().ceil().max(1.0) as u64),
+            _ => None,
+        };
         let body = Json(serde_json::json!({ "detail": self.to_string() }));
-        (status, [(header::CACHE_CONTROL, "no-store")], body).into_response()
+        let mut response = (status, [(header::CACHE_CONTROL, "no-store")], body).into_response();
+        if let Some(seconds) = retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from(seconds));
+        }
+        response
     }
 }
 

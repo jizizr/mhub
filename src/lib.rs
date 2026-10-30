@@ -24,6 +24,12 @@ pub enum ApiError {
         status: axum::http::StatusCode,
         message: String,
     },
+    /// The platform (or our own pacing of it) asked to slow down.
+    #[error("{message}")]
+    RateLimited {
+        message: String,
+        retry_after: Option<std::time::Duration>,
+    },
     #[error("{0}")]
     IOError(#[from] std::io::Error),
     #[error("{0}")]

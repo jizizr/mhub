@@ -7,6 +7,7 @@ mod netease;
 mod online_lyrics;
 mod provider;
 mod qrc_crypto;
+pub(crate) mod search_gate;
 mod soda;
 pub(crate) mod streaming;
 mod tencent;
@@ -167,12 +168,48 @@ pub fn parse_platform(value: &str) -> ApiResult<MusicPlatform> {
         .ok_or_else(|| ApiError::Custom(format!("暂不支持音乐平台：{value}")))
 }
 
+lazy_static::lazy_static! {
+    static ref SEARCH_GATE: search_gate::SearchGate =
+        search_gate::SearchGate::new(search_gate::Tuning::default());
+}
+
+/// A search for someone waiting on the search box.
 pub async fn search(
     platform: MusicPlatform,
     keyword: &str,
     limit: usize,
 ) -> ApiResult<Vec<MusicSearchItem>> {
-    provider_for(platform).search(keyword, limit).await
+    search_in_lane(platform, keyword, limit, search_gate::Lane::Interactive).await
+}
+
+/// A paced, cached search for resumable bulk work such as playlist import.
+/// Returns `ApiError::RateLimited` instead of waiting past `deadline`.
+pub async fn search_bulk(
+    platform: MusicPlatform,
+    keyword: &str,
+    limit: usize,
+    deadline: std::time::Instant,
+) -> ApiResult<Vec<MusicSearchItem>> {
+    search_in_lane(
+        platform,
+        keyword,
+        limit,
+        search_gate::Lane::Bulk { deadline },
+    )
+    .await
+}
+
+async fn search_in_lane(
+    platform: MusicPlatform,
+    keyword: &str,
+    limit: usize,
+    lane: search_gate::Lane,
+) -> ApiResult<Vec<MusicSearchItem>> {
+    SEARCH_GATE
+        .search(platform, keyword, limit, lane, || {
+            provider_for(platform).search(keyword, limit)
+        })
+        .await
 }
 
 pub async fn recommendations(

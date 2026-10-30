@@ -72,23 +72,40 @@ export function resolveCollection({ platform, url, limit }) {
   return request(`${API}/collections/resolve?${params}`).then((res) => res.json());
 }
 
-export async function matchCollection({ sourcePlatform, targetPlatform, items }) {
+const MATCH_BATCH = 25;
+// Rounds in a row that may finish nothing before the rest is left deferred.
+const MATCH_MAX_STALLS = 5;
+
+function pause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+  });
+}
+
+// Matches a whole playlist in small batches. The server paces its platform
+// searches and answers "deferred" for songs it could not search yet; those
+// are resent after its suggested wait, so a throttled platform slows the
+// import down instead of turning songs into "not found".
+export async function matchCollection({
+  sourcePlatform, targetPlatform, items, onProgress, signal,
+  batchSize = MATCH_BATCH, maxStalls = MATCH_MAX_STALLS, wait = pause,
+}) {
   const sourceItems = items || [];
   if (!sourceItems.length) throw new Error("歌单没有可匹配的歌曲");
-  const result = {
-    source_platform: sourcePlatform,
-    target_platform: targetPlatform,
-    matched_count: 0,
-    review_count: 0,
-    missing_count: 0,
-    items: [],
-  };
-  // Keep each backend request bounded while preserving all tracks and their
-  // original order. A failed/incomplete batch never becomes a partial import.
-  for (let offset = 0; offset < sourceItems.length; offset += 200) {
-    const batch = sourceItems.slice(offset, offset + 200);
+  const results = new Array(sourceItems.length);
+  let pending = sourceItems.map((_, index) => index);
+  let platforms = { source_platform: sourcePlatform, target_platform: targetPlatform };
+  let stalls = 0;
+  const report = (waitMs = 0) => onProgress?.({ done: sourceItems.length - pending.length, total: sourceItems.length, waitMs });
+  report();
+  while (pending.length && stalls < maxStalls) {
+    const indexes = pending.slice(0, batchSize);
+    const batch = indexes.map((index) => sourceItems[index]);
     const response = await request(`${API}/collections/match`, {
       method: "POST",
+      signal,
       body: JSON.stringify({
         source_platform: sourcePlatform,
         target_platform: targetPlatform,
@@ -100,17 +117,39 @@ export async function matchCollection({ sourcePlatform, targetPlatform, items })
         })),
       }),
     }).then((res) => res.json());
+    // A failed/incomplete batch never becomes a partial import.
     if (response.items?.length !== batch.length || response.items.some((item, index) => String(item.source?.id) !== String(batch[index].id))) {
       throw new Error("歌单匹配结果不完整，已停止导入，请重试");
     }
-    result.source_platform = response.source_platform;
-    result.target_platform = response.target_platform;
-    result.items.push(...response.items);
-    result.matched_count += response.matched_count;
-    result.review_count += response.review_count;
-    result.missing_count += response.missing_count;
+    platforms = { source_platform: response.source_platform, target_platform: response.target_platform };
+    const deferred = [];
+    response.items.forEach((item, position) => {
+      if (item.status === "deferred") deferred.push(indexes[position]);
+      else results[indexes[position]] = item;
+    });
+    // Deferred songs go first in the next round so the import stays in order.
+    pending = [...deferred, ...pending.slice(batch.length)];
+    stalls = deferred.length === batch.length ? stalls + 1 : 0;
+    if (deferred.length && stalls < maxStalls) {
+      const waitMs = Math.max(500, Number(response.retry_after_ms) || 3000);
+      report(waitMs);
+      await wait(waitMs, signal);
+    }
+    report();
   }
-  return result;
+  // Left over only when the platform stayed throttled; the caller can retry.
+  for (const index of pending) {
+    results[index] = { source: sourceItems[index], status: "deferred", confidence: 0, candidates: [] };
+  }
+  const count = (status) => results.filter((item) => item.status === status).length;
+  return {
+    ...platforms,
+    matched_count: count("matched"),
+    review_count: count("review"),
+    missing_count: count("missing"),
+    deferred_count: count("deferred"),
+    items: results,
+  };
 }
 
 export function createPlayback({ platform, query, selectedId, quality, includeCover = false, streamingMode = null }) {

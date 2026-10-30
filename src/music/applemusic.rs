@@ -2958,6 +2958,12 @@ async fn apple_get_json<T: serde::de::DeserializeOwned>(
         clear_developer_token();
         return Box::pin(apple_get_json(url, false)).await;
     }
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(BotError::RateLimited {
+            message: "Apple Music API 请求过于频繁：HTTP 429".to_string(),
+            retry_after: super::search_gate::parse_retry_after(response.headers()),
+        });
+    }
     if !response.status().is_success() {
         return Err(BotError::Custom(format!(
             "Apple Music API 请求失败：HTTP {}",
