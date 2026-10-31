@@ -132,7 +132,7 @@ try {
           page.on("pageerror", (error) => errors.push(error.message));
           await page.goto(`${origin}/__cdn_alac`);
           await page.evaluate(async ({ sourcePath, origin, mediaOrigin, id, mode }) => {
-            const { AlacWorkletPlayer } = await import("/src/core/player/alac-worklet.js");
+            const { AlacPlayer } = await import("/src/core/player/alac-player.js");
             const cache = await import("/src/services/localCache.js");
             const record = { mode, state: "idle", position: 0, completed: 0, requests: [], errors: [] };
             const nativeFetch = window.fetch.bind(window);
@@ -140,7 +140,7 @@ try {
               if (String(url).includes("/api/v1/playbacks/")) record.requests.push({ url: String(url), cache: options?.cache, credentials: options?.credentials, range: options?.headers?.Range });
               return nativeFetch(url, options);
             };
-            const player = new AlacWorkletPlayer({ onTime: (time) => { record.position = time; }, onState: (state) => { record.state = state; },
+            const player = new AlacPlayer({ onTime: (time) => { record.position = time; }, onState: (state) => { record.state = state; },
               onStreamComplete: () => { record.completed += 1; }, onError: (error) => record.errors.push(error.message) });
             const track = { id, platform: "applemusic", track_id: id, quality: "hires", streaming_mode: "wasm_alac", status: "completed" };
             let notify, analyser;

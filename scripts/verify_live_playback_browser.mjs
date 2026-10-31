@@ -127,7 +127,7 @@ try {
       await nativeAudio.body?.cancel();
       if (nativeAudio.status === 200) nativeProbe.statusAfterNativeAudio = (await getTask(task.id)).status;
     }
-    const { AlacWorkletPlayer } = await import("/src/core/player/alac-worklet.js");
+    const { AlacPlayer } = await import("/src/core/player/alac-player.js");
     let firstBytesMs = 0;
     let firstPcmMs = 0;
     let readBytes = 0;
@@ -136,7 +136,7 @@ try {
     let completeBytes = 0;
     let error = null;
     const renderStates = [];
-    const player = new AlacWorkletPlayer({
+    const player = new AlacPlayer({
       onState: (state) => {
         if (renderStates.at(-1)?.state !== state) renderStates.push({ state, ms: elapsed(), timeMs });
       },
@@ -161,7 +161,7 @@ try {
       await player.play();
       const playStartedMs = elapsed();
       while (timeMs < stopAfterMs && !error) {
-        if (elapsed() > 120000) throw new Error("AudioWorklet playback timed out");
+        if (elapsed() > 120000) throw new Error("ALAC playback timed out");
         await sleep(30);
       }
       output = { trackId, quality, phases, nativeProbe, metadata, firstBytesMs, readyMs, playStartedMs, firstPcmMs, readBytes, timeMs, rms, completeBytes, renderStates, error };

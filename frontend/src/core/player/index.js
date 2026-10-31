@@ -28,7 +28,7 @@ let retiringDeck = null;
 let activeLoudnessGain = 1;
 let alacPlayerFactory = null;
 let alacPlayer = null;
-let usingAlacWorklet = false;
+let usingAlacPlayer = false;
 let loadToken = 0;
 let playControlToken = 0;
 let trackToken = 0;
@@ -43,6 +43,8 @@ let playbackLifecycle = null;
 let recoveringAudio = false;
 let recoveryReady = true;
 let recoveryPosition = 0;
+let lastOutputRebuild = -Infinity;
+const OUTPUT_REBUILD_COOLDOWN_MS = 30000;
 let consecutiveFailures = 0;
 let audioErrorTrackToken = -1;
 const activePrefetches = new Map();
@@ -110,7 +112,7 @@ function effectOutput(element = audio, create = false) {
 }
 
 function currentEffectOutput() {
-  return usingAlacWorklet ? alacPlayer : effectOutput(audio);
+  return usingAlacPlayer ? alacPlayer : effectOutput(audio);
 }
 
 function cachedLoudnessGain(track) {
@@ -121,9 +123,9 @@ function cachedLoudnessGain(track) {
 
 function applyActiveLevels({ resetFade = false } = {}) {
   const status = useStatusStore();
-  const output = usingAlacWorklet ? alacPlayer : effectOutput(audio, status.crossfadeEnabled || status.soundCheckEnabled);
+  const output = usingAlacPlayer ? alacPlayer : effectOutput(audio, status.crossfadeEnabled || status.soundCheckEnabled);
   if (output) {
-    if (!usingAlacWorklet && audio) audio.volume = 1;
+    if (!usingAlacPlayer && audio) audio.volume = 1;
     output.setVolume?.(status.volume);
     output.setLoudnessGain?.(activeLoudnessGain);
     if (resetFade) output.cancelFade?.(1);
@@ -409,12 +411,12 @@ async function startTransition(candidate, seconds) {
     } else await startNativeCandidate(candidate);
     if (!candidateStillValid(candidate) || status.state !== "playing" || candidate.failed ||
         (!candidate.usingAlac && (candidate.audio.paused || candidate.audio.readyState < 3))) throw new Error("过渡已失效");
-    const remaining = usingAlacWorklet
+    const remaining = usingAlacPlayer
       ? (status.duration - Math.max(status.position, playback.getCurrentTime?.() || 0)) / 1000
       : audio.duration - audio.currentTime;
-    if (!(remaining > 0.05) || (usingAlacWorklet ? alacPlayer?.ended : audio.paused || audio.ended)) throw new Error("当前歌曲已结束");
+    if (!(remaining > 0.05) || (usingAlacPlayer ? alacPlayer?.ended : audio.paused || audio.ended)) throw new Error("当前歌曲已结束");
     seconds = Math.max(0.05, Math.min(seconds, remaining));
-    const old = { audio, alac: alacPlayer, usingAlac: usingAlacWorklet, output: currentEffectOutput(), source: status.currentSource, track: useMediaStore().track };
+    const old = { audio, alac: alacPlayer, usingAlac: usingAlacPlayer, output: currentEffectOutput(), source: status.currentSource, track: useMediaStore().track };
     if (!old.output) throw new Error("当前音频无法过渡");
     const { queue, media } = stores();
     const nextIndex = nextQueueIndex();
@@ -437,7 +439,7 @@ async function startTransition(candidate, seconds) {
     transitionGeneration += 1;
     audio = candidate.audio;
     alacPlayer = candidate.alac;
-    usingAlacWorklet = candidate.usingAlac;
+    usingAlacPlayer = candidate.usingAlac;
     activeLoudnessGain = cachedLoudnessGain(candidate.track);
     candidate.output.setLoudnessGain(activeLoudnessGain);
     status.playIndex = nextIndex;
@@ -459,7 +461,7 @@ async function startTransition(candidate, seconds) {
     playback.setCurrentTime(status.position, { force: true });
     playback.setPlaying(true);
     status.persist();
-    if (usingAlacWorklet) setupAlacWorkletCallbacks(trackToken);
+    if (usingAlacPlayer) setupAlacCallbacks(trackToken);
     void loadLyrics(track);
     updateMediaSession(track, { activate: true });
     syncMediaSessionPosition();
@@ -562,7 +564,7 @@ function replaceQueuedTrackWithQuality(index, track) {
 }
 
 function hasAudioSource() {
-  return Boolean(usingAlacWorklet || (useStatusStore().currentSource && (audio?.currentSrc || audio?.src)));
+  return Boolean(usingAlacPlayer || (useStatusStore().currentSource && (audio?.currentSrc || audio?.src)));
 }
 
 function takeIdleElement() {
@@ -614,7 +616,7 @@ function armedStillNext(armed = armedNext) {
 // Called from the current native element's time updates.
 function checkPreroll() {
   const armed = armedNext;
-  if (!armed?.element || usingAlacWorklet || !audio) return;
+  if (!armed?.element || usingAlacPlayer || !audio) return;
   const status = useStatusStore();
   // The final timeupdate of a natural EOS already reports paused=true.
   if (audio.ended) return;
@@ -696,16 +698,15 @@ function releaseNativeSource() {
   if (source.startsWith("blob:")) URL.revokeObjectURL(source);
 }
 
-function detachCurrentAudio({ keepNativeSource = false, previousCustomSource = usingAlacWorklet ? useStatusStore().currentSource : null } = {}) {
+function detachCurrentAudio({ keepNativeSource = false, previousCustomSource = usingAlacPlayer ? useStatusStore().currentSource : null } = {}) {
   cancelTransition();
   playControlToken += 1;
   if (alacPlayer) {
-    // Stop the custom transport before detaching the native element.  The
-    // worklet owns its AudioContext destination and must not keep rendering a
-    // previous track after a queue change.
+    // Stop the custom transport before detaching the native element. Its
+    // scheduled buffers must not keep sounding after a queue change.
     void alacPlayer.stop?.();
   }
-  usingAlacWorklet = false;
+  usingAlacPlayer = false;
   if (previousCustomSource?.startsWith("blob:")) URL.revokeObjectURL(previousCustomSource);
   if (!audio) return;
   audio.pause();
@@ -900,7 +901,7 @@ export async function retryAutoplay() {
   const { queue, status } = stores();
   if (!status.autoplayEnabled || !status.currentTrack || autoplayRequest) return false;
   autoplayFailedSeed = "";
-  const transportEnded = usingAlacWorklet ? alacPlayer?.ended : audio?.ended;
+  const transportEnded = usingAlacPlayer ? alacPlayer?.ended : audio?.ended;
   // A warm recommendation request can fail while the last song is still
   // playing. Retrying that metadata must not act like pressing Next or
   // resume a user-paused song. Advance only after the transport reached EOF
@@ -913,7 +914,7 @@ function canPrefetchWithoutStarvingPlayback() {
   // A WASM ALAC stream has no native `buffered` timeline. Once its reader has
   // reached EOF, the current track is fully consumed and it is safe to fill
   // its local cache before starting the next-track download.
-  if (usingAlacWorklet && alacPlayer?.eof) return true;
+  if (usingAlacPlayer && alacPlayer?.eof) return true;
   if (!audio) return false;
   const policy = prefetchNetworkPolicy();
   if (policy.disabled) return false;
@@ -948,7 +949,7 @@ function syncMediaSessionPosition(force = false) {
 }
 
 function activeAudioContext() {
-  return usingAlacWorklet ? alacPlayer?.context : effectOutput(audio)?.context;
+  return usingAlacPlayer ? alacPlayer?.context : effectOutput(audio)?.context;
 }
 
 function waitingForAudioRecovery() {
@@ -957,11 +958,40 @@ function waitingForAudioRecovery() {
 
 function confirmRecoveredAudio(position) {
   if (!recoveringAudio || waitingForAudioRecovery() || !useStatusStore().isPlaying || position <= recoveryPosition) return;
-  if (usingAlacWorklet ? !alacPlayer?.playing : audio?.paused) return;
+  if (usingAlacPlayer ? !alacPlayer?.playing : audio?.paused) return;
   recoveringAudio = false;
   useStatusStore().state = "playing";
   playback.setPlaying(true);
   updateMediaSession();
+}
+
+// Safety net: a context whose render clock stops keeping wall time plays
+// every song too slowly (or not at all) until a new context exists. Rebuild
+// the ALAC output on a fresh context and reload the song where it was; a
+// native element bound to a graph cannot move contexts, so only the ALAC
+// path is rebuilt here.
+function checkRenderClock() {
+  const status = useStatusStore();
+  const watch = outputFactory?.renderClock;
+  const context = usingAlacPlayer ? alacPlayer?.context : null;
+  let sessionInterrupted = false;
+  try { sessionInterrupted = navigator.audioSession?.state === "interrupted"; } catch { /* optional */ }
+  if (!watch || !outputFactory.retire) return;
+  if (!context || !status.isPlaying || status.trackLoading || recoveringAudio || pendingSeek || sessionInterrupted) {
+    watch.reset();
+    return;
+  }
+  if (!watch.sample(context)) return;
+  const now = Date.now();
+  if (now - lastOutputRebuild < OUTPUT_REBUILD_COOLDOWN_MS) return;
+  const track = status.currentTrack || useMediaStore().track;
+  if (!track) return;
+  lastOutputRebuild = now;
+  const position = status.position;
+  console.warn("[player] audio render clock drifted; rebuilding output", { sampleRate: context.sampleRate });
+  outputFactory.retire(context);
+  void loadTrack(normalizeTrackForQuality(track), true);
+  if (position > 0) seek(position);
 }
 
 function setupSystemPlayback(options) {
@@ -969,7 +999,7 @@ function setupSystemPlayback(options) {
     readState: () => {
       const { media, status } = stores();
       return { track: media.track, state: status.state, position: status.position,
-        duration: status.duration, speed: usingAlacWorklet ? 1 : status.speed,
+        duration: status.duration, speed: usingAlacPlayer ? 1 : status.speed,
         wantsPlay: status.isPlaying || (status.trackLoading && loadWantsPlay) };
     },
     actions: { play, pause, previous: prevTrack, next: () => nextTrack(true), seek, stop },
@@ -983,7 +1013,7 @@ function setupSystemPlayback(options) {
       if (!status.isPlaying) return;
       recoveringAudio = true;
       recoveryReady = false;
-      recoveryPosition = usingAlacWorklet ? status.position : Math.round((audio?.currentTime || 0) * 1000);
+      recoveryPosition = usingAlacPlayer ? status.position : Math.round((audio?.currentTime || 0) * 1000);
       status.state = "buffering";
       playback.setPlaying(false);
       playback.setCurrentTime(recoveryPosition, { force: true });
@@ -1010,7 +1040,7 @@ function resetForLoad(duration = 0) {
   // currentSource=null below makes the retained source inactive and prevents
   // either events or Play from treating the previous song as the new one.
   status.trackLoading = true;
-  const previousCustomSource = usingAlacWorklet ? status.currentSource : null;
+  const previousCustomSource = usingAlacPlayer ? status.currentSource : null;
   status.currentSource = null;
   status.currentSourceTrackId = null;
   if (audio) detachCurrentAudio({ keepNativeSource: true, previousCustomSource });
@@ -1036,7 +1066,7 @@ function syncPosition(force = false) {
 }
 
 function syncDuration() {
-  if (!audio || usingAlacWorklet) return;
+  if (!audio || usingAlacPlayer) return;
   const status = useStatusStore();
   const media = useMediaStore();
   let duration = Number.isFinite(audio.duration)
@@ -1052,7 +1082,7 @@ function syncDuration() {
 
 function attachAudioEvents(element = audio) {
   if (!element) return;
-  const active = () => element === audio && !usingAlacWorklet && Boolean(useStatusStore().currentSource);
+  const active = () => element === audio && !usingAlacPlayer && Boolean(useStatusStore().currentSource);
   element.addEventListener("timeupdate", () => {
     if (!active()) return;
     const pos = Math.round(audio.currentTime * 1000);
@@ -1264,7 +1294,7 @@ async function skipOnFailure(myToken, getCurrentToken) {
   }, SKIP_ON_ERROR_DELAY_MS);
 }
 
-function setupAlacWorkletCallbacks(myToken) {
+function setupAlacCallbacks(myToken) {
   if (!alacPlayer) return;
   alacPlayer.onState = (state) => {
     if (myToken !== trackToken) return;
@@ -1306,7 +1336,7 @@ function setupAlacWorkletCallbacks(myToken) {
   alacPlayer.onEnded = () => {
     if (myToken !== trackToken) return;
     if (useStatusStore().repeatMode === "one") {
-      // Worklet play() rewinds its complete packet cache after ended.
+      // ALAC play() rewinds its complete packet cache after ended.
       void play();
     } else if (!startArmedNext()) void nextTrack(false);
   };
@@ -1327,7 +1357,7 @@ function setupAlacWorkletCallbacks(myToken) {
     if (myToken !== trackToken) return;
     clearPendingSeek();
     const status = useStatusStore();
-    usingAlacWorklet = false;
+    usingAlacPlayer = false;
     status.state = "paused";
     playback.setPlaying(false);
     toast(error?.message || "ALAC 解码失败，请稍后重试");
@@ -1335,7 +1365,7 @@ function setupAlacWorkletCallbacks(myToken) {
   };
 }
 
-async function tryLoadAlacWorklet(source, autoPlay, track, myToken) {
+async function tryLoadAlacPlayer(source, autoPlay, track, myToken) {
   if (!alacPlayerFactory || track?.streaming_mode !== "wasm_alac") return null;
   let canUse = false;
   try {
@@ -1358,14 +1388,14 @@ async function tryLoadAlacWorklet(source, autoPlay, track, myToken) {
     if (myToken !== trackToken) return { ok: false };
     if (!alacPlayer) {
       alacPlayer = createAlacPlayer();
-      // Reuse the context unlocked by the gesture and fetch the codec and
-      // worklet processor in parallel, as an eagerly created player would.
+      // Reuse the context unlocked by the gesture and fetch the codec in
+      // parallel, as an eagerly created player would.
       alacPlayer.prepare?.(["hires", "hi-res"].includes(track.quality) ? 192000 : 48000);
     }
   }
-  setupAlacWorkletCallbacks(myToken);
+  setupAlacCallbacks(myToken);
   try {
-    usingAlacWorklet = true;
+    usingAlacPlayer = true;
     alacPlayer.setVolume?.(useStatusStore().volume);
     alacPlayer.setLoudnessGain?.(activeLoudnessGain);
     alacPlayer.cancelFade?.(1);
@@ -1375,7 +1405,7 @@ async function tryLoadAlacWorklet(source, autoPlay, track, myToken) {
       waitForCompletedSource: waitForCompletedSource ? (options) => waitForCompletedSource(track, options) : undefined,
     });
     if (myToken !== trackToken) return { ok: false };
-    usingAlacWorklet = true;
+    usingAlacPlayer = true;
     const status = useStatusStore();
     status.currentSource = source;
     status.currentSourceTrackId = track?.id || null;
@@ -1400,13 +1430,13 @@ async function tryLoadAlacWorklet(source, autoPlay, track, myToken) {
     clearPendingSeek();
     // The packet endpoint is intentionally not a native media URL. Falling
     // through to `<audio>` after a decoder failure would produce a confusing
-    // "unsupported source" error and can leave a stale worklet attached.
+    // "unsupported source" error and can leave a stale ALAC deck attached.
     // Browsers that cannot request wasm_alac never enter this branch and keep
     // the original full-download path.
-    usingAlacWorklet = false;
+    usingAlacPlayer = false;
     await alacPlayer.stop?.();
     toast("ALAC 流暂不可用，请稍后重试");
-    console.warn("[player] ALAC worklet fallback", error);
+    console.warn("[player] ALAC transport fallback", error);
     return { ok: false, error };
   }
 }
@@ -1420,7 +1450,7 @@ export async function load(source, autoPlay = true, track = useMediaStore().trac
   playback.setSeeking(false);
   resetForLoad(track?.duration || 0);
   try {
-    const alacOutcome = await tryLoadAlacWorklet(source, autoPlay, track, trackToken);
+    const alacOutcome = await tryLoadAlacPlayer(source, autoPlay, track, trackToken);
     if (token !== loadToken) return { ok: false };
     if (alacOutcome) {
       consecutiveFailures = 0;
@@ -1604,7 +1634,7 @@ function ensureActiveTrackCache(myToken) {
   const promise = Promise.resolve()
     .then(() => cacheActiveTrackSource(track, {
       signal: controller.signal,
-      blob: usingAlacWorklet ? alacPlayer?.completeBlob : undefined,
+      blob: usingAlacPlayer ? alacPlayer?.completeBlob : undefined,
     }))
     .then((result) => {
       const ready = Boolean(result);
@@ -1688,10 +1718,10 @@ async function prefetchNextTrack(myToken = trackToken) {
 function schedulePrefetchNextTrack(myToken, { immediate = false } = {}) {
   clearPrefetchRetry();
   prefetchRetryAttempt = 0;
-  // The ALAC worklet consumes the only active packet stream. Wait until that
+  // The ALAC player consumes the only active packet stream. Wait until that
   // reader reaches EOF, then persist the complete packet stream before the
   // next-track cache is allowed to start.
-  if ((usingAlacWorklet && !alacPlayer?.eof) || !prefetchTrackSource || myToken !== trackToken) return;
+  if ((usingAlacPlayer && !alacPlayer?.eof) || !prefetchTrackSource || myToken !== trackToken) return;
 
   const attempt = () => {
     prefetchRetryTimer = 0;
@@ -1753,12 +1783,12 @@ export async function play(options = {}) {
   playback.setPlaying(false);
   updateMediaSession();
   try {
-    if (usingAlacWorklet && alacPlayer) {
+    if (usingAlacPlayer && alacPlayer) {
       await alacPlayer.play();
       if (requestToken !== loadToken || controlToken !== playControlToken) return false;
-      // The processor confirms actual rendered samples. During an underrun
+      // The scheduler confirms actual rendered samples. During an underrun
       // the UI clock stays frozen instead of advancing through silence.
-      // The native element is detached while the worklet owns playback. Its
+      // The native element is detached while ALAC owns playback. Its
       // currentTime is always zero, so syncing from it here would rewind the
       // progress bar immediately after a successful ALAC play() call.
       syncMediaSessionPosition();
@@ -1804,7 +1834,7 @@ export async function play(options = {}) {
     if (requestToken !== loadToken || controlToken !== playControlToken) return false;
     // The element and effects resume in parallel. If either fails, leave no
     // native transport running behind a paused UI (or through a silent graph).
-    if (!usingAlacWorklet && !audio.paused) audio.pause();
+    if (!usingAlacPlayer && !audio.paused) audio.pause();
     playback.setPlaying(false);
     if (error?.name === "NotAllowedError") {
       status.state = "paused";
@@ -1850,7 +1880,7 @@ export function pause() {
   playback.setPlaying(false);
   updateMediaSession();
   syncMediaSessionPosition(true);
-  if (usingAlacWorklet && alacPlayer) {
+  if (usingAlacPlayer && alacPlayer) {
     alacPlayer.pause();
     return;
   }
@@ -1961,7 +1991,7 @@ function applyPendingSeek() {
   if (!request || request.token !== trackToken || request.applied) return;
   const status = useStatusStore();
   if (!status.currentSource) return;
-  if (usingAlacWorklet) {
+  if (usingAlacPlayer) {
     if (!alacPlayer?.canSeek) return;
     pendingSeek = null;
     const decoder = alacPlayer;
@@ -2018,7 +2048,7 @@ export function seek(posMs) {
   status.position = safe;
   status.state = resume ? "buffering" : "paused";
   status.setNotice("正在跳转到所选位置…");
-  if (!usingAlacWorklet) audio?.pause();
+  if (!usingAlacPlayer) audio?.pause();
   syncMediaSessionPosition();
   updateMediaSession();
   return applyPendingSeek();
@@ -2123,7 +2153,7 @@ export async function nextTrack(manual = false) {
       const generation = autoplayGeneration;
       const currentKey = trackIdentity(status.currentTrack);
       playback.setPlaying(false);
-      if (usingAlacWorklet) alacPlayer?.pause?.();
+      if (usingAlacPlayer) alacPlayer?.pause?.();
       else audio?.pause();
       status.state = "buffering";
       const advance = (async () => {
@@ -2168,7 +2198,7 @@ async function onQueueEnded() {
   const status = useStatusStore();
   playback.setPlaying(false);
   playback.reset();
-  if (usingAlacWorklet) alacPlayer?.pause?.();
+  if (usingAlacPlayer) alacPlayer?.pause?.();
   else if (audio) audio.pause();
   status.state = "stopped";
   status.position = status.duration;
@@ -2382,6 +2412,7 @@ export function tickPlaybackTime() {
   // A hidden page shows no clock. Media events keep the store and Media
   // Session current, so skip these 4 Hz reactive updates in the background.
   if (typeof document !== "undefined" && document.hidden) return;
+  checkRenderClock();
   const status = useStatusStore();
   const nextPosition = Math.round(playback.getCurrentTime());
   const nextDuration = Math.round(playback.getDuration());

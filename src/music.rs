@@ -337,7 +337,7 @@ pub async fn download(track: &MusicTrack, include_cover: bool) -> ApiResult<Musi
 /// The default path is intentionally conservative: only AAC is exposed to a
 /// native `<audio>` element.  `wasm_alac` is an explicit client capability
 /// request and returns decrypted ALAC fMP4 fragments for the WebAssembly
-/// decoder/AudioWorklet path.  Keeping the mode explicit prevents an ALAC
+/// decoder path.  Keeping the mode explicit prevents an ALAC
 /// task from accidentally being handed to browsers that cannot decode it.
 pub fn can_stream_track(track: &MusicTrack) -> bool {
     can_stream_track_with_mode(track, None)

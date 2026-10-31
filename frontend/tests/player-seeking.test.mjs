@@ -421,3 +421,19 @@ test('a backwards seek during interruption uses its new position as the recovery
   assert.equal(h.status.state,'playing'); assert.equal(h.status.position,5200); assert.equal(clock.isPlaying(),true);
   h.player.destroyPlayer();
 });
+
+test('a drifted ALAC render clock rebuilds the output and resumes the song at its position once', async () => {
+  const retired = []; let drift = false; let resolves = 0;
+  const outputFactory = { prepare() {}, retire: (context) => { retired.push(context); }, renderClock: { reset() {}, sample: () => drift } };
+  const h = await harness({ alac: true, resolver: async track => { resolves++; return { source: `test:${track.id}`, track }; }, options: { outputFactory } });
+  await h.player.play(); h.status.state = 'playing';
+  h.player.tickPlaybackTime(); assert.deepEqual(retired, []);
+  clock.setCurrentTime(42000, { force: true }); h.status.position = 42000; drift = true; h.player.tickPlaybackTime(); for (let i = 0; i < 8; i++) await tick();
+  assert.deepEqual(retired, [h.context]);
+  assert.equal(resolves, 1);
+  assert.deepEqual(h.worklet.seeks, [42000]);
+  assert.equal(h.status.playIndex, 0);
+  // A rebuilt context that drifts again is not reloaded in a loop.
+  h.status.state = 'playing'; h.player.tickPlaybackTime(); await tick();
+  assert.equal(retired.length, 1);
+});

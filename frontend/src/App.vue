@@ -20,12 +20,13 @@ import RecommendationFeed from "./components/discovery/RecommendationFeed.vue";
 import PlayerBar from "./components/player/PlayerBar.vue";
 import QueuePanel from "./components/player/QueuePanel.vue";
 import * as player from "./core/player";
-import { prepareOutput, preparePlaybackSession, createNativeOutput } from "./core/player/audio-output";
+import { prepareOutput, preparePlaybackSession, createNativeOutput, retireOutputContext } from "./core/player/audio-output";
+import { createRenderClockWatch } from "./core/player/render-clock";
 import { createMediaSessionController } from "./core/player/media-session";
 import { createPlaybackLifecycle } from "./core/player/playback-lifecycle";
 import { getCachedLoudness, warmLoudness } from "./services/loudness";
 import { loadTrackLyrics, lyricIdentity } from "./services/lyrics";
-import { canRequestAlacWorklet, canUseAlacWorklet } from "./core/player/alac-support";
+import { canRequestAlacPlayback, canUseAlacPlayback } from "./core/player/alac-support";
 import {
   cacheAudioBlob,
   cachedAudioUrl,
@@ -136,13 +137,13 @@ try {
   if (Array.isArray(saved)) recommendationSeenIds = saved.filter((id) => /^\d+$/.test(String(id))).slice(-120).map(String);
 } catch { /* Storage may be unavailable in a private session. */ }
 
-// The ALAC decoder (worklet transport + WebAssembly glue) is a separate chunk.
+// The ALAC player (packet transport + WebAssembly glue) is a separate chunk.
 // It is preloaded at idle for lossless listeners and on the first lossless
 // play otherwise, so the first screen never waits for it.
 let alacModule = null;
 let alacModuleRequest = null;
 function loadAlacModule() {
-  alacModuleRequest ||= import("./core/player/alac-worklet").then((module) => {
+  alacModuleRequest ||= import("./core/player/alac-player").then((module) => {
     alacModule = module;
     return module;
   }, (error) => {
@@ -157,7 +158,7 @@ function loadAlacModule() {
 // WASM ALAC stream; those representations must never share a cache key.
 function requestedStreamingMode(track) {
   const quality = status.quality || track?.quality || "high";
-  return canRequestAlacWorklet({ ...track, quality }) ? "wasm_alac" : "";
+  return canRequestAlacPlayback({ ...track, quality }) ? "wasm_alac" : "";
 }
 
 function loadRecentTracks() {
@@ -477,7 +478,7 @@ async function resolveCachedTrackSource(track) {
   if (!track) return null;
   // A quality preference change must not reinterpret the still-playing file.
   // Candidate tracks are already normalized by the player to the new quality.
-  const request = { ...track, streaming_mode: canRequestAlacWorklet(track) ? "wasm_alac" : null };
+  const request = { ...track, streaming_mode: canRequestAlacPlayback(track) ? "wasm_alac" : null };
   let cached = await getCachedTrack(cacheKey(request)).catch(() => null);
   if (!hasCachedAudio(cached) || !cacheEntryMatches(cached, request)) {
     cached = request.streaming_mode === "wasm_alac"
@@ -1295,7 +1296,7 @@ onMounted(() => {
     audio: audioRef.value,
     resolveTrackSource,
     resolveCachedTrackSource,
-    outputFactory: { prepare: prepareOutput, prepareSession: preparePlaybackSession, createNative: createNativeOutput },
+    outputFactory: { prepare: prepareOutput, prepareSession: preparePlaybackSession, createNative: createNativeOutput, retire: retireOutputContext, renderClock: createRenderClockWatch() },
     mediaSessionFactory: createMediaSessionController,
     lifecycleFactory: createPlaybackLifecycle,
     lookupLoudness: getCachedLoudness,
@@ -1308,15 +1309,15 @@ onMounted(() => {
     // The backend opts in per task with streaming_mode="wasm_alac". Native
     // <audio> remains the default for every existing task and browser.
     alacPlayerFactory: {
-      canHandle: (track) => canUseAlacWorklet(track),
-      canRequest: (track) => canRequestAlacWorklet(track),
+      canHandle: (track) => canUseAlacPlayback(track),
+      canRequest: (track) => canRequestAlacPlayback(track),
       isLoaded: () => Boolean(alacModule),
       load: loadAlacModule,
       warm: (sampleRate) => {
         prepareOutput(sampleRate);
         void loadAlacModule().catch(() => {});
       },
-      create: () => alacModule.createAlacWorkletPlayer({
+      create: () => alacModule.createAlacPlayer({
         onError: (error) => status.toast(error?.message || "ALAC 解码失败"),
       }),
     },
@@ -1339,7 +1340,7 @@ onMounted(() => {
   document.addEventListener("visibilitychange", handleVisibility);
   // Keep other devices' hand-off position fresh while this one plays.
   handoffTimer = window.setInterval(() => { if (status.isPlaying) account.publishPlayback(); }, 15_000);
-  if (canRequestAlacWorklet({ platform: "applemusic", quality: status.quality })) {
+  if (canRequestAlacPlayback({ platform: "applemusic", quality: status.quality })) {
     const preload = () => void loadAlacModule().catch(() => {});
     if ("requestIdleCallback" in window) window.requestIdleCallback(preload, { timeout: 4000 });
     else window.setTimeout(preload, 2000);

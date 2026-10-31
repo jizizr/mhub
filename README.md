@@ -24,7 +24,7 @@
 
 - **多平台**：搜索、歌单导入、跨平台匹配，同平台导入的歌单每天自动跟随原歌单同步。
 - **队列**：追加、替换、下一首播放、拖动排序、随机与循环；自动续播使用 Apple Music 的 AutoPlay 电台。
-- **无损播放**：ALAC 在浏览器里用 WASM 解码，通过 AudioWorklet 输出；其余格式走原生 `<audio>`。音质按播放时的设置选择。
+- **无损播放**：ALAC 在浏览器里用 WASM 解码，按采样帧精确排程到 Web Audio 输出；其余格式走原生 `<audio>`。音质按播放时的设置选择。
 - **后台播放**：锁屏或切到后台时连续播放下一首，系统媒体通知和控制保持可用。
 - **歌词**：逐字歌词、流动的封面取色背景、简繁转换。
 - **离线**：音频和歌词缓存在 IndexedDB，可安装为 PWA，断网后已缓存的歌照常播放。
@@ -38,7 +38,7 @@
 | --- | --- |
 | 后端 | Rust 2024 · Axum · Tokio · reqwest · sqlx（MySQL，可选）· yrs · webauthn-rs |
 | 前端 | Vue 3 · Pinia · Vite · Yjs · lucide 图标 |
-| 播放 | 原生 `<audio>` · Rust ALAC 解码器编译为 WASM · AudioWorklet · Media Session |
+| 播放 | 原生 `<audio>` · Rust ALAC 解码器编译为 WASM · Web Audio 缓冲排程 · Media Session |
 | 歌词 | Apple Music-like Lyrics（AMLL）· OpenCC |
 | 部署 | Docker 多阶段构建 · Compose · 任意 HTTPS 反向代理 |
 
@@ -50,7 +50,7 @@
 flowchart TB
   subgraph L1["① 浏览器 / PWA"]
     direction LR
-    UI["Vue 3 界面<br/>Pinia 队列与资料库"] ~~~ ENGINE["播放引擎<br/>主 audio + 预载 audio<br/>ALAC WASM → AudioWorklet"] ~~~ LOCAL[("IndexedDB<br/>音频 / 歌词缓存")] ~~~ SW["Service Worker<br/>Media Session"]
+    UI["Vue 3 界面<br/>Pinia 队列与资料库"] ~~~ ENGINE["播放引擎<br/>主 audio + 预载 audio<br/>ALAC WASM → Web Audio"] ~~~ LOCAL[("IndexedDB<br/>音频 / 歌词缓存")] ~~~ SW["Service Worker<br/>Media Session"]
   end
 
   subgraph L2["② 接入层"]
@@ -131,7 +131,7 @@ flowchart TD
     direction TB
     O1{"传输方式"}
     O1 -->|"wasm_alac"| O2["fetch 音频包<br/>中断后按 Range 续传"]
-    O2 --> O3["WASM 解码 → AudioWorklet"]
+    O2 --> O3["WASM 解码 → Web Audio 排程"]
     O1 -->|"原生"| O4["audio 元素 Range 请求"]
     O3 & O4 --> O5[("写入 IndexedDB<br/>下次离线直接读")]
   end

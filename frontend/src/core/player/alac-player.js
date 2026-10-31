@@ -1,10 +1,13 @@
-import processorUrl from "./alac-processor.js?url";
 import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.js";
 import { acquireOutputContext, createAlacOutput, getOutputContext, prepareOutput, suspendIdleOutputs } from "./audio-output.js";
-import { canRequestAlacWorklet, canUseAlacWorklet, isAlacWorkletSupported, isLosslessTrack } from "./alac-support.js";
+import { canRequestAlacPlayback, canUseAlacPlayback, isAlacPlaybackSupported, isLosslessTrack } from "./alac-support.js";
+import { PcmScheduler } from "./pcm-scheduler.js";
 
 const PCM_QUEUE_SECONDS = 2;
 const BACKGROUND_PCM_QUEUE_SECONDS = 15;
+// Refill once a quarter of the queue has played, so each refill becomes one
+// sizeable AudioBuffer instead of a source node per pump tick.
+const REFILL_FRACTION = 0.75;
 const MAX_PCM_QUEUE_BYTES = 24 * 1024 * 1024;
 const DECODE_SLICE_MS = 8;
 const DECODE_SLICE_PACKETS = 64;
@@ -19,19 +22,6 @@ const HEADER_BYTES = 24;
 const STREAM_MAGIC = "SPLALAC1";
 const STREAM_VERSION = 2;
 let wasmReady = null;
-const contextModules = new WeakMap();
-
-function prepareModule(context) {
-  let pending = contextModules.get(context);
-  if (!pending) {
-    pending = context.audioWorklet.addModule(processorUrl).catch((error) => {
-      contextModules.delete(context);
-      throw error;
-    });
-    contextModules.set(context, pending);
-  }
-  return pending;
-}
 
 function toError(error, fallback) {
   return error instanceof Error ? error : new Error(error?.message || fallback);
@@ -346,19 +336,19 @@ async function ensureWasm() {
   await wasmReady;
 }
 
-export class AlacWorkletPlayer {
+export class AlacPlayer {
   constructor({ onState, onTime, onEnded, onError, onProgress, onStreamComplete } = {}) {
     Object.assign(this, {
       onState: onState || (() => {}), onTime: onTime || (() => {}),
       onEnded: onEnded || (() => {}), onError: onError || (() => {}),
       onProgress: onProgress || (() => {}), onStreamComplete: onStreamComplete || (() => {}),
-      context: null, node: null, gain: null, output: null, decoder: null, track: null,
+      context: null, scheduler: null, gain: null, output: null, decoder: null, track: null,
       reader: null, parser: null, abortController: null, firstPacket: null,
       generation: 0, epoch: 0, playRequest: 0, loaded: false, playing: false, eof: false,
       volume: 1, loudnessGain: 1, fadeGain: 1, outputSampleRate: 0, totalBytes: 0, readBytes: 0,
       packets: [], decodeIndex: 0, totalSourceFrames: 0, skipSourceFrames: 0,
       pendingSeekFrame: null,
-      sentFrames: 0, consumedFrames: 0, ended: false, decoding: null,
+      ended: false, decoding: null,
       completeBlob: null, streamCompleteNotified: false, renderEofSent: false,
       removeAbortListener: null,
       preparedContext: null, preparedSampleRate: 0,
@@ -371,9 +361,9 @@ export class AlacWorkletPlayer {
     });
   }
 
-  get queuedFrames() { return Math.max(0, this.sentFrames - this.consumedFrames); }
+  get queuedFrames() { return this.scheduler?.queuedFrames ?? 0; }
   get duration() { return this.track ? this.totalSourceFrames / this.track.sampleRate * 1000 : 0; }
-  get canSeek() { return Boolean(this.loaded && this.track && this.node); }
+  get canSeek() { return Boolean(this.loaded && this.track && this.scheduler); }
   get seekableDuration() { return this.duration; }
   get seekPending() { return this.pendingSeekFrame !== null; }
 
@@ -383,9 +373,9 @@ export class AlacWorkletPlayer {
     if (!this.track || !this.outputSampleRate) return 0;
     const channels = this.track.channels;
     const maxFrames = Math.floor(MAX_PCM_QUEUE_BYTES / (Float32Array.BYTES_PER_ELEMENT * channels));
-    // The decoder transfers complete packets. Reserve the final refill packet
-    // and the consumed prefix still held by the renderer's first packet, so
-    // the PCM allocations (not just unplayed frames) stay within the ceiling.
+    // The decoder emits complete packets. Reserve the final refill packet and
+    // the played prefix still held by the first scheduled AudioBuffer, so the
+    // PCM allocations (not just unplayed frames) stay within the ceiling.
     const packetFrames = Math.ceil(this.track.maxSamples * this.outputSampleRate / this.track.sampleRate);
     return Math.max(0, Math.min(this.outputSampleRate * seconds, maxFrames - packetFrames * 2));
   }
@@ -402,30 +392,29 @@ export class AlacWorkletPlayer {
     this.removeVisibilityListener = () => owner.removeEventListener("visibilitychange", changed);
   }
 
-  static isSupported() { return isAlacWorkletSupported(); }
+  static isSupported() { return isAlacPlaybackSupported(); }
 
-  static canHandle(track) { return canUseAlacWorklet(track); }
+  static canHandle(track) { return canUseAlacPlayback(track); }
 
   static canRequest(track) {
-    return isAlacWorkletSupported() && track?.platform === "applemusic" && isLosslessTrack(track);
+    return isAlacPlaybackSupported() && track?.platform === "applemusic" && isLosslessTrack(track);
   }
 
   // Must be called synchronously by a trusted click/change/key handler. WebKit
   // permissions belong to this context: unlocking a throwaway context does
   // not authorize a new one after a cold provider request finishes.
   prepare(sampleRate = 192000) {
-    if (!AlacWorkletPlayer.isSupported()) return;
+    if (!AlacPlayer.isSupported()) return;
     const active = this.context;
     if (active && active.state !== "closed") void active.resume().catch(() => {});
     const context = prepareOutput(sampleRate);
     this.preparedContext = context;
     this.preparedSampleRate = sampleRate;
-    // Download the codec and processor in parallel with the provider task.
+    // Download the codec in parallel with the provider task.
     void ensureWasm().catch(() => {});
-    void prepareModule(context).catch(() => {});
   }
 
-  async ensureContext(sampleRate, generation) {
+  async ensureContext(sampleRate, channels, generation) {
     const requested = Number.isFinite(sampleRate) && sampleRate > 0 ? Math.round(sampleRate) : undefined;
     let prepared = this.preparedContext;
     if (!prepared || prepared.state === "closed") {
@@ -438,34 +427,30 @@ export class AlacWorkletPlayer {
     const context = await acquireOutputContext(requested, [this.context, prepared]);
     if (generation !== this.generation) throw new DOMException("ALAC 加载已取消", "AbortError");
     this.context = context;
-    let output;
-    try {
-      await prepareModule(context);
-      if (generation !== this.generation) throw new DOMException("ALAC 加载已取消", "AbortError");
-      output = createAlacOutput(context);
-      output.setVolume(this.volume);
-      output.setLoudnessGain(this.loudnessGain);
-      output.cancelFade(this.fadeGain);
-      const node = new AudioWorkletNode(context, "splayer-alac-pcm", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
-      node.connect(output.input);
-      suspendIdleOutputs(context);
-      node.port.onmessage = (event) => {
-        if (generation === this.generation) this.handleWorkletMessage(event.data || {});
-      };
-      this.context = context;
-      this.output = output;
-      this.gain = output.volumeGain;
-      this.node = node;
-      this.outputSampleRate = context.sampleRate;
-    } catch (error) {
-      output?.dispose();
-      throw error;
-    }
+    // Never load an AudioWorklet module into this context: Chromium then
+    // renders it through the two-thread path this player exists to avoid.
+    const output = createAlacOutput(context);
+    output.setVolume(this.volume);
+    output.setLoudnessGain(this.loudnessGain);
+    output.cancelFade(this.fadeGain);
+    const current = () => generation === this.generation;
+    this.scheduler = new PcmScheduler(context, output.input, {
+      channels,
+      onState: (state) => { if (current() && this.playing) this.onState(state); },
+      onTime: (frame) => { if (current()) this.onTime(frame / this.outputSampleRate * 1000); },
+      onEnded: () => { if (current()) this.handleEnded(); },
+      onNeedData: () => { if (current()) this.refill(generation); },
+    });
+    suspendIdleOutputs(context);
+    this.context = context;
+    this.output = output;
+    this.gain = output.volumeGain;
+    this.outputSampleRate = context.sampleRate;
   }
 
   async load(url, { signal, waitForCompletedSource, completed = false, trustedMediaOrigins = [] } = {}) {
     if (!url) throw new Error("ALAC 音频地址为空");
-    if (!AlacWorkletPlayer.isSupported()) throw new Error("当前浏览器不支持 AudioWorklet");
+    if (!AlacPlayer.isSupported()) throw new Error("当前浏览器不支持 Web Audio");
     // stop() invalidates and detaches synchronously; an old reader cancellation
     // must never tear down a newer track after its promise eventually resolves.
     void this.stop();
@@ -579,9 +564,8 @@ export class AlacWorkletPlayer {
         const packets = this.parser.push(value);
         if (!this.track && this.parser.header) {
           const header = this.parser.header;
-          if (!header.sampleRate || !header.channels || header.channels > 2) throw new Error("当前 AudioWorklet 仅支持单声道或立体声 ALAC");
-          // Codec and worklet module are independent; fetch them together.
-          await Promise.all([ensureWasm(), this.ensureContext(header.sampleRate, generation)]);
+          if (!header.sampleRate || !header.channels || header.channels > 2) throw new Error("当前播放器仅支持单声道或立体声 ALAC");
+          await Promise.all([ensureWasm(), this.ensureContext(header.sampleRate, header.channels, generation)]);
           if (generation !== this.generation) return;
           this.decoder = new AlacDecoder(header.cookie);
           this.track = header;
@@ -739,7 +723,7 @@ export class AlacWorkletPlayer {
   }
 
   async drainPackets(generation) {
-    if (generation !== this.generation || !this.decoder || !this.node || !this.track) return;
+    if (generation !== this.generation || !this.decoder || !this.scheduler || !this.track) return;
     if (this.pendingSeekFrame !== null) {
       // Packet framing indexes the compressed prefix as it arrives. A forward
       // seek must not decode the old prefix or synthesize progress while its
@@ -749,7 +733,7 @@ export class AlacWorkletPlayer {
       if (target !== this.pendingSeekFrame) {
         this.configureRenderer(Math.round(target / this.track.sampleRate * this.outputSampleRate));
         this.onTime(target / this.track.sampleRate * 1000);
-        if (this.playing) this.node.port.postMessage({ type: "play", epoch: this.epoch });
+        if (this.playing) this.scheduler.play();
       }
       this.selectPacketAtFrame(target);
       this.pendingSeekFrame = null;
@@ -764,7 +748,7 @@ export class AlacWorkletPlayer {
         const packet = this.packets[this.decodeIndex];
         const bytes = packet.bytes || await this.readCompletedPacket(packet);
         if (generation !== this.generation || epoch !== this.epoch) return;
-        // Reused: the resampler below always returns a new transferable array.
+        // Reused: the resampler below always returns a new array.
         const capacity = Math.max(this.decoder.maxSamplesPerPacket(), 1024);
         if (this.decodeBuffer?.length !== capacity) this.decodeBuffer = new Float32Array(capacity);
         const output = this.decodeBuffer;
@@ -780,31 +764,24 @@ export class AlacWorkletPlayer {
           this.resampler = createStreamResampler(this.track.channels, this.track.sampleRate, this.outputSampleRate);
           this.resamplerEpoch = epoch;
         }
-        const pcm = this.resampler.process(decoded);
-        const frames = Math.floor(pcm.length / this.track.channels);
-        if (frames) {
-          this.sentFrames += frames;
-          this.node.port.postMessage({ type: "data", epoch, format: "f32", data: pcm.buffer, frames }, [pcm.buffer]);
-        }
+        this.scheduler.push(this.resampler.process(decoded));
         this.resolveStartup();
         slicePackets += 1;
         if (slicePackets >= DECODE_SLICE_PACKETS || monotonicNow() - sliceStart >= DECODE_SLICE_MS) {
+          // One AudioBuffer per decode slice keeps source nodes few and large.
+          this.scheduler.commit();
           await yieldDecodeTask();
           sliceStart = monotonicNow();
           slicePackets = 0;
         }
       }
-      if (generation === this.generation && epoch === this.epoch && this.eof && this.decodeIndex === this.packets.length && !this.renderEofSent) {
-        const tail = this.resamplerEpoch === epoch ? this.resampler.flush() : null;
-        const tailFrames = tail ? Math.floor(tail.length / this.track.channels) : 0;
-        if (tailFrames) {
-          this.sentFrames += tailFrames;
-          this.node.port.postMessage({ type: "data", epoch, format: "f32", data: tail.buffer, frames: tailFrames }, [tail.buffer]);
-        }
+      if (generation !== this.generation || epoch !== this.epoch) return;
+      if (this.eof && this.decodeIndex === this.packets.length && !this.renderEofSent) {
+        if (this.resamplerEpoch === epoch) this.scheduler.push(this.resampler.flush());
         this.renderEofSent = true;
-        this.node.port.postMessage({ type: "eof", epoch });
+        this.scheduler.finish();
         this.resolveStartup();
-      }
+      } else this.scheduler.commit();
     } catch (error) {
       if (generation === this.generation && epoch === this.epoch) this.fail(error);
     } finally {
@@ -825,29 +802,24 @@ export class AlacWorkletPlayer {
     return bytes.subarray(0, packet.length);
   }
 
-  handleWorkletMessage(message) {
-    if (message.epoch !== this.epoch) return;
-    this.consumedFrames = Math.max(this.consumedFrames, Number(message.consumedFrames) || 0);
-    if (message.type === "queued" || message.type === "need-data" || message.type === "position") {
-      if (message.type === "position" && this.track) this.onTime(Number(message.position) / this.outputSampleRate * 1000);
-      void this.drainPackets(this.generation);
-    } else if (message.type === "state") {
-      if (this.playing) this.onState(message.state);
-    } else if (message.type === "ended") {
-      this.ended = true;
-      this.playing = false;
-      this.onTime(this.duration);
-      this.onState("paused");
-      this.onEnded();
-    }
+  refill(generation) {
+    if (this.queuedFrames <= this.pcmQueueTargetFrames * REFILL_FRACTION) void this.drainPackets(generation);
+  }
+
+  handleEnded() {
+    this.ended = true;
+    this.playing = false;
+    this.onTime(this.duration);
+    this.onState("paused");
+    this.onEnded();
   }
 
   async play() {
-    if (!this.loaded || !this.node || !this.context) throw new Error("ALAC 音频尚未加载");
+    if (!this.loaded || !this.scheduler || !this.context) throw new Error("ALAC 音频尚未加载");
     const request = ++this.playRequest;
     if (this.ended) await this.seek(0);
     const generation = this.generation;
-    const node = this.node;
+    const scheduler = this.scheduler;
     let timer;
     try {
       await Promise.race([
@@ -859,10 +831,10 @@ export class AlacWorkletPlayer {
     } finally {
       clearTimeout(timer);
     }
-    if (generation !== this.generation || node !== this.node || request !== this.playRequest) throw new DOMException("ALAC 播放已取消", "AbortError");
+    if (generation !== this.generation || scheduler !== this.scheduler || request !== this.playRequest) throw new DOMException("ALAC 播放已取消", "AbortError");
     this.playing = true;
-    node.port.postMessage({ type: "play", epoch: this.epoch });
     this.onState("buffering");
+    scheduler.play();
     // A track can be loaded as a paused candidate while the document is
     // already hidden. Only actual playback opts into the larger PCM buffer.
     void this.drainPackets(generation);
@@ -871,20 +843,21 @@ export class AlacWorkletPlayer {
 
   pause() {
     this.playRequest += 1;
-    if (!this.node) return;
+    if (!this.scheduler) return;
     this.playing = false;
-    this.node.port.postMessage({ type: "pause", epoch: this.epoch });
+    this.scheduler.pause();
     this.onState("paused");
   }
 
   configureRenderer(position) {
-    this.node.port.postMessage({
-      type: "configure", epoch: ++this.epoch, channels: this.track.channels, bits: this.track.bits, position,
-      resumeFrames: Math.ceil(this.outputSampleRate * STARTUP_QUEUE_SECONDS),
-      rebufferFrames: Math.ceil(this.outputSampleRate * PCM_QUEUE_SECONDS),
-      lowWaterFrames: Math.ceil(this.outputSampleRate * 0.5),
-      reportFrames: Math.ceil(this.outputSampleRate * 0.1),
-    });
+    this.epoch += 1;
+    const scheduler = this.scheduler;
+    scheduler.startupFrames = Math.ceil(this.outputSampleRate * STARTUP_QUEUE_SECONDS);
+    // After an underrun, wait for a real cushion rather than alternating
+    // short bursts and silence; never more than the queue can hold.
+    const foreground = Math.min(this.outputSampleRate * PCM_QUEUE_SECONDS, this.pcmQueueTargetFrames || Infinity);
+    scheduler.rebufferFrames = Math.max(scheduler.startupFrames, Math.floor(foreground));
+    scheduler.reset(position);
   }
 
   selectPacketAtFrame(requested) {
@@ -910,8 +883,6 @@ export class AlacWorkletPlayer {
     this.decoder = new AlacDecoder(this.track.cookie);
     this.selectPacketAtFrame(requested);
     this.pendingSeekFrame = !this.eof && requested >= this.totalSourceFrames ? requested : null;
-    this.sentFrames = 0;
-    this.consumedFrames = 0;
     this.ended = false;
     this.renderEofSent = false;
     this.configureRenderer(Math.round(requested / this.track.sampleRate * this.outputSampleRate));
@@ -922,7 +893,7 @@ export class AlacWorkletPlayer {
     await this.drainPackets(generation);
     if (generation !== this.generation || epoch !== this.epoch) throw new DOMException("ALAC 跳转已取消", "AbortError");
     // A pause during the asynchronous Blob read wins over the earlier seek.
-    if (wasPlaying && this.playing) this.node.port.postMessage({ type: "play", epoch });
+    if (wasPlaying && this.playing) this.scheduler.play();
     return actualMs;
   }
 
@@ -955,7 +926,6 @@ export class AlacWorkletPlayer {
   stop() {
     this.playRequest += 1;
     this.generation += 1;
-    const renderEpoch = this.epoch;
     this.epoch += 1;
     this.removeVisibilityListener?.();
     this.removeVisibilityListener = null;
@@ -979,16 +949,10 @@ export class AlacWorkletPlayer {
     const reader = this.reader;
     this.reader = null;
     this.context = null;
-    if (this.node) {
-      this.node.port.onmessage = null;
-      // The reusable AudioContext outlives this node. Retire the processor
-      // with its own epoch before closing the port, so its PCM is released
-      // and process() stops keeping an unreachable worklet alive.
-      this.node.port.postMessage({ type: "dispose", epoch: renderEpoch });
-      this.node.disconnect();
-      this.node.port.close?.();
-    }
-    this.node = null;
+    // Stops every scheduled source and releases its PCM. The shared
+    // AudioContext outlives this deck.
+    this.scheduler?.dispose();
+    this.scheduler = null;
     // Retiring one deck must never close the context used by its successor.
     // Preserve requested gains across load(); callers set the next track's
     // normalization and initial fade before preparing a muted candidate.
@@ -1007,7 +971,7 @@ export class AlacWorkletPlayer {
     this.resampler = null;
     this.resamplerEpoch = null;
     this.loaded = this.playing = this.eof = this.ended = this.streamCompleteNotified = this.renderEofSent = false;
-    this.decodeIndex = this.totalSourceFrames = this.skipSourceFrames = this.sentFrames = this.consumedFrames = this.totalBytes = this.readBytes = this.expectedTotalBytes = 0;
+    this.decodeIndex = this.totalSourceFrames = this.skipSourceFrames = this.totalBytes = this.readBytes = this.expectedTotalBytes = 0;
     this.pendingSeekFrame = null;
     this.decoding = null;
     return Promise.allSettled([reader?.cancel()]);
@@ -1020,5 +984,5 @@ export class AlacWorkletPlayer {
   }
 }
 
-export function createAlacWorkletPlayer(options) { return new AlacWorkletPlayer(options); }
-export { canRequestAlacWorklet, canUseAlacWorklet };
+export function createAlacPlayer(options) { return new AlacPlayer(options); }
+export { canRequestAlacPlayback, canUseAlacPlayback };

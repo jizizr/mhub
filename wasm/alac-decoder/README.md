@@ -10,8 +10,8 @@ The streaming pipeline should perform these steps outside the module:
 1. Parse the ALAC sample entry and pass its 24-byte magic cookie to
    `new AlacDecoder(cookie)`.
 2. Extract one complete ALAC sample from each decrypted fMP4 fragment.
-3. Call `decodePacketF32(packet, output)` and transfer the written
-   `Float32Array` to an `AudioWorkletNode` ring buffer.
+3. Call `decodePacketF32(packet, output)` and copy the written
+   `Float32Array` into Web Audio buffers for playback.
 
 The Float32 method maps the decoder's left-aligned i32 samples to Web Audio's
 `[-1, 1)` range without changing the source ALAC file or its cache. Errors are
@@ -52,6 +52,5 @@ bulk-memory enabled for current Rust targets) and copies the optimized module
 to the frontend. If Binaryen is unavailable it keeps the valid release module
 and prints an install hint; the decoder API and output remain unchanged.
 
-The generated `.wasm` can be loaded from a dedicated Worker. Keep decoding out
-of the main UI thread; the AudioWorklet should only consume the transferred PCM
-blocks and handle its own bounded ring buffer/back-pressure.
+The generated `.wasm` can be loaded from a dedicated Worker or decoded in short
+slices on the main thread; keep the PCM queue bounded either way.

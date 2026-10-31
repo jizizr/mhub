@@ -7,7 +7,7 @@ function supportsNativeFlac() {
 
 // Android needs an actual native media player to own system playback controls.
 // Audio Session controls focus/category, not notification ownership; exposing
-// that optional API alone is not evidence that a worklet can play in the
+// that optional API alone is not evidence that Web Audio can play in the
 // background. Select the existing native lossless path;
 // this policy never changes the requested quality or a track's metadata.
 // Offline playback keeps access to already cached WASM packet streams.

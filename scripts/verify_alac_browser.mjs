@@ -1,6 +1,6 @@
 /**
  * Real browser regression for the Rust packet transport + WASM decoder +
- * AudioWorklet. Uses generated tones, no account or private audio data.
+ * scheduled Web Audio playback. Uses generated tones, no account or private audio data.
  *
  * Requires ffmpeg/ffprobe, cargo and Playwright. For a shared Playwright install:
  * PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs \
@@ -121,7 +121,7 @@ try {
   for (const fixture of fixtures) {
     const result = await page.evaluate(async (fixture) => {
       const { default: init, AlacDecoder } = await import("/src/wasm/alac-decoder/alac_decoder.js");
-      const { AlacWorkletPlayer } = await import("/src/core/player/alac-worklet.js");
+      const { AlacPlayer } = await import("/src/core/player/alac-player.js");
       await init();
       const source = new Uint8Array(await (await fetch(`/__fixtures/${fixture.name}.alacstream`)).arrayBuffer());
       const expected = new Int32Array(await (await fetch(`/__fixtures/${fixture.name}.pcm`)).arrayBuffer());
@@ -149,7 +149,7 @@ try {
       let timeMs = 0;
       let cacheBlobBytes = 0;
       const errors = [];
-      const player = new AlacWorkletPlayer({
+      const player = new AlacPlayer({
         onTime: (value) => { timeMs = value; },
         onEnded: finish,
         onError: (error) => { errors.push(String(error)); fail(error); },
@@ -171,20 +171,20 @@ try {
         }, 20);
         await player.play();
         let timeout;
-        await Promise.race([ended, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("AudioWorklet did not end")), 15000); })]);
+        await Promise.race([ended, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("playback did not end")), 15000); })]);
         clearTimeout(timeout);
         return { ...fixture, samples, expectedSamples: expected.length, packets, maxPcmError, startupMs, rms, timeMs, cacheBlobBytes, errors };
       } finally { clearInterval(meter); await player.destroy(); }
     }, fixture);
     assert.equal(result.maxPcmError, 0, `${fixture.name} differs from ffmpeg PCM`);
     assert.equal(result.samples, result.expectedSamples);
-    assert(result.rms > 0.05, `${fixture.name} worklet rendered silence`);
+    assert(result.rms > 0.05, `${fixture.name} player rendered silence`);
     assert(result.timeMs > 4100 && result.timeMs <= 4300, `${fixture.name} did not render full duration: ${result.timeMs}`);
     assert.deepEqual(result.errors, []);
     results.push(result);
   }
   const controls = await page.evaluate(async () => {
-    const { AlacWorkletPlayer } = await import("/src/core/player/alac-worklet.js");
+    const { AlacPlayer } = await import("/src/core/player/alac-player.js");
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const until = async (predicate, label) => {
       const start = performance.now();
@@ -196,7 +196,7 @@ try {
     let timeMs = 0;
     let ended = false;
     const errors = [];
-    const player = new AlacWorkletPlayer({
+    const player = new AlacPlayer({
       onTime: (value) => { timeMs = value; },
       onEnded: () => { ended = true; },
       onError: (error) => errors.push(String(error)),
@@ -245,7 +245,7 @@ try {
   assert.equal(controls.finalSampleRate, 48000);
   assert.deepEqual(controls.errors, []);
   const streamedSeek = await page.evaluate(async () => {
-    const { AlacWorkletPlayer } = await import("/src/core/player/alac-worklet.js");
+    const { AlacPlayer } = await import("/src/core/player/alac-player.js");
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const until = async (predicate, label) => {
       const start = performance.now();
@@ -260,7 +260,7 @@ try {
     let peakRms = 0;
     let meter;
     const errors = [];
-    const player = new AlacWorkletPlayer({
+    const player = new AlacPlayer({
       onTime: (value) => { timeMs = value; },
       onState: (value) => { state = value; },
       onError: (error) => errors.push(String(error)),
@@ -317,10 +317,10 @@ try {
   assert.equal(controlledRequests.get("streamed-seek"), 1, "seeking must not refetch the stream");
   assert.deepEqual(streamedSeek.errors, []);
   const interrupted = await page.evaluate(async () => {
-    const { AlacWorkletPlayer } = await import("/src/core/player/alac-worklet.js");
+    const { AlacPlayer } = await import("/src/core/player/alac-player.js");
     let errorReceived = false;
     let completeReceived = false;
-    const player = new AlacWorkletPlayer({
+    const player = new AlacPlayer({
       onError: () => { errorReceived = true; },
       onStreamComplete: () => { completeReceived = true; },
     });

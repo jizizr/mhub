@@ -17,8 +17,8 @@ export class AlacDecoder {
      * Decode one complete ALAC packet into interleaved normalized Float32 PCM.
      *
      * Values are in the range expected by Web Audio (`[-1, 1)`).  The
-     * conversion happens in Rust so an AudioWorklet only has to copy the
-     * transferred Float32Array into its ring buffer.
+     * conversion happens in Rust so JavaScript only has to copy the
+     * Float32Array into Web Audio buffers.
      */
     decodePacketF32(packet: Uint8Array, output: Float32Array): number;
     /**

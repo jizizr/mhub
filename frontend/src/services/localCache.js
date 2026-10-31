@@ -38,7 +38,7 @@ export function cacheKey(task) {
   const base = [task.platform, identity, task.quality].filter(Boolean).join(":");
   if (!base) return "";
 
-  // A Lossless task may now use the packet based WASM/AudioWorklet transport,
+  // A Lossless task may now use the packet based WASM transport,
   // while the same track can still be cached as the legacy FLAC/fMP4 object.
   // Keep those representations in separate entries.  Omitting the suffix for
   // ordinary tasks preserves compatibility with caches written by v1.

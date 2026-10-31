@@ -4,7 +4,7 @@
 //! supplies the ALAC magic cookie once and then passes one complete ALAC audio
 //! packet per call.  This makes it suitable for a fetch/worker pipeline that
 //! receives encrypted fMP4 fragments from the backend and extracts samples
-//! before handing PCM to an `AudioWorklet`.
+//! before handing PCM to Web Audio.
 
 use alac::{Decoder, StreamInfo};
 use wasm_bindgen::prelude::*;
@@ -110,8 +110,8 @@ impl AlacDecoder {
     /// Decode one complete ALAC packet into interleaved normalized Float32 PCM.
     ///
     /// Values are in the range expected by Web Audio (`[-1, 1)`).  The
-    /// conversion happens in Rust so an AudioWorklet only has to copy the
-    /// transferred Float32Array into its ring buffer.
+    /// conversion happens in Rust so JavaScript only has to copy the
+    /// Float32Array into Web Audio buffers.
     #[wasm_bindgen(js_name = decodePacketF32)]
     pub fn decode_packet_f32(
         &mut self,

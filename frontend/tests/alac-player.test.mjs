@@ -1,42 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import vm from "node:vm";
+import { FakeContext } from "./helpers/fake-audio.mjs";
 
-// Exercise the real transport and real render processor. Only the codec is
-// stubbed here; the separate ALAC fixture test validates real WASM samples.
-let Processor;
-class ProcessorBase {
-  constructor() { this.port = { postMessage: (message) => this.emit?.(message), close() { this.closed = true; } }; }
-}
-vm.runInNewContext(await readFile(new URL("../src/core/player/alac-processor.js", import.meta.url), "utf8"), {
-  AudioWorkletProcessor: ProcessorBase, ArrayBuffer, Float32Array, Uint8Array,
-  registerProcessor(_name, constructor) { Processor = constructor; },
-});
-class Context {
-  constructor({ sampleRate = 48000 } = {}) { this.sampleRate = sampleRate; this.destination = {}; this.currentTime = 0; }
+// Exercise the real transport and the real PCM scheduler on a fake audio
+// graph. Only the codec is stubbed; the separate ALAC fixture test validates
+// real WASM samples.
+class Context extends FakeContext {
+  constructor({ sampleRate = 48000 } = {}) { super({ sampleRate, baseLatency: 0.01 }); }
+  // Support detection must not touch prototype accessors.
   get audioWorklet() {
     if (this === Context.prototype) throw new TypeError("Illegal invocation");
-    return { addModule: async () => {} };
-  }
-  createGain() {
-    return { gain: { value: 1, cancelScheduledValues() {}, setValueAtTime(value) { this.value = value; }, setTargetAtTime(value) { this.value = value; }, linearRampToValueAtTime(value) { this.value = value; } }, connect() {}, disconnect() {} };
-  }
-  async resume() {}
-  async close() { this.closed = true; }
-}
-class WorkletNode {
-  constructor() {
-    this.processor = new Processor();
-    this.port = { onmessage: null, postMessage: (message) => queueMicrotask(() => this.processor.handleMessage(message)), close() { this.closed = true; } };
-    this.processor.emit = (data) => queueMicrotask(() => this.port.onmessage?.({ data }));
-  }
-  connect(gain) { return gain; }
-  disconnect() {}
-  render(frames = 128) {
-    const output = [new Float32Array(frames), new Float32Array(frames)];
-    this.processor.process([], [output]);
-    return output;
+    throw new Error("the player must never load an AudioWorklet");
   }
 }
 class Decoder {
@@ -50,14 +25,37 @@ class Decoder {
   free() {}
 }
 globalThis.window = { AudioContext: Context };
-globalThis.AudioWorkletNode = WorkletNode;
 globalThis.__alacTestDecoder = Decoder;
-const source = (await readFile(new URL("../src/core/player/alac-worklet.js", import.meta.url), "utf8"))
-  .replace('import processorUrl from "./alac-processor.js?url";', 'const processorUrl = "test:processor";')
+const source = (await readFile(new URL("../src/core/player/alac-player.js", import.meta.url), "utf8"))
   .replace('from "./audio-output.js";', `from ${JSON.stringify(new URL("../src/core/player/audio-output.js", import.meta.url).href)};`)
   .replace('from "./alac-support.js";', `from ${JSON.stringify(new URL("../src/core/player/alac-support.js", import.meta.url).href)};`)
+  .replace('from "./pcm-scheduler.js";', `from ${JSON.stringify(new URL("../src/core/player/pcm-scheduler.js", import.meta.url).href)};`)
   .replace('import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.js";', 'const initAlacWasm = async () => {}; const AlacDecoder = globalThis.__alacTestDecoder;');
-const { AlacWorkletPlayer, createStreamResampler } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const { AlacPlayer, createStreamResampler } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+// Stop every player after its test so no scheduler pump keeps Node alive.
+const players = new Set();
+const load = AlacPlayer.prototype.load;
+AlacPlayer.prototype.load = function (...args) { players.add(this); return load.apply(this, args); };
+test.afterEach(async () => { await Promise.all([...players].map((player) => player.stop())); players.clear(); });
+
+// Advance the render clock by output frames and let the scheduler react.
+function render(player, frames = 128) {
+  player.context.advance(frames / player.outputSampleRate);
+  player.scheduler?.check();
+}
+// Move the clock to the scheduled start of audible output.
+function startAudio(player) {
+  const scheduler = player.scheduler;
+  if (scheduler?.running && player.context.currentTime < scheduler.anchorTime) {
+    player.context.advance(scheduler.anchorTime - player.context.currentTime);
+  }
+  scheduler?.check();
+}
+// The first sample a listener hears from the current start, or 0 when silent.
+function firstSample(player) {
+  const scheduler = player.scheduler;
+  return scheduler?.running ? player.context.sampleAt(scheduler.anchorContextFrame) : 0;
+}
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function until(predicate) {
   for (let i = 0; i < 100; i += 1) { if (predicate()) return; await tick(); }
@@ -87,7 +85,7 @@ function mockFetch(bytes = fixture()) {
 }
 async function ready(options = {}) {
   mockFetch();
-  const player = new AlacWorkletPlayer(options);
+  const player = new AlacPlayer(options);
   await player.load("test:alac");
   await until(() => player.eof);
   await tick();
@@ -112,7 +110,7 @@ function visibilityFixture(t, initial = "visible") {
 
 async function longReady(t, sampleRate = 48000, outputRate = sampleRate) {
   mockFetch(fixture(1000, sampleRate));
-  const player = new AlacWorkletPlayer();
+  const player = new AlacPlayer();
   player.prepare(outputRate);
   // Normally the app requests at most 192 kHz. Simulate a different device
   // output rate to exercise the defensive PCM byte ceiling as well.
@@ -157,9 +155,9 @@ test("returning foreground keeps existing PCM then resumes its two-second refill
   visibility.change("visible"); await tick();
   assert.equal(player.queuedFrames, buffered, "returning to the page must not flush buffered music");
   assert.equal(player.decodeIndex, decoded);
-  player.node.render(48000); await tick();
+  startAudio(player); render(player, 48000); await tick();
   assert.equal(player.decodeIndex, decoded, "the larger queue is consumed without maintaining its hidden target");
-  player.node.render(player.node.processor.pendingFrames - 48000); await tick();
+  render(player, player.queuedFrames - 48000); await tick();
   await until(() => player.queuedFrames >= 48000 * 2 && player.decoding === null);
   assert.ok(player.queuedFrames < 48000 * 2 + 4096);
 });
@@ -183,9 +181,11 @@ test("Hi-Res background PCM stays below twenty-four MiB including the final whol
   for (let index = 0; index < 4; index += 1) {
     // A partial first packet retains its consumed samples until fully read.
     // Include those real ArrayBuffer allocations when checking the limit.
-    higherRate.node.render(4097); await tick();
+    startAudio(higherRate); render(higherRate, 4097); await tick();
     await until(() => higherRate.decoding === null);
-    const allocated = higherRate.node.processor.queue.reduce((total, item) => total + item.floats.byteLength, 0);
+    const scheduler = higherRate.scheduler;
+    const allocated = scheduler.blocks.reduce((total, block) => total + block.buffer.length * 2 * Float32Array.BYTES_PER_ELEMENT, 0) +
+      scheduler.pendingFrames * 2 * Float32Array.BYTES_PER_ELEMENT;
     assert.ok(allocated <= 24 * 1024 * 1024);
   }
   assert.ok(higherRate.queuedFrames < higherRate.outputSampleRate * 15);
@@ -208,7 +208,7 @@ test("pause interrupts background refill slices and stopped listeners cannot dec
   assert.equal(expandedPackets, 3);
   assert.equal(player.playing, false);
   player.context.state = "interrupted";
-  player.handleWorkletMessage({ type: "need-data", epoch: player.epoch, consumedFrames: player.consumedFrames });
+  player.refill(player.generation);
   visibility.change("visible"); visibility.change("hidden"); await tick();
   assert.equal(expandedPackets, 3, "an explicit pause still wins if the context is interrupted");
   const staleListener = [...visibility.listeners][0];
@@ -232,7 +232,7 @@ async function downloading(options = {}) {
       start(controller) { transport = controller; controller.enqueue(bytes.slice(0, sent)); },
     }), { headers: { "content-length": String(bytes.length) } });
   };
-  const player = new AlacWorkletPlayer(options);
+  const player = new AlacPlayer(options);
   await player.load("test:downloading");
   await tick();
   return { player, bytes, requests: () => requests,
@@ -245,7 +245,7 @@ async function downloading(options = {}) {
 }
 
 test("browser support detection does not invoke AudioContext prototype accessors", () => {
-  assert.equal(AlacWorkletPlayer.isSupported(), true);
+  assert.equal(AlacPlayer.isSupported(), true);
 });
 
 test("paused transport reaches EOF without decoding the entire song or refetching", async () => {
@@ -271,13 +271,13 @@ test("seek selects exact frame and stays paused until play", async () => {
   const actual = await player.seek(frame / 48);
   assert.ok(Math.abs(actual - frame / 48) < 1 / 48);
   await tick();
-  assert.equal(player.node.render()[0][0], 0);
-  assert.equal(player.node.processor.position, frame);
+  assert.equal(firstSample(player), 0);
+  assert.equal(player.scheduler.position, frame);
   assert.equal(player.playing, false);
   await player.play();
   await tick();
-  assert.equal(player.node.render()[0][0], Math.fround(0.03));
-  await tick();
+  assert.equal(firstSample(player), Math.fround(0.03));
+  startAudio(player); render(player); await tick();
   assert.equal(states.at(-1), "playing");
   assert.ok(positions.at(-1) > actual);
   await player.stop();
@@ -294,8 +294,9 @@ test("downloaded-prefix seek uses packet samples before EOF without another fetc
   assert.ok(Math.abs(await player.seek(target) - target) < 1 / 48);
   assert.equal(player.seekPending, false);
   await player.play(); await tick();
-  assert.equal(player.node.render()[0][0], Math.fround(0.02));
-  assert.equal(player.node.processor.position, 4096 + 123 + 128);
+  assert.equal(firstSample(player), Math.fround(0.02));
+  startAudio(player); render(player);
+  assert.equal(player.scheduler.position, 4096 + 123 + 128);
   assert.equal(h.requests(), 1);
   await player.stop();
 });
@@ -306,24 +307,26 @@ test("a forward seek waits at the target then renders before EOF and keeps one e
   const completed = [];
   const h = await downloading({ onTime: (time) => positions.push(time), onState: (state) => states.push(state), onStreamComplete: (result) => completed.push(result) });
   const player = h.player;
-  await player.play(); await tick(); player.node.render(); await tick();
-  const oldEpoch = player.epoch;
+  await player.play(); await tick(); startAudio(player); render(player); await tick();
+  const oldSources = player.scheduler.sources.map((entry) => entry.source);
+  assert.ok(oldSources.length > 0);
   assert.equal(await player.seek(3000), 3000);
   await tick();
   assert.equal(player.seekPending, true);
-  assert.equal(player.node.render()[0][0], 0);
-  assert.equal(player.node.processor.position, 144000);
+  assert.equal(firstSample(player), 0);
+  assert.equal(player.scheduler.position, 144000);
   assert.equal(states.at(-1), "buffering");
-  player.handleWorkletMessage({ type: "position", epoch: oldEpoch, position: 128, consumedFrames: 128 });
-  assert.equal(positions.at(-1), 3000);
+  assert.ok(oldSources.every((item) => item.stopTime <= player.context.currentTime), "the old position stops sounding");
+  render(player, 4800);
+  assert.equal(positions.at(-1), 3000, "a waiting seek target has no fake progress");
   h.advanceTo(20); await until(() => player.packets.length === 20);
-  assert.equal(player.node.render()[0][0], 0);
-  assert.equal(player.node.processor.position, 144000);
+  assert.equal(firstSample(player), 0);
+  assert.equal(player.scheduler.position, 144000);
   h.advanceTo(48); await until(() => !player.seekPending); await tick();
   assert.equal(player.eof, false);
   assert.equal(completed.length, 0);
-  assert.equal(player.node.render()[0][0], Math.fround(0.36));
-  await tick();
+  assert.equal(firstSample(player), Math.fround(0.36));
+  startAudio(player); render(player); await tick();
   assert.equal(states.at(-1), "playing");
   assert.ok(positions.at(-1) > 3000);
   h.finish(); await until(() => player.eof); await tick();
@@ -340,15 +343,14 @@ test("the latest seek replaces a pending forward target and later packets cannot
   const player = h.player;
   await player.play(); await tick();
   await player.seek(4000);
-  const supersededEpoch = player.epoch;
   const target = 4096 / 48;
   await player.seek(target); await tick();
   assert.equal(player.seekPending, false);
-  assert.equal(player.node.render()[0][0], Math.fround(0.02));
+  assert.equal(firstSample(player), Math.fround(0.02));
   h.advanceTo(55); await until(() => player.packets.length === 55); await tick();
-  player.handleWorkletMessage({ type: "position", epoch: supersededEpoch, position: 192000 });
+  startAudio(player); render(player);
   assert.ok(positions.at(-1) < 1000);
-  assert.ok(player.node.processor.position < 48000);
+  assert.ok(player.scheduler.position < 48000);
   await player.stop();
 });
 
@@ -361,13 +363,13 @@ test("pausing a pending seek lets download finish without silently resuming", as
   player.pause(); await tick();
   h.advanceTo(48); await until(() => !player.seekPending); await tick();
   assert.equal(player.playing, false);
-  assert.equal(player.node.render()[0][0], 0);
+  assert.equal(firstSample(player), 0);
   assert.equal(positions.at(-1), 3000);
   h.finish(); await until(() => player.eof); await tick();
-  assert.equal(player.node.render()[0][0], 0);
+  assert.equal(firstSample(player), 0);
   assert.deepEqual(new Uint8Array(await player.completeBlob.arrayBuffer()), h.bytes);
   await player.play(); await tick();
-  assert.equal(player.node.render()[0][0], Math.fround(0.36));
+  assert.equal(firstSample(player), Math.fround(0.36));
   await player.stop();
 });
 
@@ -379,12 +381,12 @@ test("a forward target beyond real EOF clamps to the real end and can restart", 
   await player.play(); await tick();
   await player.seek(10000);
   h.finish(); await until(() => player.eof); await tick();
-  player.node.render(); await tick();
+  render(player); await tick();
   assert.equal(player.seekPending, false);
   assert.equal(positions.at(-1), 5120);
   assert.equal(ended, 1);
   await player.play(); await tick();
-  assert.equal(player.node.render()[0][0], Math.fround(0.01));
+  assert.equal(firstSample(player), Math.fround(0.01));
   await player.stop();
 });
 
@@ -393,14 +395,15 @@ test("changing tracks clears a pending seek without applying it to the successor
   const player = h.player;
   await player.play(); await tick();
   await player.seek(3000);
-  const staleEpoch = player.epoch;
+  const staleScheduler = player.scheduler;
   mockFetch();
   await player.load("test:successor"); await until(() => player.eof); await tick();
   assert.equal(player.seekPending, false);
-  player.handleWorkletMessage({ type: "position", epoch: staleEpoch, position: 144000 });
+  assert.equal(staleScheduler.disposed, true);
   await player.play(); await tick();
-  assert.equal(player.node.render()[0][0], Math.fround(0.01));
-  assert.equal(player.node.processor.position, 128);
+  assert.equal(firstSample(player), Math.fround(0.01));
+  startAudio(player); render(player);
+  assert.equal(player.scheduler.position, 128);
   await player.stop();
 });
 
@@ -408,11 +411,9 @@ test("backward seek resets position reports and stale epoch messages cannot rewi
   const positions = [];
   const player = await ready({ onTime: (p) => positions.push(p) });
   await player.seek(2000);
-  const oldEpoch = player.epoch;
   await player.seek(0);
-  player.handleWorkletMessage({ type: "position", epoch: oldEpoch, position: 96000, consumedFrames: 96000 });
   assert.equal(positions.at(-1), 0);
-  await player.play(); await tick(); player.node.render(); await tick();
+  await player.play(); await tick(); startAudio(player); render(player); await tick();
   assert.ok(positions.at(-1) > 0 && positions.at(-1) < 10);
   await player.stop();
 });
@@ -429,8 +430,8 @@ test("pause during seek and rapid consecutive seeks cannot resume stale audio", 
   assert.equal(result[1].status, "fulfilled");
   await tick();
   assert.equal(player.playing, false);
-  assert.equal(player.node.render()[0][0], 0);
-  assert.equal(player.node.processor.position, 72000);
+  assert.equal(firstSample(player), 0);
+  assert.equal(player.scheduler.position, 72000);
   await player.stop();
 });
 
@@ -444,8 +445,8 @@ test("pause wins over a pending AudioContext resume", async () => {
   await assert.rejects(playing, { name: "AbortError" });
   await tick();
   assert.equal(player.playing, false);
-  assert.equal(player.node.render()[0][0], 0);
-  player.context.resume = async () => {};
+  assert.equal(firstSample(player), 0);
+  delete player.context.resume;
   await player.stop();
 });
 
@@ -453,12 +454,12 @@ test("end fires exactly once after all decoded packets, and play restarts cached
   let ended = 0;
   const player = await ready({ onEnded: () => ended += 1 });
   await player.seek(player.duration - 12);
-  await player.play(); await tick();
-  for (let i = 0; i < 12; i += 1) { player.node.render(); await tick(); }
+  await player.play(); await tick(); startAudio(player);
+  for (let i = 0; i < 12; i += 1) { render(player); await tick(); }
   assert.equal(ended, 1);
   assert.equal(player.ended, true);
   await player.play(); await tick();
-  assert.equal(player.node.render()[0][0], Math.fround(0.01));
+  assert.equal(firstSample(player), Math.fround(0.01));
   await tick();
   assert.equal(ended, 1);
   assert.equal(player.ended, false);
@@ -468,41 +469,26 @@ test("end fires exactly once after all decoded packets, and play restarts cached
 test("full playback drains compressed backlog without truncating at transport EOF", async () => {
   let ended = 0;
   const player = await ready({ onEnded: () => ended += 1 });
-  await player.play(); await tick();
-  for (let i = 0; i < 1300 && !ended; i += 1) { player.node.render(); await tick(); }
+  await player.play(); await tick(); startAudio(player);
+  for (let i = 0; i < 1300 && !ended; i += 1) { render(player); await tick(); }
   assert.equal(ended, 1);
-  assert.equal(player.node.processor.position, 40 * 4096);
+  assert.equal(player.scheduler.position, 40 * 4096);
   assert.equal(player.decodeIndex, 40);
   assert.equal(player.queuedFrames, 0);
   await player.stop();
 });
 
-test("stalled rendering freezes position and transitions back to playing only on real PCM", async () => {
-  const states = [];
-  const processor = new Processor();
-  processor.emit = (message) => { if (message.type === "state") states.push(message.state); };
-  processor.handleMessage({ type: "configure", epoch: 1, channels: 2 });
-  processor.handleMessage({ type: "play", epoch: 1 });
-  processor.process([], [[new Float32Array(128), new Float32Array(128)]]);
-  assert.equal(processor.position, 0);
-  assert.equal(states.at(-1), "buffering");
-  processor.handleMessage({ type: "data", epoch: 1, format: "f32", frames: 256, data: new Float32Array(512).fill(0.25).buffer });
-  processor.process([], [[new Float32Array(128), new Float32Array(128)]]);
-  assert.equal(processor.position, 128);
-  assert.equal(states.at(-1), "playing");
-});
-
 test("a delayed old fetch cannot tear down the next loaded track", async () => {
   let resolveOld;
   globalThis.fetch = () => new Promise((resolve) => { resolveOld = resolve; });
-  const player = new AlacWorkletPlayer();
+  const player = new AlacPlayer();
   const oldLoad = player.load("test:old");
   mockFetch();
   await player.load("test:new"); await until(() => player.eof);
-  const currentNode = player.node;
+  const current = player.scheduler;
   resolveOld(new Response(fixture()));
   await assert.rejects(oldLoad, { name: "AbortError" });
-  assert.equal(player.node, currentNode);
+  assert.equal(player.scheduler, current);
   assert.equal(player.loaded, true);
   assert.equal(player.canSeek, true);
   await player.stop();
@@ -514,15 +500,15 @@ test("a slow old reader cancellation cannot block or detach a newer track", asyn
     start(controller) { controller.enqueue(fixture().slice(0, 48 + 2 * 13)); },
     cancel() { return new Promise((resolve) => { finishCancel = resolve; }); },
   }));
-  const player = new AlacWorkletPlayer();
+  const player = new AlacPlayer();
   const oldResult = player.load("test:slow-reader").then(() => null, (error) => error);
   await until(() => player.track);
   mockFetch();
   await player.load("test:new"); await until(() => player.eof);
-  const currentNode = player.node;
+  const current = player.scheduler;
   assert.equal((await oldResult).name, "AbortError");
   finishCancel(); await tick();
-  assert.equal(player.node, currentNode);
+  assert.equal(player.scheduler, current);
   assert.equal(player.loaded, true);
   await player.stop();
 });
@@ -531,7 +517,7 @@ test("truncated packet streams never become a complete cache and invalidate the 
   let complete = 0;
   const errors = [];
   mockFetch(fixture().slice(0, -1));
-  const player = new AlacWorkletPlayer({ onStreamComplete: () => complete += 1, onError: (e) => errors.push(e) });
+  const player = new AlacPlayer({ onStreamComplete: () => complete += 1, onError: (e) => errors.push(e) });
   await player.load("test:truncated").catch(() => {});
   await until(() => errors.length > 0);
   assert.equal(complete, 0);
@@ -541,7 +527,7 @@ test("truncated packet streams never become a complete cache and invalidate the 
 });
 
 test("an unlocked Hi-Res context survives cold loads and automatic track changes", async () => {
-  const player = new AlacWorkletPlayer();
+  const player = new AlacPlayer();
   player.prepare(192000);
   const context = player.preparedContext;
   mockFetch(fixture(100, 96000));
@@ -552,7 +538,7 @@ test("an unlocked Hi-Res context survives cold loads and automatic track changes
   assert.ok(player.queuedFrames >= 96000, "Hi-Res startup uses half a second, not 24k frames");
   assert.ok(player.queuedFrames <= 192000 * 2 + 8192);
   await tick();
-  assert.equal(player.node.processor.rebufferFrames, 192000 * 2);
+  assert.equal(player.scheduler.rebufferFrames, 192000 * 2);
   await player.stop();
   assert.equal(context.closed, undefined, "queue changes retain the unlocked context");
   await player.load("test:second");
@@ -581,8 +567,8 @@ test("preparing a different quality retains active output and reuses the matchin
 
 test("a prepared ALAC successor shares authorization, keeps its independent gains and survives retiring the old deck", async () => {
   mockFetch();
-  const first = new AlacWorkletPlayer();
-  const second = new AlacWorkletPlayer();
+  const first = new AlacPlayer();
+  const second = new AlacPlayer();
   first.prepare(48000); second.prepare(48000);
   assert.equal(first.preparedContext, second.preparedContext);
   second.setVolume(0.4);
@@ -598,7 +584,7 @@ test("a prepared ALAC successor shares authorization, keeps its independent gain
   await first.destroy();
   assert.equal(context.closed, undefined);
   await second.play(); await tick();
-  assert.equal(second.node.render()[0][0], Math.fround(0.01));
+  assert.equal(firstSample(second), Math.fround(0.01));
   second.cancelFade(1);
   await second.load("blob:third");
   assert.equal(second.getFadeLevel(), 1);
@@ -616,128 +602,35 @@ test("a blocked resume times out without losing packets and a later user retry p
   assert.equal(player.loaded, true);
   assert.equal(player.completeBlob, blob);
   assert.equal(player.playing, false);
-  player.context.resume = async () => {};
+  delete player.context.resume;
   await player.play(); await tick();
-  assert.equal(player.node.render()[0][0], Math.fround(0.01));
+  assert.equal(firstSample(player), Math.fround(0.01));
   await player.destroy();
 });
 
-test("underrun recovery waits for a cushion but always renders a short EOF tail", () => {
-  const processor = new Processor();
-  processor.handleMessage({ type: "configure", epoch: 1, channels: 2, resumeFrames: 512, lowWaterFrames: 256 });
-  const add = (frames) => processor.handleMessage({ type: "data", epoch: 1, format: "f32", frames, data: new Float32Array(frames * 2).fill(0.25).buffer });
-  const render = () => processor.process([], [[new Float32Array(128), new Float32Array(128)]]);
-  processor.handleMessage({ type: "play", epoch: 1 });
-  add(128); render();
-  assert.equal(processor.position, 0);
-  add(512);
-  for (let i = 0; i < 5; i += 1) render();
-  assert.equal(processor.position, 640);
-  add(128); render();
-  assert.equal(processor.position, 640, "one packet must not repeatedly resume and stutter");
-  processor.handleMessage({ type: "eof", epoch: 1 }); render();
-  assert.equal(processor.position, 768);
-  assert.equal(processor.ended, true);
-});
-
-test("mid-song underruns ramp out and back in instead of stepping to silence", () => {
-  const processor = new Processor();
-  processor.handleMessage({ type: "configure", epoch: 1, channels: 2, resumeFrames: 128, rebufferFrames: 256, lowWaterFrames: 64 });
-  const add = (frames) => processor.handleMessage({ type: "data", epoch: 1, format: "f32", frames, data: new Float32Array(frames * 2).fill(0.5).buffer });
-  const render = () => { const output = [new Float32Array(128), new Float32Array(128)]; processor.process([], [output]); return output[0]; };
-  processor.handleMessage({ type: "play", epoch: 1 });
-  add(256);
-  assert.equal(render()[0], 0.5, "a track start keeps its exact first sample");
-  const dry = render();
-  assert.equal(dry[0], 0.5);
-  assert.equal(dry[127], 0, "the last frame before an underrun reaches silence");
-  assert.ok(dry[100] > 0 && dry[100] < 0.5);
-  add(256);
-  const resumed = render();
-  assert.ok(resumed[0] > 0 && resumed[0] < 0.05, "recovery starts near silence");
-  assert.equal(resumed[127], 0.5);
-  assert.equal(processor.position, 384, "ramps never drop or repeat frames");
-});
-
-test("queue changes retire worklets and release their PCM while preserving the authorized context", async () => {
-  const player = new AlacWorkletPlayer();
+test("queue changes retire schedulers and release their PCM while preserving the authorized context", async () => {
+  const player = new AlacPlayer();
   player.prepare(192000);
   const context = player.preparedContext;
   mockFetch(fixture(100, 96000));
-  const retired = [];
   for (let index = 0; index < 12; index += 1) {
     await player.load(`test:track-${index}`); await until(() => player.eof); await tick();
-    const node = player.node;
-    const epoch = player.epoch;
-    assert.ok(node.processor.pendingFrames > 0);
-    assert.equal(node.processor.epoch, epoch);
+    const scheduler = player.scheduler;
+    assert.ok(scheduler.blocks.length > 0);
     await player.play(); await tick();
+    const sources = scheduler.sources.map((entry) => entry.source);
+    assert.ok(sources.length > 0);
     await player.stop(); await tick();
-    assert.equal(node.processor.disposed, true, "dispose must use the retired node's epoch");
-    assert.equal(node.processor.pendingFrames, 0);
-    assert.equal(node.processor.queue.length, 0);
-    assert.equal(node.processor.port.closed, true);
-    assert.equal(node.port.closed, true);
-    assert.equal(node.processor.process([], [[new Float32Array(128)]]), false, "retired processors must relinquish their worklet lifetime");
-    node.processor.handleMessage({ type: "configure", epoch: epoch + 1, channels: 2 });
-    assert.equal(node.processor.disposed, true, "late messages cannot resurrect a retired processor");
+    assert.equal(scheduler.disposed, true);
+    assert.equal(scheduler.blocks.length, 0, "retired decks release their PCM");
+    assert.equal(scheduler.gate.outputs.size, 0);
+    assert.ok(sources.every((item) => item.stopTime <= context.currentTime), "nothing keeps sounding after a queue change");
     assert.equal(player.preparedContext, context);
     assert.equal(context.closed, undefined);
-    retired.push(node);
   }
-  assert.ok(retired.every((node) => node.processor.queue.length === 0 && node.processor.disposed));
   await player.destroy();
   assert.equal(context.closed, undefined);
 });
-
-test("sustained half-rate delivery waits for two seconds after each underrun without fake progress", () => {
-  const processor = new Processor();
-  const sampleRate = 192000;
-  processor.handleMessage({ type: "configure", epoch: 1, channels: 2,
-    resumeFrames: sampleRate / 2, rebufferFrames: sampleRate * 2, lowWaterFrames: sampleRate / 2 });
-  const add = (frames) => processor.handleMessage({ type: "data", epoch: 1, format: "f32", frames, data: new Float32Array(frames * 2).fill(0.25).buffer });
-  const render = (frames) => {
-    const output = [new Float32Array(frames), new Float32Array(frames)];
-    processor.process([], [output]);
-    return output;
-  };
-  processor.handleMessage({ type: "play", epoch: 1 });
-  add(sampleRate / 2);
-  assert.equal(render(sampleRate / 2)[0][0], 0.25, "first startup still needs only half a second");
-  assert.equal(processor.needsBuffer, true);
-  assert.equal(processor.bufferTargetFrames, sampleRate * 2);
-  let recoveries = 0;
-  let frozenTicks = 0;
-  // Each 250 ms rendering interval receives only 125 ms of audio. This is
-  // sustained insufficient throughput, not just one transient network gap.
-  for (let interval = 0; interval < 80; interval += 1) {
-    add(sampleRate / 8);
-    const position = processor.position;
-    const waiting = processor.needsBuffer;
-    const pending = processor.pendingFrames;
-    const output = render(sampleRate / 4);
-    if (waiting && pending < sampleRate * 2) {
-      assert.equal(processor.position, position);
-      assert.ok(output[0].every((sample) => sample === 0));
-      frozenTicks += 1;
-    } else if (waiting) {
-      assert.ok(pending >= sampleRate * 2);
-      assert.ok(processor.position > position);
-      recoveries += 1;
-    }
-  }
-  assert.ok(recoveries >= 3, "exercise repeated underrun/recovery cycles");
-  assert.ok(frozenTicks >= 30, "all waiting intervals must keep a frozen playback clock");
-  render(processor.pendingFrames);
-  assert.equal(processor.needsBuffer, true);
-  const tailStart = processor.position;
-  add(sampleRate / 8);
-  processor.handleMessage({ type: "eof", epoch: 1 });
-  render(sampleRate / 4);
-  assert.equal(processor.position - tailStart, sampleRate / 8);
-  assert.equal(processor.ended, true, "a short EOF tail bypasses the rebuffer threshold");
-});
-
 const taskId = 'applemusic--12345--hires';
 const sourceRevision = 'a'.repeat(32);
 const streamingSource = `https://app.example.test/api/v1/playbacks/${taskId}/audio/stream?v=${taskId}&rev=${sourceRevision}`;
@@ -789,7 +682,7 @@ async function rangeHarness({ responseKind = 'valid', pendingRange = false, manu
     };
     return pendingRange ? new Promise((resolve) => { finishRange = () => resolve(response()); }) : response();
   };
-  const player = new AlacWorkletPlayer({ onStreamComplete: () => { completed += 1; } });
+  const player = new AlacPlayer({ onStreamComplete: () => { completed += 1; } });
   await player.load(initialUrl, { trustedMediaOrigins, waitForCompletedSource: ({ signal }) => {
     monitorSignal = signal;
     return new Promise((resolve) => { notify = () => resolve(completionUrl); });
@@ -1067,7 +960,7 @@ for (const sourceKind of ['completed', 'blob', 'legacy-server', 'compressed']) {
       ...(sourceKind === 'compressed' ? { 'content-encoding': 'gzip', 'content-length': '99' } : {}),
     } }); };
     let monitors = 0;
-    const player = new AlacWorkletPlayer();
+    const player = new AlacPlayer();
     await player.load(sourceKind === 'blob' ? 'blob:local' : streamingSource, { completed: sourceKind === 'completed', waitForCompletedSource: () => { monitors += 1; } });
     await until(() => player.eof);
     assert.equal(monitors, 0);

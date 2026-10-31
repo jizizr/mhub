@@ -231,3 +231,18 @@ test("a context that cannot resume outside a gesture falls back to a running one
   assert.equal(low.state, "suspended");
   assert.equal(await h.acquireOutputContext(44100, [high]), high, "playback continues at 192 kHz instead of stalling");
 });
+
+test("a retired context is closed and replaced; one bound to a native element is only forgotten", async () => {
+  const h = await harness();
+  const drifted = h.prepareOutput("high");
+  assert.equal(h.retireOutputContext(drifted), true);
+  assert.equal(drifted.closes, 1);
+  const fresh = h.prepareOutput("high");
+  assert.notEqual(fresh, drifted);
+  assert.equal(fresh.sampleRate, 48000);
+  h.createNativeOutput({ volume: 1 });
+  assert.equal(h.retireOutputContext(fresh), true);
+  assert.equal(fresh.closes, 0);
+  assert.notEqual(h.prepareOutput("high"), fresh);
+  assert.equal(h.retireOutputContext(fresh), false);
+});

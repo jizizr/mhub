@@ -1,5 +1,5 @@
 /**
- * Real native + WASM/AudioWorklet background lifecycle/Media Session checks.
+ * Real native + WASM/Web Audio background lifecycle/Media Session checks.
  * Uses synthetic local audio and actual production modules. Context suspension
  * and page lifecycle events are deterministic simulations, NOT an assertion
  * that a desktop browser emulates a locked physical iOS/Android device.
@@ -40,7 +40,7 @@ import * as player from './src/core/player/index.js';
 import { prepareOutput, preparePlaybackSession, createNativeOutput } from './src/core/player/audio-output.js';
 import { createPlaybackLifecycle } from './src/core/player/playback-lifecycle.js';
 import { createMediaSessionController } from './src/core/player/media-session.js';
-import { AlacWorkletPlayer } from './src/core/player/alac-worklet.js';
+import { AlacPlayer } from './src/core/player/alac-player.js';
 import { useStatusStore } from './src/stores/status.js';
 import { useMediaStore } from './src/stores/media.js';
 setActivePinia(createPinia());
@@ -62,7 +62,7 @@ function observeOutput(output) {
   outputs.push({output,analyser}); if(!contexts.includes(output.context))contexts.push(output.context);
 }
 function createAlac() {
-  const instance=new AlacWorkletPlayer(); worklets.push(instance);
+  const instance=new AlacPlayer(); worklets.push(instance);
   const load=instance.load.bind(instance);
   instance.load=async (...args)=>{const result=await load(...args);observeOutput(instance.output);return result;};
   return instance;
@@ -72,7 +72,7 @@ const resolutions = [];
 player.initPlayer({audio,
   mediaSessionFactory:options=>{const controller=createMediaSessionController(options),activate=controller.activate;controller.activate=track=>{sessionActivations.push(track?.source_id);return activate(track);};return controller;},lifecycleFactory:createPlaybackLifecycle,
   outputFactory:{prepare:prepareOutput,prepareSession:preparePlaybackSession,createNative(element){const output=createNativeOutput(element);observeOutput(output);return output;}},
-  alacPlayerFactory:{create:createAlac,canRequest:track=>AlacWorkletPlayer.canRequest(track),canHandle:track=>AlacWorkletPlayer.canHandle(track)},
+  alacPlayerFactory:{create:createAlac,canRequest:track=>AlacPlayer.canRequest(track),canHandle:track=>AlacPlayer.canHandle(track)},
   resolveTrackSource:async track=>{resolutions.push(track.source_id);if(track.source_id==='gamma')await fetch('/resolve');return {source,track};},
 });
 function rms(analyser) {const values=new Float32Array(analyser.fftSize);analyser.getFloatTimeDomainData(values);return Math.sqrt(values.reduce((sum,v)=>sum+v*v,0)/values.length);}
@@ -88,13 +88,9 @@ document.querySelector('#pause').onclick=()=>player.pause();
 document.querySelector('#resume').onclick=()=>void player.play();
 window.fixtureReady=true;
 `;
-  const compiled = await build({ stdin: { contents: entry, resolveDir: frontend, sourcefile: 'background-audio-fixture.js' }, bundle: true, write: false, format: 'esm', plugins: [{ name: 'fixture-url', setup(b) {
-    b.onResolve({ filter: /alac-processor\.js\?url$/ }, args => ({ path: args.path, namespace: 'fixture-url' }));
-    b.onLoad({ filter: /.*/, namespace: 'fixture-url' }, () => ({ contents: 'export default "/alac-processor.js"', loader: 'js' }));
-  } }] });
+  const compiled = await build({ stdin: { contents: entry, resolveDir: frontend, sourcefile: 'background-audio-fixture.js' }, bundle: true, write: false, format: 'esm' });
   const assets = new Map([
     ['/fixture.js', { type: 'text/javascript', bytes: compiled.outputFiles[0].text }],
-    ['/alac-processor.js', { type: 'text/javascript', bytes: await fs.readFile(path.join(frontend, 'src/core/player/alac-processor.js')) }],
     ['/alac_decoder_bg.wasm', { type: 'application/wasm', bytes: await fs.readFile(path.join(frontend, 'src/wasm/alac-decoder/alac_decoder_bg.wasm')) }],
     ['/media.alacstream', { type: 'application/x-splayer-alac', bytes: alac }],
     ['/media.wav', { type: 'audio/wav', bytes: wav }],

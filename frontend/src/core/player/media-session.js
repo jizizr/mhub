@@ -133,7 +133,7 @@ export function createMediaSessionController({
       (["none", "paused", "playing"].includes(observedState) && observedState !== nextState);
     if (changed) {
       // WebKit can reset this after a detached native element delivers its
-      // queued pause event while AudioWorklet is already producing music.
+      // queued pause event while Web Audio is already producing music.
       // Reconcile actual browser state on real position updates, not a timer.
       try { session.playbackState = nextState; declaredState = nextState; } catch { /* optional */ }
     }

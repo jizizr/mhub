@@ -8,12 +8,12 @@ import { cacheKey, cacheEntryMatches, reusableNativeFlacCache, hasCachedAudio, c
 // Exercise the real exported capability decision and App source resolver. Only
 // browser codec loading/network/IndexedDB are substituted; the transport policy,
 // current-quality selection, cache key and readiness negotiation run unchanged.
-const playerSource = (await readFile(new URL("../src/core/player/alac-worklet.js", import.meta.url), "utf8"))
-  .replace('import processorUrl from "./alac-processor.js?url";', 'const processorUrl = "test:processor";')
+const playerSource = (await readFile(new URL("../src/core/player/alac-player.js", import.meta.url), "utf8"))
+  .replace('from "./pcm-scheduler.js";', `from ${JSON.stringify(new URL("../src/core/player/pcm-scheduler.js", import.meta.url).href)};`)
   .replace('from "./audio-output.js";', `from ${JSON.stringify(new URL("../src/core/player/audio-output.js", import.meta.url).href)};`)
   .replace('from "./alac-support.js";', `from ${JSON.stringify(new URL("../src/core/player/alac-support.js", import.meta.url).href)};`)
   .replace('import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.js";', "const initAlacWasm = async () => {}; class AlacDecoder {}");
-const { canRequestAlacWorklet, canUseAlacWorklet } = await import(`data:text/javascript;base64,${Buffer.from(playerSource).toString("base64")}`);
+const { canRequestAlacPlayback, canUseAlacPlayback } = await import(`data:text/javascript;base64,${Buffer.from(playerSource).toString("base64")}`);
 const appSource = await readFile(new URL("../src/App.vue", import.meta.url), "utf8");
 function extract(startMarker, endMarker) {
   const start = appSource.indexOf(startMarker);
@@ -26,7 +26,7 @@ const readySource = extract("async function waitForReady(", "\n/**");
 const resolverSource = extract("async function resolveTrackSource(", "\n// Cold playback");
 
 function environment(t, { online = true, audioSession } = {}) {
-  class Context { get audioWorklet() { return {}; } }
+  class Context { createBufferSource() { return {}; } }
   const replacements = {
     navigator: {
       onLine: online,
@@ -35,7 +35,6 @@ function environment(t, { online = true, audioSession } = {}) {
       ...(audioSession ? { audioSession } : {}),
     },
     window: { AudioContext: Context, setTimeout: (resolve) => queueMicrotask(resolve) },
-    AudioWorkletNode: class {},
     document: { createElement: () => ({ canPlayType: (type) => type === "audio/flac" ? "probably" : "" }) },
   };
   for (const [name, value] of Object.entries(replacements)) {
@@ -47,7 +46,7 @@ function environment(t, { online = true, audioSession } = {}) {
 
 function resolverFixture() {
   const status = { quality: "hires", setNotice() {} };
-  const requestedStreamingMode = new Function("status", "canRequestAlacWorklet", `return (${modeSource});`)(status, canRequestAlacWorklet);
+  const requestedStreamingMode = new Function("status", "canRequestAlacPlayback", `return (${modeSource});`)(status, canRequestAlacPlayback);
   const track = Object.freeze({
     id: "applemusic--synthetic--lossless", platform: "applemusic", source_id: "synthetic", selected_id: "synthetic",
     title: "Synthetic audio", artist: "Test signal", quality: "lossless", streaming_mode: "wasm_alac",
@@ -74,7 +73,7 @@ function resolverFixture() {
   };
   const waitForReady = new Function("getPlayback", "window", `return (${readySource});`)(getPlayback, window);
   const deps = {
-    requestedStreamingMode, status, canRequestAlacWorklet,
+    requestedStreamingMode, status, canRequestAlacPlayback,
     inflightTrackResolutions: new Map(), cacheKey, cacheEntryMatches, reusableNativeFlacCache,
     audioUrl, trackFromPlayback, hasCachedAudio, cachedAudioUrl, getPlayback, waitForReady,
     getCachedTrack: async (key) => { reads.push(key); return entries.get(key); },
@@ -106,7 +105,7 @@ test("online Android requests native Hi-Res using current quality and preserves 
   assert.equal(resolved.track.streaming_mode, "");
   assert.equal(resolved.track.format, "flac");
   assert.equal(resolved.source, "/api/v1/playbacks/synthetic/audio?v=applemusic--synthetic--hires");
-  assert.equal(canUseAlacWorklet(resolved.track), false);
+  assert.equal(canUseAlacPlayback(resolved.track), false);
   assert.equal(h.track.quality, "lossless", "source metadata is never mutated by platform negotiation");
   assert.equal(h.entries.get(h.packetKey), h.packetEntry, "online native negotiation does not delete the offline packet cache");
   assert.equal(h.reads[0], "applemusic:synthetic:hires");
@@ -124,7 +123,7 @@ test("offline Android reuses its cached Hi-Res packet Blob without provider requ
   assert.equal(h.reads[0], h.packetKey);
   assert.equal(resolved.track.quality, "hires");
   assert.equal(resolved.track.streaming_mode, "wasm_alac");
-  assert.equal(canUseAlacWorklet(resolved.track), true, "the cached packet representation remains playable by WASM");
+  assert.equal(canUseAlacPlayback(resolved.track), true, "the cached packet representation remains playable by WASM");
   assert.equal(h.entries.get(h.packetKey).blob, h.packetBlob);
 });
 
@@ -137,6 +136,6 @@ test("Android exposing Audio Session still negotiates native playback online and
   assert.equal(h.creations[0].streamingMode, null);
   assert.equal(h.polls(), 1);
   assert.equal(resolved.track.quality, "hires");
-  assert.equal(canUseAlacWorklet(resolved.track), false);
+  assert.equal(canUseAlacPlayback(resolved.track), false);
   assert.equal(h.entries.get(h.packetKey).blob, h.packetBlob);
 });

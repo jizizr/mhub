@@ -2,7 +2,7 @@
 name = "alac-decoder"
 version = "0.1.0"
 edition = "2021"
-description = "ALAC packet decoder for WebAssembly AudioWorklet pipelines"
+description = "ALAC packet decoder for WebAssembly Web Audio pipelines"
 license = "MIT OR Apache-2.0"
 publish = false
 

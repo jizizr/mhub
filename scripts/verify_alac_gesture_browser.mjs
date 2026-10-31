@@ -144,7 +144,7 @@ try {
             const { createPinia, setActivePinia } = await import('/__test_pinia');
             setActivePinia(createPinia());
             const core = await import('/src/core/player/index.js');
-            const { AlacWorkletPlayer } = await import('/src/core/player/alac-worklet.js');
+            const { AlacPlayer } = await import('/src/core/player/alac-player.js');
             const { useStatusStore } = await import('/src/stores/status.js');
             const status = useStatusStore(); status.quality = fixture.quality; status.repeatMode = 'off';
             window.events = []; window.renderEvents = []; window.bufferPositions = []; window.statusStore = status; window.core = core; window.prepareEnabled = !fixture.blocked; window.streamCompletions = 0;
@@ -160,17 +160,20 @@ try {
             core.initPlayer({
               audio: document.querySelector('audio'),
               alacPlayerFactory: {
-                canRequest: (track) => window.prepareEnabled && AlacWorkletPlayer.canRequest(track),
-                canHandle: (track) => AlacWorkletPlayer.canHandle(track),
+                canRequest: (track) => window.prepareEnabled && AlacPlayer.canRequest(track),
+                canHandle: (track) => AlacPlayer.canHandle(track),
                 create: () => {
-                  const worklet = new AlacWorkletPlayer();
-                  const handle = worklet.handleWorkletMessage.bind(worklet);
-                  worklet.handleWorkletMessage = (message) => { if (message.type === 'state') window.renderEvents.push({ state: message.state, time: performance.now() }); handle(message); };
+                  const worklet = new AlacPlayer();
                   const load = worklet.load.bind(worklet);
-                  worklet.load = (...args) => {
+                  worklet.load = async (...args) => {
                     const complete = worklet.onStreamComplete;
                     worklet.onStreamComplete = (data) => { window.streamCompletions += 1; complete(data); };
-                    return load(...args);
+                    const result = await load(...args);
+                    // Record the scheduler's own render states (buffering/playing).
+                    const scheduler = worklet.scheduler;
+                    const report = scheduler.onState;
+                    scheduler.onState = (state) => { window.renderEvents.push({ state, time: performance.now() }); report(state); };
+                    return result;
                   };
                   return (window.worklet = worklet);
                 },

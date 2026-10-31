@@ -44,7 +44,7 @@ try {
     // obtaining the deployed decoder. These are the exact published assets,
     // cached only in the local fixture proxy before the browser clicks Play.
     const runtimeFiles = (await fs.readdir(path.join(web, "assets")))
-      .filter(name => name.endsWith(".wasm") || name.startsWith("alac-processor-"));
+      .filter(name => name.endsWith(".wasm"));
     await Promise.all(runtimeFiles.map(async name => {
       const assetPath = `/assets/${name}`;
       const remote = await fetch(new URL(assetPath, staticOrigin));

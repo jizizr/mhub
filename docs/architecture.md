@@ -6,7 +6,7 @@ Vue / Pinia
   ├─ IndexedDB 音频与歌词缓存
   └─ 播放器
        ├─ 浏览器原生音频
-       └─ Worker ALAC 解码 → AudioWorklet PCM 播放
+       └─ WASM ALAC 解码 → 按帧排程的 AudioBuffer 播放
                     │
               Rust / Axum
        ┌────────────┼──────────────┐

@@ -34,7 +34,7 @@
 
 ## HTTPS 反向代理
 
-浏览器 AudioWorklet、Service Worker 等功能需要安全上下文。除本机开发外使用 HTTPS。反向代理对音频请求应关闭响应缓冲、支持长连接和 Range，保留响应的 `Cache-Control`、`ETag`、`Content-Range` 等头，并设置适合大文件的超时。
+Service Worker、媒体会话等浏览器功能需要安全上下文。除本机开发外使用 HTTPS。反向代理对音频请求应关闭响应缓冲、支持长连接和 Range，保留响应的 `Cache-Control`、`ETag`、`Content-Range` 等头，并设置适合大文件的超时。
 
 示例 Nginx location（放入已有 TLS 站点，并配置自己的访问控制）：
 

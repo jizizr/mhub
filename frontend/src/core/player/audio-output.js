@@ -100,6 +100,24 @@ export function suspendIdleOutputs(keep) {
   }
 }
 
+/**
+ * Stop handing out a context whose render clock has drifted (see
+ * render-clock.js). The next deck gets a fresh context; one still bound to a
+ * native element is only forgotten, since that element cannot move.
+ */
+export function retireOutputContext(context) {
+  if (!context) return false;
+  let found = false;
+  for (const [rate, existing] of contexts) {
+    if (existing === context) { contexts.delete(rate); found = true; }
+  }
+  if (preparedContext === context) preparedContext = null;
+  if (!nativeContexts.has(context) && context.state !== "closed") {
+    try { void Promise.resolve(context.close()).catch(() => {}); } catch { /* already closing */ }
+  }
+  return found;
+}
+
 function safeGain(value, fallback = 1) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;

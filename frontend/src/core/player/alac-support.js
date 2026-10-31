@@ -1,12 +1,13 @@
 import { shouldPreferNativeBackgroundPlayback } from "./playback-platform.js";
 
 // Capability checks stay in the first-screen bundle; the decoder, transport
-// and WebAssembly glue in alac-worklet.js load only when lossless playback
-// actually needs them.
-export function isAlacWorkletSupported() {
+// and WebAssembly glue in alac-player.js load only when lossless playback
+// actually needs them. Decoded PCM plays through scheduled buffer sources, so
+// plain Web Audio is enough (no AudioWorklet).
+export function isAlacPlaybackSupported() {
   const Context = typeof window !== "undefined" ? (window.AudioContext || window.webkitAudioContext) : null;
   return typeof WebAssembly !== "undefined" && typeof Context === "function" &&
-    Boolean(Context.prototype && "audioWorklet" in Context.prototype) && typeof AudioWorkletNode !== "undefined";
+    typeof Context.prototype?.createBufferSource === "function";
 }
 
 export function isLosslessTrack(track) {
@@ -15,12 +16,12 @@ export function isLosslessTrack(track) {
   return quality === "lossless" || quality === "hires" || quality === "hi-res" || format.includes("alac");
 }
 
-export function canUseAlacWorklet(track) {
-  return isAlacWorkletSupported() && track?.platform === "applemusic" && isLosslessTrack(track) &&
+export function canUseAlacPlayback(track) {
+  return isAlacPlaybackSupported() && track?.platform === "applemusic" && isLosslessTrack(track) &&
     track?.streaming_mode === "wasm_alac";
 }
 
-export function canRequestAlacWorklet(track) {
-  return isAlacWorkletSupported() && track?.platform === "applemusic" && isLosslessTrack(track) &&
+export function canRequestAlacPlayback(track) {
+  return isAlacPlaybackSupported() && track?.platform === "applemusic" && isLosslessTrack(track) &&
     !shouldPreferNativeBackgroundPlayback();
 }

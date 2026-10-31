@@ -1,6 +1,6 @@
 /**
  * Real stereo 96 kHz / 24-bit ALAC crossfade regression. Uses the production
- * player, WASM decoder, packet parser and AudioWorklet; only media/API/cache
+ * player, WASM decoder, packet parser and Web Audio scheduling; only media/API/cache
  * inputs are synthetic. No account, credentials or production requests.
  *
  * Requires ffmpeg, cargo, Playwright. BROWSER=webkit|chromium|both (default both).
@@ -48,7 +48,7 @@ try {
 import { createPinia, setActivePinia } from 'pinia';
 import * as player from './src/core/player/index.js';
 import { prepareOutput, createNativeOutput } from './src/core/player/audio-output.js';
-import { AlacWorkletPlayer } from './src/core/player/alac-worklet.js';
+import { AlacPlayer } from './src/core/player/alac-player.js';
 import { getCachedLoudness, warmLoudness } from './src/services/loudness.js';
 import { useStatusStore } from './src/stores/status.js';
 import { useMediaStore } from './src/stores/media.js';
@@ -74,7 +74,7 @@ function cachedSource(track) {
   return { source, track: { ...track, byte_size: blob.size, status: 'completed' } };
 }
 function createAlac() {
-  const worklet = new AlacWorkletPlayer();
+  const worklet = new AlacPlayer();
   const load = worklet.load.bind(worklet), fade = worklet.fadeTo.bind(worklet);
   worklet.fadeTo = (target, duration, options) => {
     events.push({ kind: 'ramp', deck: records.indexOf(worklet.testRecord), target, duration, at: worklet.context?.currentTime });
@@ -87,7 +87,7 @@ function createAlac() {
     const completed = worklet.onStreamComplete;
     worklet.onStreamComplete = details => { record.completed = true; events.push({ kind:'stream-eof', id:record.id, bytes:details?.blob?.size }); completed(details); };
     const result = await load(url, options);
-    record.output = worklet.output; record.node = worklet.node; record.inputRate = worklet.track?.sampleRate;
+    record.output = worklet.output; record.node = worklet.scheduler; record.inputRate = worklet.track?.sampleRate;
     record.bits = worklet.decoder?.bitDepth;
     if (!contexts.includes(worklet.context)) contexts.push(worklet.context);
     const analyser = worklet.context.createAnalyser(); analyser.fftSize = 4096;
@@ -100,7 +100,7 @@ function createAlac() {
   return worklet;
 }
 player.initPlayer({ audio, outputFactory: { prepare: prepareOutput, createNative: createNativeOutput },
-  alacPlayerFactory: { create: createAlac, canRequest: track => AlacWorkletPlayer.canRequest(track), canHandle: track => AlacWorkletPlayer.canHandle(track) },
+  alacPlayerFactory: { create: createAlac, canRequest: track => AlacPlayer.canRequest(track), canHandle: track => AlacPlayer.canHandle(track) },
   lookupLoudness: getCachedLoudness, warmLoudness,
   resolveTrackSource: async track => cachedSource(track) || { source: source(track), track },
   resolveCachedTrackSource: async track => cachedSource(track),
@@ -115,7 +115,7 @@ player.initPlayer({ audio, outputFactory: { prepare: prepareOutput, createNative
 function rms(analyser) { if (!analyser) return 0; const values = new Float32Array(analyser.fftSize); analyser.getFloatTimeDomainData(values); return Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length); }
 function snapshot() {
  return { state:status.state, notice:status.notice, loading:status.trackLoading, current:media.track?.source_id, transition:status.transitionState, position:status.position, crossfade:status.crossfadeEnabled, soundCheck:status.soundCheckEnabled, soundCheckState:status.soundCheckState,
-  records: records.map(record => { const {worklet,output,analyser,node} = record; const active = Boolean(node && worklet.node === node && worklet.output === output);
+  records: records.map(record => { const {worklet,output,analyser,node} = record; const active = Boolean(node && worklet.scheduler === node && worklet.output === output);
     return {id:record.id,active,playing:active&&worklet.playing,stopped:!active||Boolean(output?.disposed),completed:record.completed,readBytes:active?worklet.readBytes:0,eof:active&&worklet.eof,source:record.source.startsWith('blob:')?'blob':'http',inputRate:record.inputRate,bits:record.bits,
       ...(!active&&worklet.testRecord===record?{loadingDetail:{bytes:worklet.readBytes,packets:worklet.packets.length,reader:Boolean(worklet.reader),context:worklet.context?.state,prepared:worklet.preparedContext?.state,decoder:Boolean(worklet.decoder),output:Boolean(worklet.output),aborted:worklet.abortController?.signal.aborted}}:{}),
       fade:output?.fadeGain.gain.value,normalization:output?.normalizationGain.gain.value,volume:output?.volumeGain.gain.value,context:contexts.indexOf(output?.context),contextTime:output?.context.currentTime,contextState:output?.context.state,outputRate:output?.context.sampleRate,rms:rms(analyser)};
@@ -134,13 +134,8 @@ window.fixtureReady = true;
   const compiled = await build({
     stdin: { contents: entry, resolveDir: frontend, sourcefile: 'listening-alac-fixture.js' },
     bundle: true, write: false, format: 'esm',
-    plugins: [{ name: 'fixture-url', setup(build) {
-      build.onResolve({ filter: /alac-processor\.js\?url$/ }, args => ({ path: args.path, namespace: 'fixture-url' }));
-      build.onLoad({ filter: /.*/, namespace: 'fixture-url' }, () => ({ contents: 'export default "/alac-processor.js"', loader: 'js' }));
-    } }],
   });
   const assets = new Map([
-    ['/alac-processor.js', { type: 'text/javascript', bytes: await fs.readFile(path.join(frontend, 'src/core/player/alac-processor.js')) }],
     ['/alac_decoder_bg.wasm', { type: 'application/wasm', bytes: await fs.readFile(path.join(frontend, 'src/wasm/alac-decoder/alac_decoder_bg.wasm')) }],
   ]);
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Synthetic ALAC listening fixture</title></head><body><h1>Synthetic ALAC listening fixture</h1>${['play','crossfade','balance','pause','release','switch','replay'].map(id=>`<button id="${id}">${id}</button>`).join(' ')}<script type="module" src="/fixture.js"></script></body></html>`;
@@ -221,7 +216,7 @@ window.fixtureReady = true;
           await page.locator('#release').click();
           const mixing=await until(page,v=>v.transition==='mixing'&&v.current==='beta'&&v.records.filter(r=>r.playing).length===2);
           const live=mixing.records.filter(r=>r.playing);
-          check(`${cancellation}: two real WASM/AudioWorklet decks overlap`,live.length===2&&live.every(r=>r.inputRate===96000&&r.bits===24),mixing);
+          check(`${cancellation}: two real WASM/Web Audio decks overlap`,live.length===2&&live.every(r=>r.inputRate===96000&&r.bits===24),mixing);
           check(`${cancellation}: both decks share the 192kHz render clock`,live.every(r=>r.outputRate===192000)&&live[0].context===live[1].context&&live[0].context>=0,live);
           const eof=mixing.events.findIndex(e=>e.kind==='stream-eof'&&e.id==='alpha'),cached=mixing.events.findIndex(e=>e.kind==='cache-complete'&&e.id==='alpha'),prefetch=mixing.events.findIndex(e=>e.kind==='prefetch-start'&&e.id==='beta');
           check(`${cancellation}: complete packet cache gates the next request`,eof>=0&&cached>eof&&prefetch>cached&&mixing.events.some(e=>e.kind==='cache-start'&&e.id==='alpha'&&e.eof&&e.fromCompletedBlob),mixing.events);

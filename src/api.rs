@@ -2141,7 +2141,7 @@ async fn serve_audio_file(
     validate_media_revision(&task, false, revision)?;
     if task.status == DownloadStatus::Streaming {
         // Keep the public `/audio` contract browser-compatible. A capable
-        // AudioWorklet client opts into the packet transport through the
+        // WASM decoder client opts into the packet transport through the
         // separate `/audio/stream` endpoint.
         if task.streaming_mode.as_deref() == Some("wasm_alac") {
             return Err(ApiError::Http {

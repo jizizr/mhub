@@ -31,7 +31,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import PlayerBar from '../src/components/player/PlayerBar.vue';
 import FullPlayer from '../src/components/player/FullPlayer.vue';
 import * as player from '../src/core/player/index.js';
-import { AlacWorkletPlayer } from '../src/core/player/alac-worklet.js';
+import { AlacPlayer } from '../src/core/player/alac-player.js';
 import { useMediaStore } from '../src/stores/media.js';
 import { useStatusStore } from '../src/stores/status.js';
 import '../src/styles.css';
@@ -49,7 +49,7 @@ player.initPlayer({ audio,
   resolveTrackSource: async () => ({source:'./signal.' + (alac?'alacstream':'wav'),track}),
   loadLyrics:async()=>[],
   alacPlayerFactory: { canRequest:()=>alac, canHandle:()=>alac, create(){
-    worklet=new AlacWorkletPlayer(); const seek=worklet.seek.bind(worklet);
+    worklet=new AlacPlayer(); const seek=worklet.seek.bind(worklet);
     worklet.seek=async value=>{calls.push(value);const accepted=await seek(value);acceptedSeek=accepted;return accepted}; return worklet;
   }},
 });
