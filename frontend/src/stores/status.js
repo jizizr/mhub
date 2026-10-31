@@ -16,7 +16,9 @@ function restore() {
     delete data.transitionState;
     data.crossfadeEnabled = data.crossfadeEnabled === true;
     if (!["system", "light", "dark"].includes(data.theme)) data.theme = "system";
-    if (!["auto", "native", "line"].includes(data.lyricWordMode)) data.lyricWordMode = "auto";
+    // "auto" (estimate by default) shipped briefly and was saved for everyone;
+    // it maps to the new native default rather than to the estimate.
+    if (!["native", "estimate", "line"].includes(data.lyricWordMode)) data.lyricWordMode = "native";
     data.soundCheckEnabled = data.soundCheckEnabled === true;
     const crossfadeSeconds = Number(data.crossfadeSeconds ?? 4);
     data.crossfadeSeconds = Number.isFinite(crossfadeSeconds)
@@ -52,9 +54,9 @@ export const useStatusStore = defineStore("status", {
     searchPlatform: "applemusic",
     quality: "high",
     lyricScript: "original",
-    // auto: real word timing, estimated for line-only lyrics; native: real
-    // word timing only; line: whole-line highlighting.
-    lyricWordMode: "auto",
+    // native: real word timing only; estimate: also spread line-only lyrics
+    // evenly over their syllables; line: whole-line highlighting.
+    lyricWordMode: "native",
     theme: "system",
     activeView: "discover",
     activePlaylistId: null,

@@ -3,7 +3,11 @@
 // each line over its syllables, as HyperLyrics-Enhanced does when splitting
 // LRC lines: time is proportional to sung units, not to elapsed line time.
 
-export const WORD_MODES = ["auto", "native", "line"];
+// The estimate is uniform within each line. Measured against real word timing
+// (3 songs, 1,138 words) only 32% of its word starts land within 200 ms;
+// onset detection on the audio only reached 46%, so neither is good enough to
+// be the default and "native" is.
+export const WORD_MODES = ["native", "estimate", "line"];
 
 // A sung unit lasts at most this long, so an interlude before the next line
 // does not stretch the sweep across the silence.
@@ -69,9 +73,9 @@ export function estimateLineWords(line, nextStart) {
   return { ...line, words, estimatedWords: true };
 }
 
-// `auto`: real word timing, estimated for lines that have none.
-// `native`: real word timing only. `line`: whole-line highlighting.
-export function applyWordMode(lines, mode = "auto") {
+// `native`: real word timing only. `estimate`: real word timing, estimated
+// for lines that have none. `line`: whole-line highlighting.
+export function applyWordMode(lines, mode = "native") {
   if (mode === "line") {
     return lines.map((line) => {
       if (!Array.isArray(line.words) || line.words.length <= 1) return line;
@@ -79,7 +83,7 @@ export function applyWordMode(lines, mode = "auto") {
       return { ...line, words: [{ word, startTime: line.startTime, endTime: line.endTime }] };
     });
   }
-  if (mode !== "auto") return lines;
+  if (mode !== "estimate") return lines;
   const mainStarts = lines.map((line) => (line.isBG ? null : line.startTime));
   return lines.map((line, index) => {
     if (line.isBG || !Array.isArray(line.words) || line.words.length !== 1) return line;

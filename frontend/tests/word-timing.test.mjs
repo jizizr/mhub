@@ -25,7 +25,7 @@ test("word modes keep real timing, estimate only line-only rows, or collapse", (
   const real = { ...line("", 0, 1000), words: [{ word: "A ", startTime: 0, endTime: 400 }, { word: "B", startTime: 400, endTime: 1000 }] };
   const bg = { ...line("(ooh)", 500, 900), isBG: true };
   const plain = line("你好", 2000, 4000);
-  const auto = applyWordMode([real, bg, plain], "auto");
+  const auto = applyWordMode([real, bg, plain], "estimate");
   assert.equal(auto[0], real);
   assert.equal(auto[1], bg);
   assert.equal(auto[2].words.length, 2);
@@ -38,4 +38,9 @@ test("script conversion of word-timed lines uses whole-line context", () => {
   const phrase = (text) => text.replace("头发", "頭髮").replace(/发/g, "發");
   const [converted] = convertLyricLinesWith([{ words: [{ word: "头" }, { word: "发" }], translatedLyric: "" }], phrase);
   assert.deepEqual(converted.words.map((word) => word.word), ["頭", "髮"]);
+});
+
+test("native word timing is the default and line-only lyrics are left alone", () => {
+  const plain = line("你好", 2000, 4000);
+  assert.deepEqual(applyWordMode([plain]), [plain]);
 });

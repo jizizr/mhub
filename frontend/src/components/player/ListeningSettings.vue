@@ -136,8 +136,8 @@ onBeforeUnmount(() => {
           <div class="listening-settings__row">
             <label :for="`${id}-lyric-words`">逐字</label>
             <select :id="`${id}-lyric-words`" title="逐字歌词" :value="status.lyricWordMode" @change="changePreference('lyricWordMode', $event)">
-              <option value="auto">自动（无逐字时估算）</option>
-              <option value="native">仅原生逐字</option>
+              <option value="native">原生逐字</option>
+              <option value="estimate">无逐字时匀速估算</option>
               <option value="line">逐行</option>
             </select>
           </div>
