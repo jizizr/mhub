@@ -41,6 +41,14 @@ const SCROLL_HOLD_MS = 240;
 // Line springs and scrolling look the same at 60 Hz; running them at a 120 Hz+
 // display rate doubled the layout and compositing work for nothing.
 const MIN_FRAME_MS = 1000 / 60 - 2;
+// Show each word slightly after it is heard rather than before. AMLL's fade
+// edge already reaches into a word before its start, and the eye judges a
+// highlight that leads the voice as early; trailing a little reads as in
+// time. The output path's own latency (Bluetooth, ALAC rendering) is added.
+const LYRIC_VISUAL_DELAY_MS = 150;
+function lyricTime() {
+  return Math.max(0, playback.getCurrentTime() - LYRIC_VISUAL_DELAY_MS - playback.getOutputDelay());
+}
 const wordAnimations = createAnimationStepper(() => player?.getElement());
 const PAUSED_SCROLL_HOLD_MS = 60 * 60 * 1000;
 
@@ -111,7 +119,7 @@ function updateFrame(time) {
   }
   if (props.playing && !isUserScrollActive(time)) {
     const beforeIndex = player.timelineState?.scrollToIndex ?? -1;
-    player.setCurrentTime(Math.round(playback.getCurrentTime()));
+    player.setCurrentTime(Math.round(lyricTime()));
     const afterIndex = player.timelineState?.scrollToIndex ?? -1;
     if (afterIndex !== beforeIndex || afterIndex !== lastScrollToIndex) {
       maybeAutoAlignCurrentLine();
@@ -119,7 +127,7 @@ function updateFrame(time) {
     }
   }
   player.update(time - lastFrameTime);
-  if (props.playing) wordAnimations.step(playback.getCurrentTime(), time);
+  if (props.playing) wordAnimations.step(lyricTime(), time);
   else wordAnimations.release();
   if (!renderReady && snapInitialLayout()) {
     const viewport = wrapperRef.value?.getBoundingClientRect();
@@ -261,8 +269,8 @@ onMounted(() => {
   }
   player.addEventListener("line-click", handleLineClick);
   applyOptions();
-  player.setLyricLines(processedLyrics.value, Math.round(playback.getCurrentTime()));
-  player.setCurrentTime(Math.round(playback.getCurrentTime()), true);
+  player.setLyricLines(processedLyrics.value, Math.round(lyricTime()));
+  player.setCurrentTime(Math.round(lyricTime()), true);
   lastScrollToIndex = player.timelineState?.scrollToIndex ?? -1;
   if (props.playing) player.resume();
   else player.pause();
@@ -297,7 +305,7 @@ watch(
       pendingLyrics = lines;
     } else {
       player.setLyricLines(lines);
-      player.setCurrentTime(Math.round(playback.getCurrentTime()), true);
+      player.setCurrentTime(Math.round(lyricTime()), true);
     }
   },
 );
@@ -335,7 +343,7 @@ watch(
     if (playing) {
       scrollHoldUntil = 0;
       player.resetScroll?.();
-      player.setCurrentTime(Math.round(playback.getCurrentTime()), true);
+      player.setCurrentTime(Math.round(lyricTime()), true);
       lastScrollToIndex = player.timelineState?.scrollToIndex ?? -1;
       userScrolledSinceAutoAlign = false;
       player.resume();

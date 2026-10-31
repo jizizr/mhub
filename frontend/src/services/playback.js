@@ -62,6 +62,19 @@ export function setSpeed(value) {
   speed = safe;
 }
 
+// How long rendered audio takes to reach the speakers. Native <audio>
+// currentTime already reports what is being heard; the ALAC worklet reports
+// what it has rendered, so the player sets the context's output latency here.
+let outputDelayMs = 0;
+
+export function setOutputDelay(ms) {
+  outputDelayMs = Number.isFinite(ms) ? Math.min(400, Math.max(0, ms)) : 0;
+}
+
+export function getOutputDelay() {
+  return outputDelayMs;
+}
+
 export function reset() {
   currentTimeMs = 0;
   totalDurationMs = 0;

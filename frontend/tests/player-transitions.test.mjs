@@ -37,7 +37,7 @@ async function harness({ enabled = true, cache, cachedSource, alac = false, soun
   const output = () => ({ fade: 1, volume: 0.8, loudness: 1, ramps: [], context: { state: "running", currentTime: 0, async resume() {} }, setVolume(value) { this.volume = value; }, setLoudnessGain(value) { this.loudness = value; }, cancelFade(value = this.fade) { this.fade = value; }, fadeTo(target, seconds) { this.ramps.push({ target, seconds }); this.fade = target; }, getFadeLevel() { return this.fade; } });
   const graphs = new Map(); const worklets = []; const events = [];
   let analysis = soundCheck ? { state: "ready", gain_db: gain } : null;
-  const playback = { setPlaying() {}, setSeeking() {}, setDuration() {}, setCurrentTime: value => value, reset() {} };
+  const playback = { setPlaying() {}, setSeeking() {}, setDuration() {}, setCurrentTime: value => value, setOutputDelay() {}, reset() {} };
   globalThis.__transitions = { status, queue, media, playback, trackIdentity, trackFromSearch };
   let source = await readFile(new URL("../src/core/player/index.js", import.meta.url), "utf8");
   source = source

@@ -17,7 +17,7 @@ async function harness({ saveData = false, failPersistenceOnce = false, growing 
   globalThis.localStorage = { removeItem() {} };
   globalThis.__playerTest = {
     status, media, queue,
-    playback: { setPlaying() {}, setSeeking() {}, setDuration() {}, setCurrentTime: (value) => value },
+    playback: { setPlaying() {}, setSeeking() {}, setDuration() {}, setCurrentTime: (value) => value, setOutputDelay() {} },
   };
   let source = await readFile(new URL("../src/core/player/index.js", import.meta.url), "utf8");
   source = source

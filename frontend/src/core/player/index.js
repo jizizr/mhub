@@ -1026,6 +1026,7 @@ function resetForLoad(duration = 0) {
 function syncPosition(force = false) {
   if (!audio || pendingSeek || waitingForAudioRecovery()) return;
   const pos = Number.isFinite(audio.currentTime) ? Math.round(audio.currentTime * 1000) : 0;
+  playback.setOutputDelay(0);
   const adjusted = playback.setCurrentTime(pos, { force });
   useStatusStore().position = Math.round(adjusted);
   confirmRecoveredAudio(pos);
@@ -1294,6 +1295,8 @@ function setupAlacWorkletCallbacks(myToken) {
     if (myToken !== trackToken || pendingSeek || waitingForAudioRecovery()) return;
     const safe = Math.max(0, Math.round(position));
     playback.setCurrentTime(safe, { force: true });
+    const context = alacPlayer?.context;
+    playback.setOutputDelay(((Number(context?.baseLatency) || 0) + (Number(context?.outputLatency) || 0)) * 1000);
     const status = useStatusStore();
     status.position = safe;
     confirmRecoveredAudio(safe);

@@ -32,7 +32,7 @@ async function harness({ tracks = [track("current")], playIndex = 0, state = "pl
     async play() { this.paused = false; this.currentSrc = this.src; audioCalls.push("play"); }, pause() { this.paused = true; audioCalls.push("pause"); },
     load() { audioCalls.push("load"); }, removeAttribute() { this.src = ""; this.currentSrc = ""; } };
   globalThis.__autoplayTest = { status, media, queue, trackIdentity, trackFromSearch,
-    playback: { setPlaying() {}, setSeeking() {}, setDuration() {}, setCurrentTime: (value) => value, reset() {} } };
+    playback: { setPlaying() {}, setSeeking() {}, setDuration() {}, setCurrentTime: (value) => value, setOutputDelay() {}, reset() {} } };
   let source = await readFile(new URL("../src/core/player/index.js", import.meta.url), "utf8");
   source = source
     .replace('import { useMediaStore } from "../../stores/media";', 'const useMediaStore = () => globalThis.__autoplayTest.media;')

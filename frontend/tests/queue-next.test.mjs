@@ -31,7 +31,7 @@ async function harness({ tracks = [], playIndex = -1, originalQueue = null, shuf
     buffered: { length: 1, start: () => 0, end: () => 180 }, addEventListener: (event, callback) => audioEvents.set(event, callback),
     play() { audioCalls.push("play"); }, pause() { audioCalls.push("pause"); }, load() { audioCalls.push("load"); }, removeAttribute() { audioCalls.push("remove source"); } };
   globalThis.__queueNextTest = { status, media, queue, trackIdentity, trackFromSearch,
-    playback: { setPlaying() {}, setSeeking() {}, setDuration() {}, setCurrentTime: (value) => value } };
+    playback: { setPlaying() {}, setSeeking() {}, setDuration() {}, setCurrentTime: (value) => value, setOutputDelay() {} } };
   let source = await readFile(new URL("../src/core/player/index.js", import.meta.url), "utf8");
   source = source
     .replace('import { useMediaStore } from "../../stores/media";', 'const useMediaStore = () => globalThis.__queueNextTest.media;')
