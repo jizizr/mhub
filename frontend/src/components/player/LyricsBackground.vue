@@ -52,7 +52,8 @@ onMounted(async () => {
     canvas.classList.add("lyrics-background__canvas");
     host.value?.appendChild(canvas);
     background.setRenderScale(0.5);
-    background.setFPS(60);
+    // The mesh flows slowly; 30 fps looks the same and halves the GPU draws.
+    background.setFPS(30);
     background.setFlowSpeed(1.5);
     background.setHasLyric(true);
     syncMotion();

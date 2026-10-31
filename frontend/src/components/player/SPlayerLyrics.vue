@@ -5,6 +5,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, toRaw, watch, wa
 import * as playback from "../../services/playback";
 import { loadLyricConverter } from "../../utils/opencc-loader.js";
 import { applyWordMode } from "../../utils/word-timing.js";
+import { createAnimationStepper } from "../../utils/animation-stepper.js";
 
 const props = defineProps({
   lyricLines: { type: Array, default: () => [] },
@@ -18,7 +19,7 @@ const props = defineProps({
   showTranslation: { type: Boolean, default: true },
   showLineRomanization: { type: Boolean, default: true },
   showWordRomanization: { type: Boolean, default: true },
-  wordMode: { type: String, default: "auto" },
+  wordMode: { type: String, default: "native" },
 });
 
 const emit = defineEmits(["seek", "conversion-state", "render-ready"]);
@@ -37,6 +38,10 @@ let initialLayoutSnapped = false;
 const openccModule = shallowRef(null);
 
 const SCROLL_HOLD_MS = 240;
+// Line springs and scrolling look the same at 60 Hz; running them at a 120 Hz+
+// display rate doubled the layout and compositing work for nothing.
+const MIN_FRAME_MS = 1000 / 60 - 2;
+const wordAnimations = createAnimationStepper(() => player?.getElement());
 const PAUSED_SCROLL_HOLD_MS = 60 * 60 * 1000;
 
 function cloneLines(lines) {
@@ -100,6 +105,10 @@ watch(
 function updateFrame(time) {
   if (!player) return;
   if (!lastFrameTime) lastFrameTime = time;
+  if (renderReady && time - lastFrameTime < MIN_FRAME_MS) {
+    rafId = window.requestAnimationFrame(updateFrame);
+    return;
+  }
   if (props.playing && !isUserScrollActive(time)) {
     const beforeIndex = player.timelineState?.scrollToIndex ?? -1;
     player.setCurrentTime(Math.round(playback.getCurrentTime()));
@@ -110,6 +119,8 @@ function updateFrame(time) {
     }
   }
   player.update(time - lastFrameTime);
+  if (props.playing) wordAnimations.step(playback.getCurrentTime(), time);
+  else wordAnimations.release();
   if (!renderReady && snapInitialLayout()) {
     const viewport = wrapperRef.value?.getBoundingClientRect();
     const line = [...(player.getElement().querySelectorAll("[class*='lyricMainLine']"))].find((element) => {
