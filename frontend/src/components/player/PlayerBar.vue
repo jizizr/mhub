@@ -1,6 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Volume, Volume1, Volume2, VolumeX } from "lucide-vue-next";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import * as player from "../../core/player";
 import { useMediaStore } from "../../stores/media";
 import { useStatusStore } from "../../stores/status";
@@ -10,6 +9,7 @@ import PlayerControls from "./PlayerControls.vue";
 import TrackInfo from "./TrackInfo.vue";
 import ListeningSettings from "./ListeningSettings.vue";
 import SeekSlider from "./SeekSlider.vue";
+import VolumeControl from "./VolumeControl.vue";
 
 const status = useStatusStore();
 const media = useMediaStore();
@@ -18,26 +18,6 @@ const root = ref(null);
 let detachGlass = () => {};
 onMounted(() => { detachGlass = attachLiquidGlass(root.value); });
 onBeforeUnmount(() => detachGlass());
-// Volume works like Apple Music's: clicking the speaker opens the slider and
-// it stays open while adjusting, until a click elsewhere or Escape.
-const volumeRoot = ref(null);
-const volumeOpen = ref(false);
-const volumeIcon = computed(() => status.volume <= 0 ? VolumeX : status.volume < 0.34 ? Volume : status.volume < 0.67 ? Volume1 : Volume2);
-function closeVolumeOutside(event) {
-  if (!volumeRoot.value?.contains(event.target)) volumeOpen.value = false;
-}
-function closeVolumeOnEscape(event) {
-  if (event.key === "Escape") volumeOpen.value = false;
-}
-watch(volumeOpen, (open) => {
-  const method = open ? "addEventListener" : "removeEventListener";
-  document[method]("pointerdown", closeVolumeOutside, true);
-  document[method]("keydown", closeVolumeOnEscape);
-});
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", closeVolumeOutside, true);
-  document.removeEventListener("keydown", closeVolumeOnEscape);
-});
 // Like Apple's progress-container: expand once the pointer moves onto the
 // strip (not merely over the LCD), collapse when it leaves.
 const progressExpanded = ref(false);
@@ -89,22 +69,7 @@ const progress = computed(() => duration.value > 0
         </div>
       </div>
       <div class="player-toolbar">
-        <div ref="volumeRoot" class="volume-control" :class="{ 'is-open': volumeOpen }">
-          <button class="volume-control__button" type="button" title="音量" aria-label="音量" :aria-expanded="volumeOpen" @click="volumeOpen = !volumeOpen">
-            <component :is="volumeIcon" :size="20" />
-          </button>
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            aria-label="音量大小"
-            :tabindex="volumeOpen ? 0 : -1"
-            :value="status.volume"
-            :style="{ '--volume': `${status.volume * 100}%` }"
-            @input="player.setVolume(Number($event.target.value))"
-          />
-        </div>
+        <VolumeControl />
         <ListeningSettings compact />
       </div>
     </div>

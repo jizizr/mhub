@@ -11,6 +11,8 @@ import QueuePanel from "./QueuePanel.vue";
 import SeekSlider from "./SeekSlider.vue";
 import LyricsView from "./LyricsView.vue";
 import LyricsBackground from "./LyricsBackground.vue";
+import ListeningSettings from "./ListeningSettings.vue";
+import VolumeControl from "./VolumeControl.vue";
 
 // 歌词渲染器依赖 Pixi 和 AMLL，体积较大。只有展开播放器且确实有歌词时才加载，
 // 避免无歌词歌曲和普通播放场景下载这部分代码。
@@ -203,7 +205,14 @@ onBeforeUnmount(() => {
     <div class="full-player__bottom">
       <div class="full-player__bottom-spacer"></div>
       <div class="full-player__transport">
-        <PlayerControls />
+        <div class="full-player__capsule">
+          <PlayerControls />
+          <!-- Volume and settings stay reachable while the lyrics cover the
+               page bar, as in Apple Music's full-screen player. -->
+          <span class="full-player__capsule-divider" aria-hidden="true"></span>
+          <VolumeControl />
+          <ListeningSettings compact />
+        </div>
         <div class="full-player__progress">
           <span>{{ Math.floor(sliderValue / 60000) }}:{{ String(Math.floor((sliderValue / 1000) % 60)).padStart(2, "0") }}</span>
           <SeekSlider

@@ -1498,12 +1498,40 @@ button.artwork-card__play:hover { background: rgba(255, 255, 255, .86); color: v
   transform: translateY(-4px);
 }
 
-.full-player__transport .player-controls {
+.full-player__capsule {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 8px 14px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   backdrop-filter: blur(18px);
 }
+
+.full-player__capsule-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+/* The page bar's volume pill and settings, on the always-dark full player. */
+.full-player__capsule .volume-control { position: relative; display: grid; place-items: center; width: 34px; height: 34px; gap: 0; padding: 0; color: rgba(255, 255, 255, 0.86); }
+.full-player__capsule .volume-control__button { position: relative; z-index: 3; display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.full-player__capsule .volume-control__button:hover, .full-player__capsule .volume-control.is-open .volume-control__button { color: #fff; background: rgba(255, 255, 255, 0.14); }
+.full-player__capsule .volume-control::before { content: ""; position: absolute; z-index: 1; top: -3px; right: -3px; width: 158px; height: 40px; border-radius: 1000px; background: rgba(38, 38, 40, 0.86); -webkit-backdrop-filter: blur(40px) saturate(180%); backdrop-filter: blur(40px) saturate(180%); box-shadow: 0 4px 16px rgba(0, 0, 0, .3); opacity: 0; transform: scaleX(.5); transform-origin: right center; transition: transform .25s, opacity .25s; pointer-events: none; }
+.full-player__capsule .volume-control input { position: absolute; z-index: 2; top: 50%; right: 40px; width: 100px; height: 20px; margin: 0; background: transparent; opacity: 0; pointer-events: none; transform: translateY(-50%); transition: opacity .25s; -webkit-appearance: none; appearance: none; cursor: pointer; }
+.full-player__capsule .volume-control input::-webkit-slider-runnable-track { height: 4px; border-radius: 4px; background: linear-gradient(90deg, #fff var(--volume, 0%), rgba(255, 255, 255, 0.22) var(--volume, 0%)); }
+.full-player__capsule .volume-control input::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -4px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .35); }
+.full-player__capsule .volume-control input::-moz-range-track { height: 4px; border-radius: 4px; background: rgba(255, 255, 255, 0.22); }
+.full-player__capsule .volume-control input::-moz-range-progress { height: 4px; border-radius: 4px; background: #fff; }
+.full-player__capsule .volume-control input::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: #fff; }
+.full-player__capsule .volume-control.is-open::before { opacity: 1; transform: none; }
+.full-player__capsule .volume-control.is-open input { opacity: 1; pointer-events: auto; }
+.full-player__capsule .listening-settings--compact .listening-settings__trigger { width: 34px; min-height: 34px; color: rgba(255, 255, 255, 0.86); }
+.full-player__capsule .listening-settings--compact .listening-settings__trigger:hover,
+.full-player__capsule .listening-settings--compact.is-open .listening-settings__trigger { color: #fff; background: rgba(255, 255, 255, 0.14); }
+.full-player__capsule .listening-settings--compact .listening-settings__panel { bottom: calc(100% + 22px); right: -14px; }
 
 .full-player__transport .icon-button {
   color: rgba(255, 255, 255, 0.86);
@@ -2035,11 +2063,19 @@ body.is-full-player-open .toast { bottom: calc(var(--full-player-toolbar-height)
   /* The decorative cover stack would sit under the headline on phones. */
 }
 
+/* Phones change volume with their hardware keys (iOS ignores page volume),
+   so the capsule keeps settings and drops the speaker to stay on screen. */
+@media (max-width: 560px) {
+  .full-player__capsule { gap: 0; padding-inline: 8px; }
+  .full-player__capsule .player-controls { gap: 2px; }
+  .full-player__capsule .volume-control { display: none; }
+  .full-player__capsule .listening-settings--compact .listening-settings__panel { right: 0; }
+  .full-player__capsule-divider { margin: 0 3px; }
+}
+
 @media (max-width: 360px) {
-  .full-player__transport .player-controls {
-    gap: 2px;
-    padding-inline: 4px;
-  }
+  .full-player__capsule { gap: 2px; padding-inline: 4px; }
+  .full-player__transport .player-controls { gap: 2px; }
 }
 
 /* Apple Music web shell, measured from music.apple.com at 1440×900:
