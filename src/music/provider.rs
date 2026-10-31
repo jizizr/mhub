@@ -184,10 +184,12 @@ pub struct MusicCollection {
     pub items: Vec<MusicSearchItem>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MusicLyrics {
     pub plain: String,
     pub translation: String,
+    /// Word-timed lines when the source has them; empty for LRC-only lyrics.
+    pub words: Vec<super::word_lyrics::WordLine>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -58,11 +58,28 @@ function normalize(lines) {
     });
 }
 
+// Word-timed lines from the API, in AMLL's shape. Background vocals follow
+// the main line they accompany.
+function wordLines(lines) {
+  return lines
+    .map((line) => ({
+      words: line.words.map(([startTime, endTime, word]) => ({ word, startTime, endTime })),
+      startTime: line.start,
+      endTime: line.end,
+      translatedLyric: "",
+      romanLyric: "",
+      isBG: Boolean(line.bg),
+      isDuet: false,
+    }))
+    .filter((line) => textOf(line).trim());
+}
+
 function mergeTranslation(lines, translationText) {
   const translations = normalize(parseAny(translationText));
   if (!translations.length) return lines;
   const used = new Set();
   return lines.map((line) => {
+    if (line.isBG) return line;
     let best = -1;
     let distance = 1001;
     translations.forEach((translation, index) => {
@@ -83,6 +100,10 @@ function mergeTranslation(lines, translationText) {
 export function buildLyricLines(payload) {
   if (!payload?.available) return [];
   try {
+    if (Array.isArray(payload.words) && payload.words.length) {
+      const lines = wordLines(payload.words);
+      if (lines.length) return mergeTranslation(lines, payload.translation);
+    }
     if (!String(payload.plain || "").trim()) return normalize(parseAny(payload.translation));
     return mergeTranslation(normalize(parseAny(payload.plain)), payload.translation);
   } catch (error) {

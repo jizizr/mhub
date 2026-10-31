@@ -190,6 +190,7 @@ onBeforeUnmount(() => {
             :playing="status.isPlaying"
             :align-position="lyricAlignPosition"
             :word-fade-width="0.5"
+            :word-mode="status.lyricWordMode"
             @seek="onLineClick"
             @conversion-state="handleLyricConversionState"
           />

@@ -2,10 +2,12 @@ import { getTrackLyrics } from "../apis/music.js";
 
 const loadLyricParser = () => import("../utils/lyrics.js").then((module) => module.buildLyricLines);
 
-const STORAGE_KEY = "music-web-lyrics-v1";
+// v2 adds word timing; v1 entries would hide it for a month.
+const STORAGE_KEY = "music-web-lyrics-v2";
+const LEGACY_STORAGE_KEY = "music-web-lyrics-v1";
 const MAX_ENTRIES = 100;
-const MAX_STORAGE_CHARS = 500_000;
-const MAX_LYRIC_CHARS = 100_000;
+const MAX_STORAGE_CHARS = 1_200_000;
+const MAX_LYRIC_CHARS = 300_000;
 const HIT_TTL = 30 * 24 * 60 * 60 * 1000;
 const EMPTY_TTL = 5 * 60 * 1000;
 
@@ -19,12 +21,31 @@ export function lyricIdentity(track) {
   return id ? JSON.stringify(["playback", String(id)]) : "";
 }
 
+const isTime = (value) => Number.isFinite(value) && value >= 0;
+
+// `{start, end, bg?, words: [[start, end, text]]}` lines from the API. An
+// unexpected shape drops word timing only; the line lyrics stay usable.
+function cleanWords(words) {
+  if (!Array.isArray(words)) return [];
+  const valid = words.every((line) =>
+    line && isTime(line.start) && isTime(line.end) && Array.isArray(line.words) &&
+    line.words.every((word) => Array.isArray(word) && isTime(word[0]) && isTime(word[1]) && typeof word[2] === "string"));
+  return valid ? words : [];
+}
+
 function cleanPayload(payload) {
   if (!payload || typeof payload.available !== "boolean") throw new Error("歌词响应不完整");
   const plain = typeof payload.plain === "string" ? payload.plain : "";
   const translation = typeof payload.translation === "string" ? payload.translation : "";
-  if (plain.length + translation.length > MAX_LYRIC_CHARS) throw new Error("歌词内容过长");
-  return { available: payload.available && Boolean(plain.trim() || translation.trim()), plain, translation };
+  const words = cleanWords(payload.words);
+  const size = plain.length + translation.length + (words.length ? JSON.stringify(words).length : 0);
+  if (size > MAX_LYRIC_CHARS) throw new Error("歌词内容过长");
+  return {
+    available: payload.available && Boolean(plain.trim() || translation.trim() || words.length),
+    plain,
+    translation,
+    words,
+  };
 }
 
 export function createLyricsService({
@@ -110,6 +131,7 @@ export function createLyricsService({
         encoded = JSON.stringify({ version: 1, entries });
       }
       if (encoded.length <= MAX_STORAGE_CHARS) storage()?.setItem(STORAGE_KEY, encoded);
+      storage()?.removeItem?.(LEGACY_STORAGE_KEY);
     } catch {
       // Private mode, quota limits or unavailable storage cannot block audio
       // or lyrics. The bounded session cache still serves the next opening.

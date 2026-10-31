@@ -149,10 +149,18 @@ async fn get_native_netease_lyrics(id: &str) -> Result<Option<MusicLyrics>, BotE
     let response = get_netease_lyrics(id).await?;
     let plain = response.lrc.map(|lyric| lyric.lyric).unwrap_or_default();
     let translation = response.tlyric.map(|lyric| lyric.lyric).unwrap_or_default();
-    if plain.trim().is_empty() && translation.trim().is_empty() {
+    let words = response
+        .yrc
+        .map(|lyric| super::word_lyrics::parse_yrc(&lyric.lyric))
+        .unwrap_or_default();
+    if plain.trim().is_empty() && translation.trim().is_empty() && words.is_empty() {
         return Ok(None);
     }
-    Ok(Some(MusicLyrics { plain, translation }))
+    Ok(Some(MusicLyrics {
+        plain,
+        translation,
+        words,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -240,6 +248,7 @@ struct NeteaseAlbumInfo {
 struct NeteaseLyricResponse {
     lrc: Option<NeteaseLyricPart>,
     tlyric: Option<NeteaseLyricPart>,
+    yrc: Option<NeteaseLyricPart>,
 }
 
 #[derive(Deserialize)]
@@ -392,6 +401,7 @@ async fn get_vkeys_netease_lyrics(id: &str) -> Result<Option<MusicLyrics>, BotEr
     Ok(Some(MusicLyrics {
         plain: data.lrc,
         translation: data.tlyric,
+        ..Default::default()
     }))
 }
 

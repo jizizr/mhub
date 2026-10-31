@@ -4,6 +4,7 @@ import "@applemusic-like-lyrics/core/style.css";
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, toRaw, watch, watchEffect } from "vue";
 import * as playback from "../../services/playback";
 import { loadLyricConverter } from "../../utils/opencc-loader.js";
+import { applyWordMode } from "../../utils/word-timing.js";
 
 const props = defineProps({
   lyricLines: { type: Array, default: () => [] },
@@ -17,6 +18,7 @@ const props = defineProps({
   showTranslation: { type: Boolean, default: true },
   showLineRomanization: { type: Boolean, default: true },
   showWordRomanization: { type: Boolean, default: true },
+  wordMode: { type: String, default: "auto" },
 });
 
 const emit = defineEmits(["seek", "conversion-state", "render-ready"]);
@@ -47,7 +49,7 @@ const processedLyrics = computed(() => {
     props.script === "original" || openccModule.value?.script !== props.script
       ? source
       : openccModule.value.module.convertLyricLines(source);
-  return converted.map((line) => {
+  return applyWordMode(converted, props.wordMode).map((line) => {
     const nextLine = {
       ...line,
       translatedLyric: props.showTranslation ? line.translatedLyric : "",

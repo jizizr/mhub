@@ -11,6 +11,9 @@ pub(crate) mod search_gate;
 mod soda;
 pub(crate) mod streaming;
 mod tencent;
+mod word_lyrics;
+
+pub use word_lyrics::WordLine;
 mod youtubemusic;
 
 use crate::{ApiError, ApiResult};
@@ -82,6 +85,7 @@ pub struct ResolveOptions {
 pub struct Lyrics {
     pub plain: String,
     pub translation: String,
+    pub words: Vec<WordLine>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -394,6 +398,7 @@ pub async fn lyrics(platform: MusicPlatform, track_id: &str) -> ApiResult<Option
         .map(|lyrics| Lyrics {
             plain: lyrics.plain,
             translation: lyrics.translation,
+            words: lyrics.words,
         }))
 }
 
@@ -421,6 +426,7 @@ pub async fn lyrics_for_track(
     Ok(completed.map(|lyrics| Lyrics {
         plain: lyrics.plain,
         translation: lyrics.translation,
+        words: lyrics.words,
     }))
 }
 

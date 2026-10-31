@@ -16,6 +16,7 @@ function restore() {
     delete data.transitionState;
     data.crossfadeEnabled = data.crossfadeEnabled === true;
     if (!["system", "light", "dark"].includes(data.theme)) data.theme = "system";
+    if (!["auto", "native", "line"].includes(data.lyricWordMode)) data.lyricWordMode = "auto";
     data.soundCheckEnabled = data.soundCheckEnabled === true;
     const crossfadeSeconds = Number(data.crossfadeSeconds ?? 4);
     data.crossfadeSeconds = Number.isFinite(crossfadeSeconds)
@@ -51,6 +52,9 @@ export const useStatusStore = defineStore("status", {
     searchPlatform: "applemusic",
     quality: "high",
     lyricScript: "original",
+    // auto: real word timing, estimated for line-only lyrics; native: real
+    // word timing only; line: whole-line highlighting.
+    lyricWordMode: "auto",
     theme: "system",
     activeView: "discover",
     activePlaylistId: null,
@@ -100,6 +104,7 @@ export const useStatusStore = defineStore("status", {
           searchPlatform: this.searchPlatform,
           quality: this.quality,
           lyricScript: this.lyricScript,
+          lyricWordMode: this.lyricWordMode,
           theme: this.theme,
           activeView: this.activeView,
           activePlaylistId: this.activePlaylistId,

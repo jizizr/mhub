@@ -4,7 +4,7 @@ import { createLyricsService, lyricIdentity } from "../src/services/lyrics.js";
 import { getTrackLyrics } from "../src/apis/music.js";
 import { buildLyricLines } from "../src/utils/lyrics.js";
 
-const KEY = "music-web-lyrics-v1";
+const KEY = "music-web-lyrics-v2";
 const track = (overrides = {}) => ({ platform: "applemusic", source_id: "123", id: "applemusic--123--high", quality: "high", title: "测试歌曲", artist: "测试艺人", ...overrides });
 const payload = { available: true, plain: "[00:00.00]第一句\n[00:12.00]第二句", translation: "[00:00.00]First line" };
 const storage = () => {
@@ -143,7 +143,7 @@ test("the persistent cache evicts old entries and stays within its size budget",
   const { service, saved } = fixture({ fetchLyrics: async () => ({ available: true, plain: "[00:00.00]" + "词".repeat(10000) }) });
   for (let index = 0; index < 120; index++) await service.load(track({ source_id: `large-${index}` }));
   const raw = saved.getItem(KEY);
-  assert.ok(raw.length <= 500000);
+  assert.ok(raw.length <= 1200000);
   const entries = JSON.parse(raw).entries;
   assert.ok(entries.length <= 100);
   assert.equal(entries.at(-1).key, lyricIdentity(track({ source_id: "large-119" })));
@@ -233,4 +233,15 @@ test("an unparseable persisted payload refetches corrected lyrics once", async (
   assert.equal(restored.calls.length, 1);
   assert.deepEqual(restored.service.getCached(track()), buildLyricLines(payload));
   assert.equal(JSON.parse(first.saved.getItem(KEY)).entries[0].payload.plain, payload.plain);
+});
+
+test("word timing survives the persistent cache and malformed timing is dropped", async () => {
+  const words = [{ start: 0, end: 1000, words: [[0, 500, "第"], [500, 1000, "一"]] }];
+  const first = fixture({ fetchLyrics: async () => ({ ...payload, words }) });
+  const lines = await first.service.load(track());
+  assert.equal(lines[0].words.length, 2);
+  assert.deepEqual(JSON.parse(first.saved.getItem(KEY)).entries[0].payload.words, words);
+  const broken = fixture({ fetchLyrics: async () => ({ ...payload, words: [{ start: 0, end: 1, words: [["x"]] }] }) });
+  const fallback = await broken.service.load(track({ source_id: "broken" }));
+  assert.equal(fallback[0].words.length, 1);
 });

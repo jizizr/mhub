@@ -475,7 +475,8 @@ impl MusicProvider for AppleMusicProvider {
         }
         Ok(Some(MusicLyrics {
             plain,
-            translation: String::new(),
+            words: super::word_lyrics::parse_ttml(&ttml, parse_ttml_time_to_millis),
+            ..Default::default()
         }))
     }
 
@@ -836,16 +837,27 @@ async fn get_apple_lyrics_ttml(id: &str) -> Result<String, BotError> {
             "Apple Music 歌词需要配置 music.applemusic.media_user_token".to_string(),
         ));
     }
-    let url = apple_lyrics_url(id);
-    let response: AppleMusicLyricsResponse =
-        apple_get_json_with_media_user_token(&url, &media_user_token, true).await?;
-    response
-        .data
-        .into_iter()
-        .next()
-        .map(|resource| resource.attributes.ttml)
-        .filter(|ttml| !ttml.trim().is_empty())
-        .ok_or_else(|| BotError::Custom("Apple Music 没有返回歌词".to_string()))
+    // Syllable lyrics carry per-word timing; many songs only have the
+    // line-timed resource, so any failure falls back to it.
+    for kind in ["syllable-lyrics", "lyrics"] {
+        let url = apple_lyrics_url(id, kind);
+        let response: Result<AppleMusicLyricsResponse, _> =
+            apple_get_json_with_media_user_token(&url, &media_user_token, true).await;
+        let ttml = match response {
+            Ok(response) => response
+                .data
+                .into_iter()
+                .next()
+                .map(|resource| resource.attributes.ttml)
+                .filter(|ttml| !ttml.trim().is_empty()),
+            Err(error) if kind == "lyrics" => return Err(error),
+            Err(_) => None,
+        };
+        if let Some(ttml) = ttml {
+            return Ok(ttml);
+        }
+    }
+    Err(BotError::Custom("Apple Music 没有返回歌词".to_string()))
 }
 
 async fn get_apple_download_url_with_quality(
@@ -3134,9 +3146,9 @@ fn apple_collection_url(collection: &AppleCollectionId) -> String {
     url.to_string()
 }
 
-fn apple_lyrics_url(id: &str) -> String {
+fn apple_lyrics_url(id: &str, kind: &str) -> String {
     let mut url = Url::parse(&format!(
-        "{APPLE_MUSIC_API}/v1/catalog/{}/songs/{id}/lyrics",
+        "{APPLE_MUSIC_API}/v1/catalog/{}/songs/{id}/{kind}",
         apple_storefront()
     ))
     .unwrap();
@@ -3341,7 +3353,7 @@ fn format_lrc_timestamp(value: &str) -> String {
     format!("{minutes:02}:{seconds:02}.{centiseconds:02}")
 }
 
-fn parse_ttml_time_to_millis(value: &str) -> u64 {
+pub(super) fn parse_ttml_time_to_millis(value: &str) -> u64 {
     let value = value.trim();
     if value.is_empty() {
         return 0;

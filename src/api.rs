@@ -395,6 +395,8 @@ pub struct LyricsResponse {
     pub available: bool,
     pub plain: String,
     pub translation: String,
+    /// Word-timed lines (`{start, end, bg?, words: [[start, end, text]]}`, ms).
+    pub words: Vec<music::WordLine>,
 }
 
 pub fn app() -> Router {
@@ -2527,14 +2529,18 @@ fn lyrics_response(
             available: false,
             plain: String::new(),
             translation: String::new(),
+            words: Vec::new(),
         };
     };
     LyricsResponse {
         platform: platform.to_string(),
         track_id: track_id.to_string(),
-        available: !lyrics.plain.trim().is_empty() || !lyrics.translation.trim().is_empty(),
+        available: !lyrics.plain.trim().is_empty()
+            || !lyrics.translation.trim().is_empty()
+            || !lyrics.words.is_empty(),
         plain: lyrics.plain,
         translation: lyrics.translation,
+        words: lyrics.words,
     }
 }
 

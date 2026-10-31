@@ -769,6 +769,7 @@ async fn get_qq_lyrics(song_mid: &str) -> Result<MusicLyrics, BotError> {
     Ok(MusicLyrics {
         plain: decode_base64_text(&response.lyric),
         translation: decode_base64_text(&response.trans),
+        ..Default::default()
     })
 }
 

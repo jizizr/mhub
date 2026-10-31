@@ -59,13 +59,16 @@ impl MusicProvider for SodaProvider {
         if id.is_empty() {
             return Ok(None);
         }
-        let plain = parse_soda_lyric(&get_soda_track_details(&id).await?.lyric);
+        let raw = get_soda_track_details(&id).await?.lyric;
+        let plain = parse_soda_lyric(&raw);
         if plain.trim().is_empty() {
             return Ok(None);
         }
         Ok(Some(MusicLyrics {
             plain,
-            translation: String::new(),
+            // Soda lines use KRC word markers with line-relative offsets.
+            words: super::word_lyrics::parse_krc(&raw),
+            ..Default::default()
         }))
     }
 }

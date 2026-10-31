@@ -261,7 +261,7 @@ async fn get_youtube_music_lyrics(video_id: &str) -> Result<Option<MusicLyrics>,
     };
     Ok(Some(MusicLyrics {
         plain,
-        translation: String::new(),
+        ..Default::default()
     }))
 }
 

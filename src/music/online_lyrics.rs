@@ -3,8 +3,12 @@
 //! 这里保留歌曲所属 provider 的原生歌词，并在缺少原文或翻译时，按歌曲元数据
 //! 从网易云、QQ 音乐、酷狗、酷我检索候选。候选必须通过标题、歌手、专辑和时长
 //! 的身份匹配，避免同名歌曲的歌词串台。
+//!
+//! 逐字时间轴（YRC/QRC/KRC/LRCX）优先：原生歌词缺少逐字时，只有在线时间轴与
+//! 原生逐行时间、文字对齐时才会补入，避免把其他版本的节奏套到当前录音上。
 
 use super::provider::{CLIENT, MusicLyrics, MusicPlatform};
+use super::word_lyrics::{self, WordLine};
 use crate::ApiResult;
 use aes::Aes128;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
@@ -23,6 +27,9 @@ use std::{
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const PASS_SCORE: i32 = 70;
+/// Lyric downloads tried per song while looking for word timing and a
+/// translation; candidates are already ranked by identity score.
+const MAX_LYRIC_FETCHES: usize = 6;
 const ALIGN_TOLERANCE_MS: i64 = 1_000;
 
 #[derive(Clone, Debug)]
@@ -35,7 +42,6 @@ struct Candidate {
     album: String,
     duration_ms: i64,
     access_key: String,
-    content_type: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -61,6 +67,15 @@ impl Source {
 struct OnlineLyrics {
     plain: String,
     translation: String,
+    words: Vec<WordLine>,
+}
+
+impl OnlineLyrics {
+    /// Word timing outranks a translation: a missing translation can still
+    /// be borrowed from another candidate, word timing cannot be invented.
+    fn quality(&self) -> u8 {
+        u8::from(!self.words.is_empty()) * 2 + u8::from(!self.translation.trim().is_empty())
+    }
 }
 
 #[derive(Clone)]
@@ -87,7 +102,9 @@ pub(super) async fn complete(
         return Ok(native);
     }
     if native.as_ref().is_some_and(|lyrics| {
-        !lyrics.plain.trim().is_empty() && !lyrics.translation.trim().is_empty()
+        !lyrics.plain.trim().is_empty()
+            && !lyrics.translation.trim().is_empty()
+            && !lyrics.words.is_empty()
     }) {
         return Ok(native);
     }
@@ -95,7 +112,14 @@ pub(super) async fn complete(
     let online = if let Some(value) = cached(&key) {
         value
     } else {
-        let value = fetch_online(title, artist, album, duration).await?;
+        // Word timing only helps when it fits the native lines, so judge
+        // candidates against them instead of picking another recording's.
+        let reference = native
+            .as_ref()
+            .filter(|lyrics| lyrics.words.is_empty())
+            .map(|lyrics| parse_lrc(&lyrics.plain))
+            .filter(|rows| !rows.is_empty());
+        let value = fetch_online(title, artist, album, duration, reference.as_deref()).await?;
         store(key, value.clone());
         value
     };
@@ -141,10 +165,18 @@ fn merge(native: Option<MusicLyrics>, online: Option<OnlineLyrics>) -> Option<Mu
         (None, Some(value)) => Some(MusicLyrics {
             plain: value.plain,
             translation: value.translation,
+            words: value.words,
         }),
         (Some(mut native), Some(online)) => {
             if native.plain.trim().is_empty() {
                 native.plain = online.plain;
+                if native.words.is_empty() {
+                    native.words = online.words;
+                }
+            } else if native.words.is_empty()
+                && word_lyrics::aligns_with(&online.words, &parse_lrc(&native.plain))
+            {
+                native.words = online.words;
             }
             if native.translation.trim().is_empty() && !online.translation.trim().is_empty() {
                 native.translation = align_translation(&native.plain, &online.translation);
@@ -159,6 +191,7 @@ async fn fetch_online(
     artist: &str,
     album: &str,
     duration: Option<u32>,
+    reference: Option<&[(i64, String)]>,
 ) -> ApiResult<Option<OnlineLyrics>> {
     let duration_ms = duration
         .map(|value| value as i64 * 1_000)
@@ -167,7 +200,7 @@ async fn fetch_online(
     let (netease, tencent, kugou, kuwo) = tokio::join!(
         netease_candidates(&query),
         tencent_candidates(&query),
-        kugou_candidates(&query, duration_ms),
+        kugou_candidates(title, artist, duration_ms),
         kuwo_candidates(&query),
     );
     let mut candidates = Vec::new();
@@ -183,30 +216,53 @@ async fn fetch_online(
     candidates.truncate(12);
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(16);
-    let mut fallback = None;
-    for candidate in candidates {
-        if score(&candidate, title, artist, album, duration_ms) < PASS_SCORE {
-            continue;
-        }
+    let mut found = Vec::new();
+    for candidate in candidates
+        .into_iter()
+        .filter(|candidate| score(candidate, title, artist, album, duration_ms) >= PASS_SCORE)
+        .take(MAX_LYRIC_FETCHES)
+    {
         let result = tokio::time::timeout_at(deadline, fetch_source_lyrics(&candidate)).await;
         let Ok(result) = result else {
             break;
         };
-        let Some(lyrics) = result.unwrap_or(None) else {
+        let Some(mut lyrics) = result.unwrap_or(None) else {
             continue;
         };
         if lyrics.plain.trim().is_empty() {
             continue;
         }
-        if !lyrics.translation.trim().is_empty() {
-            return Ok(Some(lyrics));
+        if reference.is_some_and(|rows| !word_lyrics::aligns_with(&lyrics.words, rows)) {
+            lyrics.words.clear();
         }
-        // Keep the best original, but keep looking for a matching bilingual source.
-        if fallback.is_none() {
-            fallback = Some(lyrics);
+        let complete = lyrics.quality() == 3;
+        found.push(lyrics);
+        if complete {
+            break;
         }
     }
-    Ok(fallback)
+    Ok(pick_best(found))
+}
+
+/// The highest-ranked candidate with the best quality wins; when it lacks a
+/// translation, borrow one aligned from the next bilingual candidate.
+fn pick_best(found: Vec<OnlineLyrics>) -> Option<OnlineLyrics> {
+    let best_index = found
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, lyrics)| (lyrics.quality(), std::cmp::Reverse(*index)))?
+        .0;
+    let donor = found
+        .iter()
+        .find(|lyrics| !lyrics.translation.trim().is_empty())
+        .map(|lyrics| lyrics.translation.clone());
+    let mut best = found.into_iter().nth(best_index)?;
+    if best.translation.trim().is_empty()
+        && let Some(translation) = donor
+    {
+        best.translation = align_translation(&best.plain, &translation);
+    }
+    Some(best)
 }
 
 fn score(candidate: &Candidate, title: &str, artist: &str, album: &str, duration_ms: i64) -> i32 {
@@ -317,7 +373,6 @@ async fn netease_candidates(title: &str) -> ApiResult<Vec<Candidate>> {
                     .to_string(),
                 duration_ms: song["duration"].as_i64().unwrap_or_default(),
                 access_key: String::new(),
-                content_type: 0,
             })
         })
         .filter(|song| !song.id.is_empty())
@@ -362,6 +417,7 @@ async fn netease_lyrics(id: &str) -> ApiResult<Option<OnlineLyrics>> {
     Ok(Some(OnlineLyrics {
         plain: plain.clone(),
         translation: align_translation(&plain, &translation),
+        words: word_lyrics::parse_yrc(yrc),
     }))
 }
 
@@ -398,6 +454,10 @@ async fn netease_eapi_lyrics(id: &str) -> ApiResult<Value> {
         .error_for_status()?
         .bytes()
         .await?;
+    // Without `e_r` the gateway answers in plain JSON; with it, AES-ECB.
+    if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        return Ok(value);
+    }
     let decrypted = aes_ecb_decrypt(&bytes, b"e82ckenh8dichen8")
         .ok_or_else(|| crate::ApiError::Custom("网易云 EAPI 响应解密失败".to_string()))?;
     Ok(serde_json::from_slice(&decrypted)?)
@@ -459,7 +519,6 @@ async fn tencent_candidates(title: &str) -> ApiResult<Vec<Candidate>> {
                     .to_string(),
                 duration_ms: song["interval"].as_i64().unwrap_or_default() * 1_000,
                 access_key: String::new(),
-                content_type: 0,
             })
         })
         .filter(|song| !song.id.is_empty())
@@ -507,7 +566,8 @@ async fn tencent_lyrics(candidate: &Candidate) -> ApiResult<Option<OnlineLyrics>
     )
     .await?;
     let data = &value["req_0"]["data"];
-    let plain = decode_qrc(data["lyric"].as_str().unwrap_or_default());
+    let lyric = decrypt_qrc(data["lyric"].as_str().unwrap_or_default());
+    let plain = qrc_to_lrc(&lyric);
     let translation = decode_qrc(data["trans"].as_str().unwrap_or_default());
     if plain.trim().is_empty() {
         return Ok(None);
@@ -515,30 +575,32 @@ async fn tencent_lyrics(candidate: &Candidate) -> ApiResult<Option<OnlineLyrics>
     Ok(Some(OnlineLyrics {
         plain: plain.clone(),
         translation: align_translation(&plain, &translation),
+        words: word_lyrics::parse_qrc(&qrc_content(&lyric)),
     }))
 }
 
-async fn kugou_candidates(title: &str, duration_ms: i64) -> ApiResult<Vec<Candidate>> {
-    let params = [
-        ("album_audio_id", "0".to_string()),
-        ("appid", "1005".to_string()),
-        ("clientver", "20759".to_string()),
-        ("duration", (duration_ms / 1_000 * 1_000).to_string()),
-        ("hash", String::new()),
-        ("keyword", title.to_string()),
-        ("lrctxt", "1".to_string()),
-        ("man", "yes".to_string()),
-        ("query_copyright", "1".to_string()),
-    ];
+/// Kugou's signed v2 lyric API now rejects requests without a valid client
+/// time; the public PC endpoints still serve the same KRC files.
+async fn kugou_candidates(
+    title: &str,
+    artist: &str,
+    duration_ms: i64,
+) -> ApiResult<Vec<Candidate>> {
+    let keyword = if artist.trim().is_empty() {
+        title.to_string()
+    } else {
+        format!("{} - {title}", artist.trim())
+    };
     let value = get_json(
         &format!(
-            "https://lyrics.kugou.com/v2/search?{}",
-            signed_query(&params)
+            "https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword={}&duration={}&hash=",
+            urlencoding::encode(&keyword),
+            duration_ms.max(0)
         ),
-        &[("User-Agent", "Android-KuGou/20759")],
+        &[],
     )
     .await?;
-    Ok(value["data"]["candidates"]
+    Ok(value["candidates"]
         .as_array()
         .into_iter()
         .flatten()
@@ -546,10 +608,7 @@ async fn kugou_candidates(title: &str, duration_ms: i64) -> ApiResult<Vec<Candid
         .filter_map(|song| {
             Some(Candidate {
                 source: Source::Kugou,
-                id: song["download_id"]
-                    .as_str()
-                    .or_else(|| song["id"].as_str())?
-                    .to_string(),
+                id: json_id(&song["id"]),
                 numeric_id: 0,
                 title: song["song"].as_str()?.to_string(),
                 artist: song["singer"].as_str().unwrap_or_default().to_string(),
@@ -557,7 +616,6 @@ async fn kugou_candidates(title: &str, duration_ms: i64) -> ApiResult<Vec<Candid
                 // Kugou's lyric-search response already uses milliseconds.
                 duration_ms: song["duration"].as_i64().unwrap_or_default(),
                 access_key: song["accesskey"].as_str().unwrap_or_default().to_string(),
-                content_type: song["contenttype"].as_i64().unwrap_or_default(),
             })
         })
         .filter(|song| !song.id.is_empty() && !song.access_key.is_empty())
@@ -565,22 +623,16 @@ async fn kugou_candidates(title: &str, duration_ms: i64) -> ApiResult<Vec<Candid
 }
 
 async fn kugou_lyrics(candidate: &Candidate) -> ApiResult<Option<OnlineLyrics>> {
-    let params = [
-        ("accesskey", candidate.access_key.clone()),
-        ("appid", "1005".to_string()),
-        ("clientver", "20759".to_string()),
-        ("contenttype", candidate.content_type.to_string()),
-        ("download_id", candidate.id.clone()),
-    ];
     let value = get_json(
         &format!(
-            "https://lyrics.kugou.com/v2/download?{}",
-            signed_query(&params)
+            "https://lyrics.kugou.com/download?ver=1&client=pc&id={}&accesskey={}&fmt=krc&charset=utf8",
+            urlencoding::encode(&candidate.id),
+            urlencoding::encode(&candidate.access_key)
         ),
-        &[("User-Agent", "Android-KuGou/20759")],
+        &[],
     )
     .await?;
-    let content = value["data"]["content"].as_str().unwrap_or_default();
+    let content = value["content"].as_str().unwrap_or_default();
     let bytes = general_purpose::STANDARD
         .decode(content)
         .unwrap_or_default();
@@ -600,6 +652,7 @@ async fn kugou_lyrics(candidate: &Candidate) -> ApiResult<Option<OnlineLyrics>> 
     Ok(Some(OnlineLyrics {
         plain: plain.clone(),
         translation: kugou_translation(&raw, &plain),
+        words: word_lyrics::parse_krc(&raw),
     }))
 }
 
@@ -618,22 +671,32 @@ async fn kuwo_candidates(title: &str) -> ApiResult<Vec<Candidate>> {
                 source: Source::Kuwo,
                 id: song["rid"].as_i64()?.to_string(),
                 numeric_id: 0,
-                title: song["name"].as_str()?.to_string(),
-                artist: song["artist"].as_str().unwrap_or_default().to_string(),
-                album: song["album"].as_str().unwrap_or_default().to_string(),
+                title: kuwo_text(song["name"].as_str()?),
+                artist: kuwo_text(song["artist"].as_str().unwrap_or_default()),
+                album: kuwo_text(song["album"].as_str().unwrap_or_default()),
                 duration_ms: song["duration"].as_i64().unwrap_or_default() * 1_000,
                 access_key: String::new(),
-                content_type: 0,
             })
         })
         .filter(|song| !song.id.is_empty())
         .collect())
 }
 
+/// Kuwo search sometimes returns percent-encoded names.
+fn kuwo_text(value: &str) -> String {
+    urlencoding::decode(value)
+        .map(|text| text.into_owned())
+        .unwrap_or_else(|_| value.to_string())
+}
+
 async fn kuwo_lyrics(id: &str) -> ApiResult<Option<OnlineLyrics>> {
     if let Ok(Some(raw)) = kuwo_lrcx(id).await {
         if let Some((plain, translation)) = kuwo_lrcx_to_lrc(&raw) {
-            return Ok(Some(OnlineLyrics { plain, translation }));
+            return Ok(Some(OnlineLyrics {
+                plain,
+                translation,
+                words: word_lyrics::parse_kuwo(&raw),
+            }));
         }
     }
     let url =
@@ -659,6 +722,7 @@ async fn kuwo_lyrics(id: &str) -> ApiResult<Option<OnlineLyrics>> {
     Ok(Some(OnlineLyrics {
         plain,
         translation: String::new(),
+        words: Vec::new(),
     }))
 }
 
@@ -844,37 +908,6 @@ fn json_id(value: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn signed_query(parameters: &[(&str, String)]) -> String {
-    let mut sorted = parameters
-        .iter()
-        .map(|(key, value)| ((*key).to_string(), value.clone()))
-        .collect::<Vec<_>>();
-    sorted.sort_by(|left, right| left.0.cmp(&right.0));
-    let joined = sorted
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<String>();
-    let signature = format!(
-        "{:x}",
-        md5(format!(
-            "OIlwieks28dk2k092lksi2UIkp{joined}OIlwieks28dk2k092lksi2UIkp"
-        ))
-    );
-    sorted.push(("signature".to_string(), signature));
-    sorted.sort_by(|left, right| left.0.cmp(&right.0));
-    sorted
-        .into_iter()
-        .map(|(key, value)| {
-            format!(
-                "{}={}",
-                urlencoding::encode(&key),
-                urlencoding::encode(&value)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
 fn decrypt_krc(input: &[u8]) -> String {
     const KEY: &[u8] = &[
         0x40, 0x47, 0x61, 0x77, 0x5e, 0x32, 0x74, 0x47, 0x51, 0x36, 0x31, 0x2d, 0xce, 0xd2, 0x6e,
@@ -955,9 +988,14 @@ fn kugou_translation(raw: &str, original: &str) -> String {
 }
 
 fn decode_qrc(value: &str) -> String {
+    qrc_to_lrc(&decrypt_qrc(value))
+}
+
+/// QQ returns hex-encoded 3DES+zlib QRC, or occasionally plain text.
+fn decrypt_qrc(value: &str) -> String {
     let value = value.trim();
     if value.starts_with('<') || value.starts_with('[') {
-        return qrc_to_lrc(value);
+        return value.to_string();
     }
     let hex: String = value.chars().filter(|c| !c.is_whitespace()).collect();
     if hex.is_empty() || hex.len() % 16 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -979,27 +1017,32 @@ fn decode_qrc(value: &str) -> String {
     {
         return String::new();
     }
-    qrc_to_lrc(&output)
+    output
 }
 
-/// Flatten QRC word timing into line-synchronized LRC for the current API.
-/// Extract the attribute before parsing XML: XML parsers normalize literal
-/// newlines inside attributes, but QQ stores the entire lyric there.
-fn qrc_to_lrc(value: &str) -> String {
+/// The lyric text of a decrypted QRC document. Extract the attribute before
+/// parsing XML: XML parsers normalize literal newlines inside attributes, but
+/// QQ stores the entire lyric there.
+fn qrc_content(value: &str) -> String {
     let xml = regex::Regex::new(r#"(?s)LyricContent\s*=\s*["'](.*?)["']\s*/?>"#).unwrap();
     let content = xml
         .captures(value)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str())
         .unwrap_or(value);
-    let content = content
+    content
         .replace("&#13;", "")
         .replace("&#10;", "\n")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-        .replace("&amp;", "&");
+        .replace("&amp;", "&")
+}
+
+/// Flatten QRC word timing into line-synchronized LRC for the `plain` field.
+fn qrc_to_lrc(value: &str) -> String {
+    let content = qrc_content(value);
     let words = regex::Regex::new(r"\(\d+,\d+\)").unwrap();
     content
         .lines()
@@ -1235,7 +1278,6 @@ mod tests {
             album: "唱游".into(),
             duration_ms: 256_000,
             access_key: String::new(),
-            content_type: 0,
         };
         assert!(score(&candidate, "红豆", "王菲", "唱游", 256_000) >= PASS_SCORE);
         assert!(score(&candidate, "红豆", "另一位歌手", "唱游", 256_000) < PASS_SCORE);
@@ -1256,12 +1298,14 @@ mod tests {
             Some(MusicLyrics {
                 plain: "[00:01.000]Hello".into(),
                 translation: translation.into(),
+                words: Vec::new(),
             })
         };
         let online = || {
             Some(OnlineLyrics {
                 plain: "[00:01.200]Hello".into(),
                 translation: "[00:01.200]你好".into(),
+                words: Vec::new(),
             })
         };
         assert_eq!(
@@ -1274,5 +1318,106 @@ mod tests {
             merge(make(""), online()).unwrap().translation,
             "[00:01.000]你好"
         );
+    }
+
+    #[test]
+    fn grafts_online_word_timing_only_onto_aligned_native_lyrics() {
+        let online = || {
+            Some(OnlineLyrics {
+                plain: "[00:01.000]你好\n[00:03.000]世界".into(),
+                translation: String::new(),
+                words: word_lyrics::parse_yrc(
+                    "[1000,1000](1000,500,0)你(1500,500,0)好\n[3000,1000](3000,500,0)世(3500,500,0)界",
+                ),
+            })
+        };
+        let native = |plain: &str| {
+            Some(MusicLyrics {
+                plain: plain.into(),
+                translation: "[00:01.000]Hello".into(),
+                words: Vec::new(),
+            })
+        };
+        let aligned = merge(native("[00:01.100]你好\n[00:03.100]世界"), online()).unwrap();
+        assert_eq!(aligned.words.len(), 2);
+        assert_eq!(aligned.plain, "[00:01.100]你好\n[00:03.100]世界");
+        let other_version = merge(native("[00:11.000]你好\n[00:13.000]世界"), online()).unwrap();
+        assert!(other_version.words.is_empty());
+    }
+
+    #[test]
+    fn prefers_word_timing_and_borrows_a_translation() {
+        let lyrics = |translation: &str, words: &str| OnlineLyrics {
+            plain: "[00:01.000]你好".into(),
+            translation: translation.into(),
+            words: word_lyrics::parse_yrc(words),
+        };
+        let best = pick_best(vec![
+            lyrics("[00:01.100]Hello", ""),
+            lyrics("", "[1000,1000](1000,500,0)你(1500,500,0)好"),
+        ])
+        .unwrap();
+        assert_eq!(best.words.len(), 1);
+        assert_eq!(best.translation, "[00:01.000]Hello");
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// `cargo test live_word_lyrics -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "queries public lyric services"]
+    async fn live_word_lyrics() {
+        let query = "富士山下 陈奕迅";
+        let (netease, tencent, kugou, kuwo) = tokio::join!(
+            netease_candidates(query),
+            tencent_candidates(query),
+            kugou_candidates("富士山下", "陈奕迅", 259_000),
+            kuwo_candidates(query),
+        );
+        for candidates in [netease, tencent, kugou, kuwo] {
+            let candidates = match candidates {
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    println!("search failed: {error}");
+                    continue;
+                }
+            };
+            let Some(candidate) = candidates
+                .into_iter()
+                .max_by_key(|candidate| score(candidate, "富士山下", "陈奕迅", "", 259_000))
+            else {
+                println!("no candidates");
+                continue;
+            };
+            let lyrics = fetch_source_lyrics(&candidate).await.ok().flatten();
+            let (lines, words, translated) = lyrics.as_ref().map_or((0, 0, false), |lyrics| {
+                (
+                    lyrics.words.len(),
+                    lyrics.words.iter().map(|line| line.words.len()).sum(),
+                    !lyrics.translation.is_empty(),
+                )
+            });
+            println!(
+                "{:?} {} {} - {}: {lines} word lines, {words} words, translation {translated}",
+                candidate.source, candidate.id, candidate.title, candidate.artist
+            );
+            if let Some(line) = lyrics.and_then(|lyrics| lyrics.words.into_iter().nth(3)) {
+                println!("  {}", serde_json::to_string(&line).unwrap());
+            }
+        }
+        let best = fetch_online("富士山下", "陈奕迅", "", Some(259), None)
+            .await
+            .unwrap()
+            .unwrap();
+        println!(
+            "best: {} word lines, translation {}",
+            best.words.len(),
+            !best.translation.is_empty()
+        );
+        println!("  {}", serde_json::to_string(&best.words.get(3)).unwrap());
+        assert!(!best.words.is_empty());
     }
 }
