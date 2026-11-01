@@ -6,6 +6,7 @@ import * as playback from "../../services/playback";
 import { loadLyricConverter } from "../../utils/opencc-loader.js";
 import { applyWordMode } from "../../utils/word-timing.js";
 import { createAnimationStepper } from "../../utils/animation-stepper.js";
+import { createLyricClock } from "../../utils/lyric-clock.js";
 
 const props = defineProps({
   lyricLines: { type: Array, default: () => [] },
@@ -46,8 +47,12 @@ const MIN_FRAME_MS = 1000 / 60 - 2;
 // highlight that leads the voice as early; trailing a little reads as in
 // time. The output path's own latency (Bluetooth, ALAC rendering) is added.
 const LYRIC_VISUAL_DELAY_MS = 150;
+const lyricClock = createLyricClock(
+  () => playback.getCurrentTime(),
+  () => LYRIC_VISUAL_DELAY_MS + playback.getOutputDelay(),
+);
 function lyricTime() {
-  return Math.max(0, playback.getCurrentTime() - LYRIC_VISUAL_DELAY_MS - playback.getOutputDelay());
+  return lyricClock.time();
 }
 const wordAnimations = createAnimationStepper(() => player?.getElement());
 const PAUSED_SCROLL_HOLD_MS = 60 * 60 * 1000;
@@ -117,9 +122,11 @@ function updateFrame(time) {
     rafId = window.requestAnimationFrame(updateFrame);
     return;
   }
+  // Read the clock every frame, paused too, so it sees seeks as they land.
+  const currentLyricTime = lyricTime();
   if (props.playing && !isUserScrollActive(time)) {
     const beforeIndex = player.timelineState?.scrollToIndex ?? -1;
-    player.setCurrentTime(Math.round(lyricTime()));
+    player.setCurrentTime(Math.round(currentLyricTime));
     const afterIndex = player.timelineState?.scrollToIndex ?? -1;
     if (afterIndex !== beforeIndex || afterIndex !== lastScrollToIndex) {
       maybeAutoAlignCurrentLine();
@@ -127,7 +134,7 @@ function updateFrame(time) {
     }
   }
   player.update(time - lastFrameTime);
-  if (props.playing) wordAnimations.step(lyricTime(), time);
+  if (props.playing) wordAnimations.step(currentLyricTime, time);
   else wordAnimations.release();
   if (!renderReady && snapInitialLayout()) {
     const viewport = wrapperRef.value?.getBoundingClientRect();
@@ -183,6 +190,7 @@ function handleLineClick(event) {
   const line = event?.line?.getLine?.();
   const start = line?.startTime ?? line?.words?.[0]?.startTime;
   if (Number.isFinite(start)) {
+    lyricClock.seekTo(start);
     emit("seek", start);
     player?.setCurrentTime(start, true);
   }
