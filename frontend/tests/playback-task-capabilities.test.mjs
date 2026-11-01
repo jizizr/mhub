@@ -79,6 +79,29 @@ test("native AAC retains first-fragment startup", async () => {
   assert.equal(result.streaming_mode, null);
 });
 
+for (const format of ["flac", "mp3"]) {
+  test(`native lossless ${format} from a plain CDN file starts while it is still growing`, async () => {
+    const h = harness();
+    const netease = {
+      id: "netease-task", platform: "netease", quality: "lossless", status: "streaming", format,
+      streaming_mode: null, streaming_url: null, audio_url: "/api/v1/playbacks/netease-task/audio",
+    };
+    const result = await h.waitForReady(netease);
+    assert.equal(h.polls(), 0);
+    assert.equal(result.status, "streaming");
+  });
+}
+
+test("native lossless M4A and a shared WASM FLAC-labelled task still wait for completion", async () => {
+  const m4a = { ...shared, streaming_mode: null, streaming_url: null, format: "m4a" };
+  const h = harness([{ ...m4a, status: "completed" }]);
+  assert.equal((await h.waitForReady(m4a)).status, "completed");
+  assert.equal(h.polls(), 1);
+  const wasm = { ...shared, format: "flac" };
+  const w = harness([{ ...wasm, status: "completed" }]);
+  assert.equal((await w.waitForReady(wasm)).status, "completed");
+});
+
 test("failure while native playback waits is surfaced instead of returning packet audio", async () => {
   const h = harness([{ ...shared, status: "failed", error: "provider failed" }]);
   await assert.rejects(h.waitForReady(shared), /provider failed/);

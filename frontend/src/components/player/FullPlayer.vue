@@ -193,9 +193,17 @@ onBeforeUnmount(() => {
             :align-position="lyricAlignPosition"
             :word-fade-width="0.5"
             :word-mode="status.lyricWordMode"
+            :show-line-romanization="status.lyricRoman"
+            :show-word-romanization="status.lyricRoman"
             @seek="onLineClick"
             @conversion-state="handleLyricConversionState"
-          />
+          >
+            <template v-if="media.lyricCredits.length" #bottom>
+              <ul class="lyric-credits" aria-label="歌曲署名">
+                <li v-for="credit in media.lyricCredits" :key="credit">{{ credit }}</li>
+              </ul>
+            </template>
+          </LyricsView>
           <div v-else class="lyric-empty">
             <p>{{ media.lyricLoading ? "正在加载歌词..." : "暂无歌词" }}</p>
           </div>

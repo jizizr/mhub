@@ -183,6 +183,7 @@ async fn resolve_soda_track(
         url: download_url,
         headers: HashMap::new(),
         max_chunk_size: None,
+        replay_gain_centi_db: None,
         duration: track
             .duration
             .filter(|duration| *duration > 0)

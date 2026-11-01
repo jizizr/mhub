@@ -84,6 +84,7 @@ impl MusicProvider for BilibiliProvider {
             url: audio,
             headers,
             max_chunk_size: None,
+            replay_gain_centi_db: None,
             duration: view
                 .duration
                 .filter(|duration| *duration > 0)

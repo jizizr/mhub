@@ -3,7 +3,7 @@ use super::provider::{
     VkeysResponse, append_vkeys_auth, get_json_with_headers, json_id_to_string,
     parse_vkeys_duration, parse_vkeys_kbps, vkeys_enabled, vkeys_track_format, vkeys_url,
 };
-use crate::{BotError, settings::SETTINGS};
+use crate::BotError;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -102,8 +102,8 @@ async fn resolve_netease_id(keyword: &str, selected_id: Option<&str>) -> Result<
 }
 
 async fn resolve_netease_native(id: &str, quality: &str) -> Result<MusicTrack, BotError> {
-    let (song, download_url) =
-        tokio::try_join!(get_netease_song(id), get_netease_download_url(id, quality))?;
+    let (song, source) =
+        tokio::try_join!(get_netease_song(id), get_netease_audio_source(id, quality))?;
     let singer = netease_artists(&song);
     let album = song.album.unwrap_or_default();
     Ok(MusicTrack {
@@ -114,15 +114,18 @@ async fn resolve_netease_native(id: &str, quality: &str) -> Result<MusicTrack, B
         album: album.name,
         cover: album.pic_url.unwrap_or_default(),
         link: format!("https://music.163.com/#/song?id={id}"),
-        url: download_url,
+        url: source.url,
         headers: HashMap::new(),
         max_chunk_size: None,
+        replay_gain_centi_db: source.replay_gain_centi_db,
         duration: song
             .duration
+            .or(source.duration_ms)
             .filter(|duration| *duration > 0)
             .map(|duration| ((duration + 500) / 1000) as u32),
-        bitrate: None,
-        format: Some("mp3".to_string()),
+        bitrate: source.bitrate,
+        // The CDN labels FLAC as audio/mpeg; the API's `type` is authoritative.
+        format: Some(source.format),
     })
 }
 
@@ -146,21 +149,46 @@ async fn search_netease_native(
 }
 
 async fn get_native_netease_lyrics(id: &str) -> Result<Option<MusicLyrics>, BotError> {
-    let response = get_netease_lyrics(id).await?;
-    let plain = response.lrc.map(|lyric| lyric.lyric).unwrap_or_default();
-    let translation = response.tlyric.map(|lyric| lyric.lyric).unwrap_or_default();
+    Ok(netease_lyrics_from_response(get_netease_lyrics(id).await?))
+}
+
+fn netease_lyrics_from_response(response: NeteaseLyricResponse) -> Option<MusicLyrics> {
+    let text = |part: Option<NeteaseLyricPart>| part.map(|lyric| lyric.lyric).unwrap_or_default();
+    let plain = text(response.lrc);
+    let translation = text(response.tlyric);
     let words = response
         .yrc
         .map(|lyric| super::word_lyrics::parse_yrc(&lyric.lyric))
         .unwrap_or_default();
+    // `yromalrc` is timed to the word-by-word lines, `romalrc` to the LRC.
+    let line_roman = text(response.romalrc);
+    let word_roman = text(response.yromalrc);
+    let roman = if !words.is_empty() && !word_roman.trim().is_empty() {
+        word_roman
+    } else {
+        line_roman
+    };
     if plain.trim().is_empty() && translation.trim().is_empty() && words.is_empty() {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(MusicLyrics {
+    let credits = [
+        ("歌词贡献者", response.lyric_user),
+        ("翻译贡献者", response.trans_user),
+    ]
+    .into_iter()
+    .filter_map(|(role, user)| {
+        let name = user?.nickname?;
+        let name = name.trim();
+        (!name.is_empty()).then(|| format!("{role}：{name}"))
+    })
+    .collect();
+    Some(MusicLyrics {
         plain,
         translation,
         words,
-    }))
+        roman,
+        credits,
+    })
 }
 
 #[derive(Deserialize)]
@@ -196,8 +224,31 @@ struct NeteaseUrlResponse {
 #[derive(Deserialize)]
 struct NeteaseUrlData {
     url: Option<String>,
+    #[serde(default)]
+    br: Option<u64>,
+    #[serde(default, rename = "type")]
+    file_type: Option<String>,
+    /// The tier actually served, e.g. `lossless` when `hires` has no Hi-Res master.
+    #[serde(default)]
+    level: Option<String>,
+    #[serde(default)]
+    time: Option<u64>,
+    /// ReplayGain-style track gain (dB to reach -18 LUFS); measured against
+    /// ffmpeg ebur128 on several songs it agrees within 0.1 dB.
+    #[serde(default)]
+    gain: Option<f64>,
     #[serde(default, rename = "freeTrialInfo")]
     free_trial_info: Option<NeteaseFreeTrialInfo>,
+}
+
+#[derive(Debug, PartialEq)]
+struct NeteaseAudioSource {
+    url: String,
+    format: String,
+    bitrate: Option<u32>,
+    level: Option<String>,
+    duration_ms: Option<u64>,
+    replay_gain_centi_db: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -249,6 +300,20 @@ struct NeteaseLyricResponse {
     lrc: Option<NeteaseLyricPart>,
     tlyric: Option<NeteaseLyricPart>,
     yrc: Option<NeteaseLyricPart>,
+    #[serde(default)]
+    romalrc: Option<NeteaseLyricPart>,
+    #[serde(default)]
+    yromalrc: Option<NeteaseLyricPart>,
+    #[serde(default, rename = "lyricUser")]
+    lyric_user: Option<NeteaseLyricUser>,
+    #[serde(default, rename = "transUser")]
+    trans_user: Option<NeteaseLyricUser>,
+}
+
+#[derive(Deserialize)]
+struct NeteaseLyricUser {
+    #[serde(default)]
+    nickname: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -376,6 +441,7 @@ async fn get_vkeys_netease_track(id: &str, quality: &str) -> Result<MusicTrack, 
         url: download_url.clone(),
         headers: HashMap::new(),
         max_chunk_size: None,
+        replay_gain_centi_db: None,
         duration: parse_vkeys_duration(&track.interval),
         // MusicTrack.bitrate 按 bps 消费，vkeys 报的是 kbps
         bitrate: parse_vkeys_kbps(&track.kbps).map(|kbps| kbps.saturating_mul(1000)),
@@ -419,25 +485,172 @@ async fn get_netease_song(id: &str) -> Result<NeteaseSong, BotError> {
         .ok_or_else(|| BotError::Custom("没有找到歌曲详情".to_string()))
 }
 
-async fn get_netease_download_url(id: &str, quality: &str) -> Result<String, BotError> {
+async fn get_netease_audio_source(id: &str, quality: &str) -> Result<NeteaseAudioSource, BotError> {
+    // `url/v1` selects by tier and reports what it actually served; the old
+    // bitrate endpoint stays as a fallback when the EAPI gateway misbehaves.
+    let response = match get_netease_url_v1(id, quality).await {
+        Ok(response) => response,
+        Err(_) => get_netease_url_legacy(id, quality).await?,
+    };
+    ensure_netease_ok(response.code, response.msg.as_deref())?;
+    if let Some(source) = response
+        .data
+        .into_iter()
+        .find_map(netease_full_audio_source)
+    {
+        return Ok(source);
+    }
+    let hint = if netease_cookie().is_none() {
+        "未配置网易云登录 Cookie，会员歌曲无法获取"
+    } else {
+        match super::netease_session::logged_in().await {
+            Some(false) => "网易云登录已失效，请更新 Cookie",
+            Some(true) => "账号会员权益不足或歌曲已下架",
+            None => "可能是账号会员权益不足或登录已失效",
+        }
+    };
+    Err(BotError::Custom(format!(
+        "网易云只返回了试听链接或没有可播放链接（{hint}）"
+    )))
+}
+
+async fn get_netease_url_v1(id: &str, quality: &str) -> Result<NeteaseUrlResponse, BotError> {
+    let ids = serde_json::to_string(&[id])?;
+    let params = serde_json::json!({
+        "ids": ids,
+        "level": netease_native_level(quality),
+        "encodeType": "flac",
+    });
+    netease_eapi("/api/song/enhance/player/url/v1", &params).await
+}
+
+async fn get_netease_url_legacy(id: &str, quality: &str) -> Result<NeteaseUrlResponse, BotError> {
     let url = format!(
         "https://music.163.com/api/song/enhance/player/url?id={}&ids=[{}]&br={}",
         urlencoding::encode(id),
         urlencoding::encode(id),
         netease_native_bitrate(quality)
     );
-    let response: NeteaseUrlResponse = get_netease_json(&url).await?;
-    ensure_netease_ok(response.code, response.msg.as_deref())?;
-    response
-        .data
-        .into_iter()
-        .find_map(netease_full_download_url)
-        .filter(|url| !url.trim().is_empty())
-        .ok_or_else(|| BotError::Custom("网易云只返回了试听链接或没有可下载链接".to_string()))
+    get_netease_json(&url).await
 }
 
-fn netease_full_download_url(item: NeteaseUrlData) -> Option<String> {
-    item.free_trial_info.is_none().then_some(item.url).flatten()
+const NETEASE_EAPI_KEY: &[u8; 16] = b"e82ckenh8dichen8";
+
+pub(super) async fn netease_eapi<T: serde::de::DeserializeOwned>(
+    path: &str,
+    params: &serde_json::Value,
+) -> Result<T, BotError> {
+    netease_eapi_with_cookies(path, params)
+        .await
+        .map(|(body, _)| body)
+}
+
+/// Like `netease_eapi`, also returning the response's `Set-Cookie` values.
+pub(super) async fn netease_eapi_with_cookies<T: serde::de::DeserializeOwned>(
+    path: &str,
+    params: &serde_json::Value,
+) -> Result<(T, Vec<String>), BotError> {
+    let api_path = path
+        .strip_prefix("/api")
+        .ok_or_else(|| BotError::Custom(format!("无效的网易云 EAPI 路径 {path}")))?;
+    let mut request = super::provider::CLIENT
+        .post(format!("https://interface.music.163.com/eapi{api_path}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("User-Agent", "Mozilla/5.0 NeteaseMusicDesktop/3.1.3.203419")
+        .header("Referer", "https://music.163.com/")
+        .body(netease_eapi_body(path, &params.to_string()));
+    if let Some(cookie) = netease_cookie() {
+        request = request.header("Cookie", netease_eapi_cookie(&cookie));
+    }
+    let resp = request.send().await?;
+    if !resp.status().is_success() {
+        return Err(BotError::Custom(format!(
+            "网易云 EAPI 请求失败：HTTP {}",
+            resp.status()
+        )));
+    }
+    let set_cookies = resp
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_string))
+        .collect();
+    let bytes = resp.bytes().await?;
+    // Without `e_r` the gateway answers in plain JSON; with it, AES-ECB.
+    if let Ok(value) = serde_json::from_slice(&bytes) {
+        return Ok((value, set_cookies));
+    }
+    let decrypted = super::online_lyrics::aes_ecb_decrypt(&bytes, NETEASE_EAPI_KEY)
+        .ok_or_else(|| BotError::Custom("网易云 EAPI 响应解密失败".to_string()))?;
+    Ok((serde_json::from_slice(&decrypted)?, set_cookies))
+}
+
+fn netease_eapi_body(path: &str, params: &str) -> String {
+    let digest = format!(
+        "{:x}",
+        md5::compute(format!("nobody{path}use{params}md5forencrypt"))
+    );
+    let payload = format!("{path}-36cd479b6b5-{params}-36cd479b6b5-{digest}");
+    let encrypted = super::online_lyrics::aes_ecb_encrypt(payload.as_bytes(), NETEASE_EAPI_KEY);
+    let hex = encrypted
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    format!("params={hex}")
+}
+
+/// The EAPI gateway grants member tiers to desktop-client sessions.
+fn netease_eapi_cookie(cookie: &str) -> String {
+    let mut cookie = netease_cookie_with_device(cookie);
+    for (key, value) in [("os", "pc"), ("appver", "3.1.3.203419")] {
+        if !cookie_has_key(&cookie, key) {
+            let separator = if cookie.trim_end().ends_with(';') {
+                " "
+            } else {
+                "; "
+            };
+            cookie = format!("{cookie}{separator}{key}={value}");
+        }
+    }
+    cookie
+}
+
+fn netease_full_audio_source(item: NeteaseUrlData) -> Option<NeteaseAudioSource> {
+    if item.free_trial_info.is_some() {
+        return None;
+    }
+    let url = item.url.map(|url| url.trim().to_string())?;
+    if url.is_empty() {
+        return None;
+    }
+    let format = item
+        .file_type
+        .as_deref()
+        .map(|kind| kind.trim().to_ascii_lowercase())
+        .filter(|kind| !kind.is_empty() && kind.chars().all(|c| c.is_ascii_alphanumeric()))
+        .or_else(|| {
+            url.split('?')
+                .next()
+                .and_then(|path| path.rsplit_once('.'))
+                .map(|(_, ext)| ext.to_ascii_lowercase())
+                .filter(|ext| matches!(ext.as_str(), "mp3" | "flac" | "m4a"))
+        })
+        .unwrap_or_else(|| "mp3".to_string());
+    Some(NeteaseAudioSource {
+        url,
+        format,
+        bitrate: item
+            .br
+            .filter(|br| *br > 0)
+            .map(|br| br.min(u32::MAX as u64) as u32),
+        level: item.level.filter(|level| !level.trim().is_empty()),
+        duration_ms: item.time.filter(|time| *time > 0),
+        // 0 means "not measured"; anything beyond ±30 dB is not a real gain.
+        replay_gain_centi_db: item
+            .gain
+            .filter(|gain| gain.is_finite() && *gain != 0.0 && gain.abs() <= 30.0)
+            .map(|gain| (gain * 100.0).round() as i32),
+    })
 }
 
 fn ensure_netease_ok(code: Option<i64>, msg: Option<&str>) -> Result<(), BotError> {
@@ -620,6 +833,18 @@ fn netease_vkeys_quality(quality: &str) -> i64 {
     }
 }
 
+/// Hi-Res falls back to `lossless` server-side when a song has no master.
+/// `jyeffect`/`sky` are processed surround renditions, not masters, so no
+/// listening tier maps onto them.
+fn netease_native_level(quality: &str) -> &'static str {
+    match quality.trim().to_ascii_lowercase().as_str() {
+        "standard" | "std" | "128" => "standard",
+        "lossless" | "flac" | "无损" => "lossless",
+        "hires" | "hi-res" | "master" => "hires",
+        _ => "exhigh",
+    }
+}
+
 fn netease_native_bitrate(quality: &str) -> i64 {
     match quality.trim().to_ascii_lowercase().as_str() {
         "standard" | "std" | "128" => 128_000,
@@ -670,15 +895,7 @@ fn netease_headers() -> HashMap<String, String> {
 }
 
 fn netease_cookie() -> Option<String> {
-    let configured_cookie = SETTINGS.music.netease.cookie.trim();
-    if configured_cookie.is_empty() {
-        std::env::var("NETEASE_MUSIC_COOKIE")
-            .ok()
-            .map(|cookie| cookie.trim().to_string())
-            .filter(|cookie| !cookie.is_empty())
-    } else {
-        Some(configured_cookie.to_string())
-    }
+    super::netease_session::current_cookie()
 }
 
 fn netease_cookie_with_device(cookie: &str) -> String {
@@ -946,6 +1163,30 @@ mod tests {
     }
 
     #[test]
+    fn lyrics_keep_romanization_matching_the_lines_shown_and_contributors() {
+        let response = |yrc: &str| -> NeteaseLyricResponse {
+            serde_json::from_value(serde_json::json!({
+                "lrc": {"lyric": "[00:21.961]拦路雨"},
+                "romalrc": {"lyric": "[00:21.961]lan lou yv"},
+                "yrc": {"lyric": yrc},
+                "yromalrc": {"lyric": "[00:22.180]lan lou yv"},
+                "lyricUser": {"nickname": " 贡献者甲 "},
+                "transUser": {"nickname": ""}
+            }))
+            .unwrap()
+        };
+        let worded = netease_lyrics_from_response(response(
+            "[22180,1000](22180,500,0)拦(22680,500,0)路\n[23180,1000](23180,500,0)雨(23680,500,0)偏",
+        ))
+        .unwrap();
+        assert!(!worded.words.is_empty());
+        assert_eq!(worded.roman, "[00:22.180]lan lou yv");
+        assert_eq!(worded.credits, vec!["歌词贡献者：贡献者甲"]);
+        let lined = netease_lyrics_from_response(response("")).unwrap();
+        assert_eq!(lined.roman, "[00:21.961]lan lou yv");
+    }
+
+    #[test]
     fn netease_lyrics_url_requests_all_source_tracks() {
         let url = netease_lyrics_url("449818741");
         assert!(url.contains("lv=-1"));
@@ -992,14 +1233,85 @@ mod tests {
             r#"{"url":"https://example.test/trial.mp3","freeTrialInfo":{"start":0,"end":30000}}"#,
         )
         .unwrap();
-        assert_eq!(netease_full_download_url(trial), None);
+        assert_eq!(netease_full_audio_source(trial), None);
 
         let full: NeteaseUrlData =
             serde_json::from_str(r#"{"url":"https://example.test/full.mp3"}"#).unwrap();
         assert_eq!(
-            netease_full_download_url(full).as_deref(),
-            Some("https://example.test/full.mp3")
+            netease_full_audio_source(full).map(|source| source.url),
+            Some("https://example.test/full.mp3".to_string())
         );
+    }
+
+    #[test]
+    fn keeps_the_format_and_tier_the_api_actually_served() {
+        // Real `url/v1` shape: a FLAC on an `.flac`-less URL, Hi-Res downgraded.
+        let item: NeteaseUrlData = serde_json::from_value(serde_json::json!({
+            "url": "http://m801.music.126.net/x/y/abc", "br": 1567785, "size": 50737963,
+            "type": "FLAC", "encodeType": "mp3", "level": "lossless", "time": 258902,
+            "freeTrialInfo": null
+        }))
+        .unwrap();
+        let source = netease_full_audio_source(item).unwrap();
+        assert_eq!(source.format, "flac");
+        assert_eq!(source.bitrate, Some(1_567_785));
+        assert_eq!(source.level.as_deref(), Some("lossless"));
+        assert_eq!(source.duration_ms, Some(258_902));
+        assert_eq!(source.replay_gain_centi_db, None);
+        let with_gain: NeteaseUrlData = serde_json::from_value(serde_json::json!({
+            "url": "https://example.test/a.flac", "type": "flac", "gain": -7.291
+        }))
+        .unwrap();
+        assert_eq!(
+            netease_full_audio_source(with_gain)
+                .unwrap()
+                .replay_gain_centi_db,
+            Some(-729)
+        );
+
+        let untyped: NeteaseUrlData =
+            serde_json::from_str(r#"{"url":"https://example.test/a.flac?x=1"}"#).unwrap();
+        assert_eq!(netease_full_audio_source(untyped).unwrap().format, "flac");
+        let empty: NeteaseUrlData = serde_json::from_str(r#"{"url":"  "}"#).unwrap();
+        assert_eq!(netease_full_audio_source(empty), None);
+    }
+
+    #[test]
+    fn maps_listening_tiers_to_url_v1_levels() {
+        assert_eq!(netease_native_level("standard"), "standard");
+        assert_eq!(netease_native_level("high"), "exhigh");
+        assert_eq!(netease_native_level("lossless"), "lossless");
+        assert_eq!(netease_native_level("hires"), "hires");
+    }
+
+    #[test]
+    fn eapi_body_is_uppercase_hex_of_whole_blocks() {
+        let body = netease_eapi_body("/api/song/enhance/player/url/v1", r#"{"ids":"[\"1\"]"}"#);
+        let hex = body.strip_prefix("params=").unwrap();
+        assert_eq!(hex.len() % 32, 0);
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+        );
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        let plain = super::super::online_lyrics::aes_ecb_decrypt(&bytes, NETEASE_EAPI_KEY).unwrap();
+        assert!(
+            String::from_utf8(plain)
+                .unwrap()
+                .starts_with("/api/song/enhance/player/url/v1-36cd479b6b5-")
+        );
+    }
+
+    #[test]
+    fn eapi_cookie_adds_desktop_client_markers_once() {
+        let cookie = netease_eapi_cookie("MUSIC_U=abc; os=ios");
+        assert!(cookie.contains("os=ios"));
+        assert!(!cookie.contains("os=pc"));
+        assert!(cookie.contains("appver=3.1.3.203419"));
+        assert!(cookie.contains("NMTID="));
     }
 
     #[test]

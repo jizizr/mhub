@@ -19,6 +19,7 @@ function restore() {
     // "auto" (estimate by default) shipped briefly and was saved for everyone;
     // it maps to the new native default rather than to the estimate.
     if (!["native", "estimate", "line"].includes(data.lyricWordMode)) data.lyricWordMode = "native";
+    data.lyricRoman = data.lyricRoman === true;
     data.soundCheckEnabled = data.soundCheckEnabled === true;
     const crossfadeSeconds = Number(data.crossfadeSeconds ?? 4);
     data.crossfadeSeconds = Number.isFinite(crossfadeSeconds)
@@ -57,6 +58,9 @@ export const useStatusStore = defineStore("status", {
     // native: real word timing only; estimate: also spread line-only lyrics
     // evenly over their syllables; line: whole-line highlighting.
     lyricWordMode: "native",
+    // Romanization (e.g. NetEase pinyin/jyutping) under each line; off like
+    // the NetEase app's 音译 toggle.
+    lyricRoman: false,
     theme: "system",
     activeView: "discover",
     activePlaylistId: null,
@@ -107,6 +111,7 @@ export const useStatusStore = defineStore("status", {
           quality: this.quality,
           lyricScript: this.lyricScript,
           lyricWordMode: this.lyricWordMode,
+          lyricRoman: this.lyricRoman,
           theme: this.theme,
           activeView: this.activeView,
           activePlaylistId: this.activePlaylistId,

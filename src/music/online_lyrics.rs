@@ -166,6 +166,7 @@ fn merge(native: Option<MusicLyrics>, online: Option<OnlineLyrics>) -> Option<Mu
             plain: value.plain,
             translation: value.translation,
             words: value.words,
+            ..Default::default()
         }),
         (Some(mut native), Some(online)) => {
             if native.plain.trim().is_empty() {
@@ -1065,7 +1066,7 @@ fn qrc_to_lrc(value: &str) -> String {
         .join("\n")
 }
 
-fn aes_ecb_encrypt(input: &[u8], key: &[u8; 16]) -> Vec<u8> {
+pub(super) fn aes_ecb_encrypt(input: &[u8], key: &[u8; 16]) -> Vec<u8> {
     let cipher = Aes128::new(GenericArray::from_slice(key));
     let padding = 16 - input.len() % 16;
     let mut output = input.to_vec();
@@ -1076,7 +1077,7 @@ fn aes_ecb_encrypt(input: &[u8], key: &[u8; 16]) -> Vec<u8> {
     output
 }
 
-fn aes_ecb_decrypt(input: &[u8], key: &[u8; 16]) -> Option<Vec<u8>> {
+pub(super) fn aes_ecb_decrypt(input: &[u8], key: &[u8; 16]) -> Option<Vec<u8>> {
     if input.is_empty() || input.len() % 16 != 0 {
         return None;
     }
@@ -1299,6 +1300,7 @@ mod tests {
                 plain: "[00:01.000]Hello".into(),
                 translation: translation.into(),
                 words: Vec::new(),
+                ..Default::default()
             })
         };
         let online = || {
@@ -1336,6 +1338,7 @@ mod tests {
                 plain: plain.into(),
                 translation: "[00:01.000]Hello".into(),
                 words: Vec::new(),
+                ..Default::default()
             })
         };
         let aligned = merge(native("[00:01.100]你好\n[00:03.100]世界"), online()).unwrap();

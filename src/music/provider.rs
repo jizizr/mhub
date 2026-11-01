@@ -190,6 +190,10 @@ pub struct MusicLyrics {
     pub translation: String,
     /// Word-timed lines when the source has them; empty for LRC-only lyrics.
     pub words: Vec<super::word_lyrics::WordLine>,
+    /// Romanization as timed LRC (NetEase `romalrc`), matched to lines by time.
+    pub roman: String,
+    /// `role：names` entries, shown once below the lyrics.
+    pub credits: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -207,6 +211,9 @@ pub struct MusicTrack {
     pub duration: Option<u32>,
     pub bitrate: Option<u32>,
     pub format: Option<String>,
+    /// ReplayGain 2 track gain in hundredths of a dB (relative to -18 LUFS)
+    /// when the provider measured it; lets playback normalize from the start.
+    pub replay_gain_centi_db: Option<i32>,
 }
 
 impl MusicTrack {
@@ -368,6 +375,139 @@ where
     download_audio_with_headers_progress(url, headers, None, progress)
         .await
         .map(|audio| audio.bytes)
+}
+
+/// Bytes that must reach the growing file before the browser is pointed at it:
+/// enough for MP3 ID3 + first frames and FLAC STREAMINFO/SEEKTABLE.
+const PROGRESSIVE_READY_BYTES: usize = 64 * 1024;
+const PROGRESSIVE_RESUME_ATTEMPTS: u32 = 3;
+
+/// Whether a resolved track is a plain CDN file a browser can decode while it
+/// is still arriving. Only NetEase is enabled so far; other providers have
+/// chunking or container quirks that still need their own verification.
+pub fn can_stream_progressive_http(track: &MusicTrack) -> bool {
+    matches!(track.platform, MusicPlatform::Netease)
+        && track.max_chunk_size.is_none()
+        && (track.url.starts_with("https://") || track.url.starts_with("http://"))
+        && matches!(track.file_extension().as_str(), "mp3" | "flac")
+}
+
+/// Download `track.url` into `path` as it arrives, returning the complete
+/// bytes. `on_ready` fires once with the declared total length as soon as the
+/// file holds a playable prefix. A dropped connection resumes with a Range
+/// request so a growing file is never silently left truncated.
+pub async fn stream_http_audio_to_path<F>(
+    track: &MusicTrack,
+    path: &std::path::Path,
+    on_ready: &mut F,
+) -> Result<Vec<u8>, BotError>
+where
+    F: FnMut(Option<u64>) + Send,
+{
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::File::create(path).await?;
+    let mut buf = Vec::new();
+    let mut total = None;
+    let mut announced = false;
+    let mut resumes = 0;
+    loop {
+        let offset = buf.len() as u64;
+        let mut request = CLIENT.get(&track.url);
+        for (key, value) in &track.headers {
+            request = request.header(key, value);
+        }
+        if offset > 0 {
+            request = request.header(RANGE, format!("bytes={offset}-"));
+        }
+        let resp = match request.send().await {
+            Ok(resp) => resp,
+            Err(_) if offset > 0 && resumes < PROGRESSIVE_RESUME_ATTEMPTS => {
+                resumes += 1;
+                tokio::time::sleep(Duration::from_millis(300 * u64::from(resumes))).await;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let status = resp.status();
+        if offset == 0 {
+            if status != reqwest::StatusCode::OK {
+                return Err(BotError::Custom(format!("音频下载失败：HTTP {status}")));
+            }
+            total = resp.content_length();
+            if total.is_some_and(|total| total > MAX_AUDIO_DOWNLOAD_BYTES) {
+                return Err(BotError::Custom(oversize_message(&track.url)));
+            }
+        } else {
+            // A resumed body is only appendable if it starts exactly where the
+            // file ends and describes the same object.
+            let range = resp
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range);
+            let continues = status == reqwest::StatusCode::PARTIAL_CONTENT
+                && range.is_some_and(|(start, _, reported)| {
+                    start == offset && (reported.is_none() || reported == total)
+                });
+            if !continues {
+                return Err(BotError::Custom(format!(
+                    "音频续传失败：服务端未从第 {offset} 字节继续（HTTP {status}）"
+                )));
+            }
+        }
+
+        let mut resp = resp;
+        let interrupted = loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    file.write_all(&chunk).await?;
+                    file.flush().await?;
+                    buf.extend_from_slice(&chunk);
+                    if buf.len() as u64 > MAX_AUDIO_DOWNLOAD_BYTES {
+                        return Err(BotError::Custom(oversize_message(&track.url)));
+                    }
+                    if !announced
+                        && (buf.len() >= PROGRESSIVE_READY_BYTES || total == Some(buf.len() as u64))
+                    {
+                        announced = true;
+                        on_ready(total);
+                    }
+                }
+                Ok(None) => break None,
+                Err(error) => break Some(error),
+            }
+        };
+        let received = buf.len() as u64;
+        match (interrupted, total) {
+            (None, Some(total)) if received == total => break,
+            (None, None) => break,
+            (None, Some(total)) if received > total => {
+                return Err(BotError::Custom(format!(
+                    "音频下载失败：收到 {received} 字节，超过声明的 {total} 字节"
+                )));
+            }
+            // Short body or a broken connection: resume only when the full
+            // length is known, otherwise the end of the song is unknowable.
+            (_, Some(_)) if resumes < PROGRESSIVE_RESUME_ATTEMPTS => {
+                resumes += 1;
+                tokio::time::sleep(Duration::from_millis(300 * u64::from(resumes))).await;
+            }
+            (Some(error), _) => return Err(error.into()),
+            (None, Some(total)) => {
+                return Err(BotError::Custom(format!(
+                    "音频下载失败：文件不完整（已收到 {received} / 共 {total} 字节）"
+                )));
+            }
+        }
+    }
+    if buf.is_empty() {
+        return Err(BotError::Custom("下载失败：文件为空".to_string()));
+    }
+    if !announced {
+        on_ready(total);
+    }
+    Ok(buf)
 }
 
 async fn download_audio_with_headers_progress<F>(
@@ -785,6 +925,107 @@ pub(crate) fn vkeys_track_format(url: &str, quality: &str, size: &str) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serves `body`; the first plain GET is cut after `cut` bytes, later
+    /// requests must carry `Range: bytes=N-` and get the matching 206 tail.
+    async fn spawn_flaky_audio_server(body: &'static [u8], cut: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 4096];
+                let read = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+                let total = body.len();
+                if let Some(start) = request
+                    .split("range: bytes=")
+                    .nth(1)
+                    .and_then(|rest| rest.split('-').next())
+                    .and_then(|start| start.parse::<usize>().ok())
+                {
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{}/{total}\r\nConnection: close\r\n\r\n",
+                        total - start,
+                        total - 1
+                    );
+                    socket.write_all(head.as_bytes()).await.unwrap();
+                    socket.write_all(&body[start..]).await.unwrap();
+                } else {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+                    );
+                    socket.write_all(head.as_bytes()).await.unwrap();
+                    socket.write_all(&body[..cut]).await.unwrap();
+                }
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{address}/song.flac")
+    }
+
+    fn progressive_track(url: String) -> MusicTrack {
+        MusicTrack {
+            id: "1".to_string(),
+            platform: MusicPlatform::Netease,
+            song: "song".to_string(),
+            singer: "singer".to_string(),
+            album: String::new(),
+            cover: String::new(),
+            link: String::new(),
+            url,
+            headers: HashMap::new(),
+            max_chunk_size: None,
+            replay_gain_centi_db: None,
+            duration: None,
+            bitrate: None,
+            format: Some("flac".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn progressive_download_resumes_a_dropped_connection_with_range() {
+        static BODY: [u8; 100_000] = {
+            let mut body = [0u8; 100_000];
+            let mut index = 0;
+            while index < body.len() {
+                body[index] = (index % 251) as u8;
+                index += 1;
+            }
+            body
+        };
+        let url = spawn_flaky_audio_server(&BODY, 70_000).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audio.flac.streaming");
+        let track = progressive_track(url);
+        assert!(can_stream_progressive_http(&track));
+        let mut ready = Vec::new();
+        let bytes = stream_http_audio_to_path(&track, &path, &mut |total| ready.push(total))
+            .await
+            .unwrap();
+        assert_eq!(bytes, BODY);
+        assert_eq!(std::fs::read(&path).unwrap(), BODY);
+        assert_eq!(ready, vec![Some(100_000)]);
+    }
+
+    #[test]
+    fn only_plain_netease_mp3_or_flac_streams_progressively() {
+        let track = progressive_track("https://example.test/a".to_string());
+        assert!(can_stream_progressive_http(&track));
+        let mut other = track.clone();
+        other.format = Some("m4a".to_string());
+        assert!(!can_stream_progressive_http(&other));
+        let mut other = track.clone();
+        other.platform = MusicPlatform::Tencent;
+        assert!(!can_stream_progressive_http(&other));
+        let mut other = track.clone();
+        other.max_chunk_size = Some(1024);
+        assert!(!can_stream_progressive_http(&other));
+        let mut other = track;
+        other.url = "soda-download://x".to_string();
+        assert!(!can_stream_progressive_http(&other));
+    }
 
     #[test]
     fn supports_lyrics_matches_provider_overrides() {

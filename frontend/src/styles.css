@@ -1447,6 +1447,18 @@ button.artwork-card__play:hover { background: rgba(255, 255, 255, .86); color: v
   transform: translateY(-1px);
 }
 
+/* Songwriter credits under the last lyric line (AMLL's bottom line), small
+   and muted like Apple Music's "Written by" footer. */
+.lyric-credits {
+  margin: 1.6em 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.45em;
+  font-weight: 500;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.5);
+}
+
 .lyric-empty {
   height: 100%;
   display: grid;

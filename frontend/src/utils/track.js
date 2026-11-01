@@ -75,5 +75,8 @@ export function trackFromPlayback(task, fallback = {}) {
     cover_url: task?.cover_url || fallback.cover_url || "",
     lyrics_url: task?.lyrics_url || fallback.lyrics_url || "",
     status: task?.status || fallback.status || "queued",
+    // Provider-measured loudness, known before the audio finishes; the
+    // measured /loudness result replaces it once cached.
+    loudness_estimate: task?.loudness_estimate || fallback.loudness_estimate || null,
   };
 }

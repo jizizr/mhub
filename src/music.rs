@@ -3,7 +3,9 @@
 mod applemusic;
 mod bilibili;
 mod kugou;
+mod lyric_credits;
 mod netease;
+mod netease_session;
 mod online_lyrics;
 mod provider;
 mod qrc_crypto;
@@ -86,6 +88,21 @@ pub struct Lyrics {
     pub plain: String,
     pub translation: String,
     pub words: Vec<WordLine>,
+    pub roman: String,
+    pub credits: Vec<String>,
+}
+
+impl From<provider::MusicLyrics> for Lyrics {
+    fn from(mut lyrics: provider::MusicLyrics) -> Self {
+        lyric_credits::extract(&mut lyrics);
+        Self {
+            plain: lyrics.plain,
+            translation: lyrics.translation,
+            words: lyrics.words,
+            roman: lyrics.roman,
+            credits: lyrics.credits,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -348,6 +365,25 @@ pub fn can_stream_track_with_mode(track: &MusicTrack, streaming_mode: Option<&st
         && applemusic::can_stream_track_with_mode(&track.url, streaming_mode)
 }
 
+/// Plain CDN audio (NetEase MP3/FLAC) that a native `<audio>` element can play
+/// from a growing file. It never uses a packet transport.
+pub fn can_stream_progressive_http(track: &MusicTrack) -> bool {
+    provider::can_stream_progressive_http(track)
+}
+
+/// Mirror `track.url` into a growing file; `on_ready` receives the declared
+/// total length once a playable prefix is on disk.
+pub async fn stream_http_track_to_path<F>(
+    track: &MusicTrack,
+    path: &Path,
+    on_ready: &mut F,
+) -> ApiResult<Vec<u8>>
+where
+    F: FnMut(Option<u64>) + Send,
+{
+    provider::stream_http_audio_to_path(track, path, on_ready).await
+}
+
 /// Stream a supported track into a growing browser file and return the normal
 /// completed audio bytes for the existing cache/remux pipeline.
 pub async fn stream_track_to_path<F>(
@@ -374,6 +410,11 @@ where
         .await
 }
 
+/// Log the NetEase login state and run the opt-in Cookie refresh.
+pub fn spawn_netease_session_keeper(data_dir: PathBuf) {
+    netease_session::spawn_keeper(data_dir);
+}
+
 pub fn wasm_alac_stream_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.alacstream", path.display()))
 }
@@ -395,11 +436,7 @@ pub async fn lyrics(platform: MusicPlatform, track_id: &str) -> ApiResult<Option
     Ok(provider_for(platform)
         .lyrics(track_id)
         .await?
-        .map(|lyrics| Lyrics {
-            plain: lyrics.plain,
-            translation: lyrics.translation,
-            words: lyrics.words,
-        }))
+        .map(Lyrics::from))
 }
 
 pub async fn lyrics_for_track(
@@ -423,11 +460,7 @@ pub async fn lyrics_for_track(
     };
     let completed =
         online_lyrics::complete(platform, track_id, song, singer, album, duration, native).await?;
-    Ok(completed.map(|lyrics| Lyrics {
-        plain: lyrics.plain,
-        translation: lyrics.translation,
-        words: lyrics.words,
-    }))
+    Ok(completed.map(Lyrics::from))
 }
 
 fn provider_for(platform: MusicPlatform) -> &'static dyn MusicProvider {

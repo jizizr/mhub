@@ -56,6 +56,11 @@ function changeQuality(event) {
   player.prepareAudio(event.target.value);
 }
 
+function changeRoman(event) {
+  status.lyricRoman = event.target.value === "on";
+  status.persist();
+}
+
 function changePreference(key, event) {
   status[key] = event.target.value;
   status.persist();
@@ -139,6 +144,13 @@ onBeforeUnmount(() => {
               <option value="native">原生逐字</option>
               <option value="estimate">无逐字时匀速估算</option>
               <option value="line">逐行</option>
+            </select>
+          </div>
+          <div class="listening-settings__row">
+            <label :for="`${id}-lyric-roman`">音译</label>
+            <select :id="`${id}-lyric-roman`" title="歌词音译" :value="status.lyricRoman ? 'on' : 'off'" @change="changeRoman">
+              <option value="off">隐藏</option>
+              <option value="on">显示</option>
             </select>
           </div>
           <div class="listening-settings__row">

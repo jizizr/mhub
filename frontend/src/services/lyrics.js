@@ -2,9 +2,10 @@ import { getTrackLyrics } from "../apis/music.js";
 
 const loadLyricParser = () => import("../utils/lyrics.js").then((module) => module.buildLyricLines);
 
-// v2 adds word timing; v1 entries would hide it for a month.
-const STORAGE_KEY = "music-web-lyrics-v2";
-const LEGACY_STORAGE_KEY = "music-web-lyrics-v1";
+// v3 adds romanization and credits; v2 entries would hide them for a month.
+const STORAGE_KEY = "music-web-lyrics-v3";
+const LEGACY_STORAGE_KEYS = ["music-web-lyrics-v2", "music-web-lyrics-v1"];
+const MAX_CREDITS = 40;
 const MAX_ENTRIES = 100;
 const MAX_STORAGE_CHARS = 1_200_000;
 const MAX_LYRIC_CHARS = 300_000;
@@ -38,13 +39,19 @@ function cleanPayload(payload) {
   const plain = typeof payload.plain === "string" ? payload.plain : "";
   const translation = typeof payload.translation === "string" ? payload.translation : "";
   const words = cleanWords(payload.words);
-  const size = plain.length + translation.length + (words.length ? JSON.stringify(words).length : 0);
+  const roman = typeof payload.roman === "string" ? payload.roman : "";
+  const credits = Array.isArray(payload.credits)
+    ? payload.credits.filter((credit) => typeof credit === "string" && credit.trim() && credit.length <= 300).slice(0, MAX_CREDITS)
+    : [];
+  const size = plain.length + translation.length + roman.length + (words.length ? JSON.stringify(words).length : 0);
   if (size > MAX_LYRIC_CHARS) throw new Error("歌词内容过长");
   return {
     available: payload.available && Boolean(plain.trim() || translation.trim() || words.length),
     plain,
     translation,
     words,
+    roman,
+    credits,
   };
 }
 
@@ -131,7 +138,7 @@ export function createLyricsService({
         encoded = JSON.stringify({ version: 1, entries });
       }
       if (encoded.length <= MAX_STORAGE_CHARS) storage()?.setItem(STORAGE_KEY, encoded);
-      storage()?.removeItem?.(LEGACY_STORAGE_KEY);
+      for (const legacy of LEGACY_STORAGE_KEYS) storage()?.removeItem?.(legacy);
     } catch {
       // Private mode, quota limits or unavailable storage cannot block audio
       // or lyrics. The bounded session cache still serves the next opening.

@@ -134,3 +134,18 @@ test("persisted analysis is bounded to the most recent 300 representations", asy
   assert.equal(getCachedLoudness(track({ playback_id: "song-0" })), null);
   assert.deepEqual(getCachedLoudness(track({ playback_id: "song-300" })), ready());
 });
+
+test("a provider estimate normalizes a still-streaming play until a measurement exists", async (t) => {
+  const measured = ready({ integrated_lufs: -11, true_peak_dbfs: 0.7, gain_db: -5 });
+  const h = harness(t, () => measured);
+  const estimate = { state: "ready", version: 1, integrated_lufs: -10.71, true_peak_dbfs: 0, gain_db: -5.289999999999999 };
+  const streaming = track({ playback_id: "netease--65766--lossless", format: "flac", byte_size: null, streaming_mode: "", streaming_codec: "", streaming_protocol: "", loudness_estimate: estimate });
+  assert.equal(getCachedLoudness(streaming).gain_db, estimate.gain_db);
+  // A forged estimate whose gain does not follow from its levels is ignored.
+  assert.equal(getCachedLoudness({ ...streaming, loudness_estimate: { ...estimate, gain_db: 6 } }), null);
+
+  const completed = { ...streaming, byte_size: 50737963 };
+  assert.deepEqual(await warmLoudness(completed), measured, "the estimate must not stop warming");
+  assert.equal(h.requests.length, 1);
+  assert.deepEqual(getCachedLoudness(completed), measured);
+});

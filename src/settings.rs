@@ -176,6 +176,10 @@ pub struct TencentMusic {
 pub struct NeteaseMusic {
     #[serde(default)]
     pub cookie: String,
+    /// Hours between login refreshes; 0 (default) never refreshes. Refreshed
+    /// Cookies are kept in `<data dir>/netease-session.json`.
+    #[serde(default)]
+    pub refresh_hours: u64,
 }
 
 #[derive(Debug, Deserialize)]

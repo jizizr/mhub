@@ -24,6 +24,7 @@ export const useMediaStore = defineStore("media", {
   state: () => ({
     track: null,
     lyricLines: [],
+    lyricCredits: [],
     lyricLoading: false,
     coverBroken: false,
     expanded: false,
@@ -35,14 +36,17 @@ export const useMediaStore = defineStore("media", {
     },
     beginLyricLoad() {
       this.lyricLines = [];
+      this.lyricCredits = [];
       this.lyricLoading = true;
     },
     setLyric(lines) {
       this.lyricLines = markRaw(plainLyricLines(lines));
+      this.lyricCredits = Array.isArray(lines?.credits) ? [...lines.credits] : [];
       this.lyricLoading = false;
     },
     clearLyric() {
       this.lyricLines = [];
+      this.lyricCredits = [];
       this.lyricLoading = false;
     },
   },

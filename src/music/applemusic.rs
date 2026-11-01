@@ -543,6 +543,7 @@ async fn resolve_apple_track(
         url: download_url,
         headers: apple_download_headers(),
         max_chunk_size: None,
+        replay_gain_centi_db: None,
         duration: expected_duration,
         bitrate: None,
         format: Some("m4a".to_string()),

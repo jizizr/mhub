@@ -123,6 +123,11 @@ struct DownloadTask {
     /// `wasm_alac`).  This is deliberately separate from quality so an
     /// ordinary browser never receives ALAC expecting native decoding.
     streaming_mode: Option<String>,
+    /// Declared length of a progressive HTTP source while it is still being
+    /// mirrored, so the growing response can answer Range requests.
+    stream_total: Option<u64>,
+    /// Provider-measured ReplayGain (centi-dB), see `MusicTrack`.
+    replay_gain_centi_db: Option<i32>,
 }
 
 #[derive(Debug, Default)]
@@ -169,6 +174,11 @@ pub struct PlaybackTask {
     pub streaming_url: Option<String>,
     pub cover_url: String,
     pub lyrics_url: String,
+    /// Loudness derived from the provider's own measurement, available before
+    /// the file finishes so the first play can already be normalized. A later
+    /// `/loudness` measurement of the actual file supersedes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) loudness_estimate: Option<crate::loudness::LoudnessResponse>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -397,6 +407,10 @@ pub struct LyricsResponse {
     pub translation: String,
     /// Word-timed lines (`{start, end, bg?, words: [[start, end, text]]}`, ms).
     pub words: Vec<music::WordLine>,
+    /// Timed LRC romanization, empty when the source has none.
+    pub roman: String,
+    /// `role：names` credits lifted out of the lyric lines.
+    pub credits: Vec<String>,
 }
 
 pub fn app() -> Router {
@@ -414,6 +428,7 @@ pub fn app() -> Router {
             .expect("MUSIC_API_MEDIA_BASE_URL must be an HTTP(S) origin without credentials, path, query or fragment"),
     };
     spawn_audio_cache_sweeper(state.clone());
+    music::spawn_netease_session_keeper(state.data_dir.clone());
 
     app_with_state(state, serve_web())
 }
@@ -1059,6 +1074,8 @@ async fn create_download(
         decrypt_elapsed_seconds: None,
         error: None,
         streaming_mode,
+        stream_total: None,
+        replay_gain_centi_db: None,
     };
 
     // Resolving and checking Telegram may have yielded to another POST for
@@ -1253,7 +1270,7 @@ async fn download_stream(
         });
     }
     if task.status == DownloadStatus::Streaming {
-        return stream_growing_audio_file(state, &task, true).await;
+        return stream_growing_audio_file(state, &task, true, &headers).await;
     }
     if task.status != DownloadStatus::Completed {
         return Err(ApiError::Http {
@@ -1454,6 +1471,9 @@ fn public_task(state: &AppState, task: &DownloadTask) -> PlaybackTask {
             .map(|_| media_url(state, task, true)),
         cover_url: format!("/api/v1/playbacks/{}/cover", task.id),
         lyrics_url: format!("/api/v1/playbacks/{}/lyrics", task.id),
+        loudness_estimate: task
+            .replay_gain_centi_db
+            .and_then(crate::loudness::LoudnessResponse::from_replay_gain),
     }
 }
 
@@ -1533,11 +1553,16 @@ async fn run_download_inner(state: AppState, id: String) -> ApiResult<()> {
         return Ok(());
     }
 
-    let can_stream = music::can_stream_track_with_mode(&track, task.streaming_mode.as_deref());
-    if !can_stream && task.streaming_mode.is_some() {
+    let progressive = music::can_stream_progressive_http(&track);
+    let can_stream =
+        progressive || music::can_stream_track_with_mode(&track, task.streaming_mode.as_deref());
+    let mut task = task;
+    if (progressive || !can_stream) && task.streaming_mode.is_some() {
         // Invalid capability/quality combinations must return the ordinary
         // completed-file contract instead of advertising a packet endpoint
-        // that contains raw M4A bytes.
+        // that contains raw M4A bytes. A plain MP3/FLAC file is always the
+        // native contract, whatever packet transport the client offered.
+        task.streaming_mode = None;
         if let Some(current) = state.downloads.write().await.get_mut(&id) {
             current.streaming_mode = None;
         }
@@ -1655,6 +1680,7 @@ async fn download_provider_track(
     task.bitrate = track.bitrate;
     task.duration = track.duration;
     task.format = track.format;
+    task.replay_gain_centi_db = track.replay_gain_centi_db;
     task.decrypt_elapsed_seconds = media.decrypt_elapsed.map(duration_seconds);
     task.error = None;
     let completed_task = task.clone();
@@ -1678,7 +1704,13 @@ async fn download_provider_track_streaming(
     let streaming_filename = format!("{audio_filename}.streaming");
     let streaming_path = dir.join(&streaming_filename);
     let audio_path = dir.join(&audio_filename);
-    let audio_content_type = "audio/mp4".to_string();
+    let progressive = music::can_stream_progressive_http(&track);
+    let (audio_content_type, streaming_format) = if progressive {
+        let ext = track.file_extension();
+        (content_type_from_ext(&ext), ext)
+    } else {
+        ("audio/mp4".to_string(), "m4a".to_string())
+    };
 
     // Publish metadata before the first fragment arrives so the client can
     // immediately resolve the growing endpoint once status becomes streaming.
@@ -1697,32 +1729,44 @@ async fn download_provider_track_streaming(
         current.content_type = Some(audio_content_type.clone());
         current.bitrate = track.bitrate;
         current.duration = track.duration;
-        current.format = Some("m4a".to_string());
+        current.replay_gain_centi_db = track.replay_gain_centi_db;
+        current.format = Some(streaming_format);
+        current.stream_total = None;
         current.error = None;
     }
     notify_task_change(&state);
 
-    let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u64>>();
     let ready_state = state.clone();
     let ready_id = id.clone();
     let ready_listener = tokio::spawn(async move {
-        if ready_rx.recv().await.is_some()
+        if let Some(total) = ready_rx.recv().await
             && let Some(task) = ready_state.downloads.write().await.get_mut(&ready_id)
         {
             task.status = DownloadStatus::Streaming;
+            task.stream_total = total;
         }
         notify_task_change(&ready_state);
     });
-    let mut on_ready = || {
-        let _ = ready_tx.send(());
+    let streamed = if progressive {
+        let mut on_ready = |total| {
+            let _ = ready_tx.send(total);
+        };
+        music::stream_http_track_to_path(&track, &streaming_path, &mut on_ready)
+            .await
+            .map(|bytes| (bytes, None))
+    } else {
+        let mut on_ready = || {
+            let _ = ready_tx.send(None);
+        };
+        music::stream_track_to_path_with_mode(
+            &track,
+            &streaming_path,
+            task.streaming_mode.as_deref(),
+            &mut on_ready,
+        )
+        .await
     };
-    let streamed = music::stream_track_to_path_with_mode(
-        &track,
-        &streaming_path,
-        task.streaming_mode.as_deref(),
-        &mut on_ready,
-    )
-    .await;
     drop(ready_tx);
     let _ = ready_listener.await;
     let (audio_bytes, decrypt_elapsed) = match streamed {
@@ -1836,6 +1880,7 @@ async fn download_provider_track_streaming(
     current.content_type = Some(audio_content_type);
     current.byte_size = Some(audio_len as u64);
     current.decrypt_elapsed_seconds = decrypt_elapsed.map(duration_seconds);
+    current.stream_total = None;
     current.error = None;
     let completed_task = current.clone();
     drop(downloads);
@@ -2149,7 +2194,7 @@ async fn serve_audio_file(
                 message: "无损音频正在准备原生浏览器兼容版本，请稍后重试".to_string(),
             });
         }
-        return stream_growing_audio_file(state, &task, false).await;
+        return stream_growing_audio_file(state, &task, false, headers).await;
     }
     if task.status != DownloadStatus::Completed {
         return Err(ApiError::Http {
@@ -2183,6 +2228,7 @@ async fn stream_growing_audio_file(
     state: AppState,
     task: &DownloadTask,
     packet_stream: bool,
+    headers: &HeaderMap,
 ) -> ApiResult<Response> {
     let filename = task.filename.clone().ok_or_else(|| ApiError::Http {
         status: StatusCode::NOT_FOUND,
@@ -2198,29 +2244,64 @@ async fn stream_growing_audio_file(
     } else {
         base_path
     };
+    // A progressive source mirrors a CDN object of known length, so the
+    // response can promise that length and serve Range requests, waiting for
+    // bytes that have not arrived yet. Remuxed/decrypted streams have no
+    // final length until they finish and stay unranged.
+    let total = task.stream_total.filter(|_| !packet_stream);
+    let range = match total {
+        Some(total) => parse_range(headers, total)?,
+        None => None,
+    };
     // Keep one reader and its cursor for this response. Reopening, seeking and
     // stat'ing for every 64 KiB multiplies blocking filesystem work and makes
     // an active reader unnecessarily dependent on the pathname staying around.
-    let file = fs::File::open(&path).await?;
+    let mut file = fs::File::open(&path).await?;
     let stream_id = audio_stream_identity(&file.metadata().await?);
+    let (start, remaining) = match (range, total) {
+        (Some((start, end)), _) => (start, Some(end - start + 1)),
+        (None, Some(total)) => (0, Some(total)),
+        (None, None) => (0, None),
+    };
+    if start > 0 {
+        file.seek(SeekFrom::Start(start)).await?;
+    }
     let downloads = state.downloads.clone();
     let id = task.id.clone();
     let generation = task.media_revision.clone();
     let stream = stream::unfold(
-        (file, downloads, id, generation),
-        |(mut file, downloads, id, generation)| async move {
-            let mut bytes = vec![0u8; AUDIO_STREAM_CHUNK_SIZE];
+        (file, downloads, id, generation, remaining),
+        |(mut file, downloads, id, generation, mut remaining)| async move {
+            if remaining == Some(0) {
+                return None;
+            }
             let mut producer_completed = false;
             loop {
+                let want = remaining.map_or(AUDIO_STREAM_CHUNK_SIZE, |left| {
+                    left.min(AUDIO_STREAM_CHUNK_SIZE as u64) as usize
+                });
+                let mut bytes = vec![0u8; want];
                 match file.read(&mut bytes).await {
-                    Ok(0) if producer_completed => return None,
+                    Ok(0) if producer_completed && remaining.is_none() => return None,
+                    Ok(0) if producer_completed => {
+                        return Some((
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "音频文件短于声明长度，请重试播放",
+                            )),
+                            (file, downloads, id, generation, remaining),
+                        ));
+                    }
+                    // A Range far ahead of the download waits here until the
+                    // mirror reaches it.
                     Ok(0) => {}
                     Ok(read) => {
                         bytes.truncate(read);
-                        return Some((Ok(bytes), (file, downloads, id, generation)));
+                        remaining = remaining.map(|left| left - read as u64);
+                        return Some((Ok(bytes), (file, downloads, id, generation, remaining)));
                     }
                     Err(error) => {
-                        return Some((Err(error), (file, downloads, id, generation)));
+                        return Some((Err(error), (file, downloads, id, generation, remaining)));
                     }
                 }
 
@@ -2246,30 +2327,45 @@ async fn stream_growing_audio_file(
                             std::io::ErrorKind::UnexpectedEof,
                             "音频流生成中断，请重试播放",
                         )),
-                        (file, downloads, id, generation),
+                        (file, downloads, id, generation, remaining),
                     ));
                 }
                 tokio::time::sleep(Duration::from_millis(40)).await;
             }
         },
     );
+    let content_type = if packet_stream {
+        "application/x-splayer-alac".to_string()
+    } else {
+        task.content_type
+            .clone()
+            .unwrap_or_else(|| "audio/mp4".to_string())
+    };
     let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            if packet_stream {
-                "application/x-splayer-alac"
-            } else {
-                "audio/mp4"
-            },
-        )
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, "no-store, no-transform")
         .header("X-Accel-Buffering", "no")
-        .header(header::ACCEPT_RANGES, "none")
         .header(
             header::CONTENT_DISPOSITION,
             format!("inline; filename=\"{}\"", ascii_filename(&filename)),
         );
+    response = match (range, total) {
+        (Some((start, end)), Some(total)) => response
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end}/{total}"),
+            )
+            .header(header::CONTENT_LENGTH, (end - start + 1).to_string()),
+        (None, Some(total)) => response
+            .status(StatusCode::OK)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::CONTENT_LENGTH, total.to_string()),
+        _ => response
+            .status(StatusCode::OK)
+            .header(header::ACCEPT_RANGES, "none"),
+    };
     if let Some(identity) = stream_id {
         response = response.header("X-Audio-Stream-Id", identity);
     }
@@ -2349,6 +2445,8 @@ fn task_from_cache(
         decrypt_elapsed_seconds: None,
         error: None,
         streaming_mode: None,
+        stream_total: None,
+        replay_gain_centi_db: None,
     }
 }
 
@@ -2530,6 +2628,8 @@ fn lyrics_response(
             plain: String::new(),
             translation: String::new(),
             words: Vec::new(),
+            roman: String::new(),
+            credits: Vec::new(),
         };
     };
     LyricsResponse {
@@ -2541,6 +2641,8 @@ fn lyrics_response(
         plain: lyrics.plain,
         translation: lyrics.translation,
         words: lyrics.words,
+        roman: lyrics.roman,
+        credits: lyrics.credits,
     }
 }
 
@@ -3678,7 +3780,7 @@ mod tests {
             .write()
             .await
             .insert(task.id.clone(), task.clone());
-        let growing = stream_growing_audio_file(state.clone(), &task, false)
+        let growing = stream_growing_audio_file(state.clone(), &task, false, &HeaderMap::new())
             .await
             .unwrap();
         let mut replacement = task.clone();
@@ -3795,7 +3897,7 @@ mod tests {
                     let id = growing_id.clone();
                     async move {
                         let task = state.downloads.read().await[&id].clone();
-                        stream_growing_audio_file(state, &task, false).await
+                        stream_growing_audio_file(state, &task, false, &HeaderMap::new()).await
                     }
                 }),
             )
@@ -4161,6 +4263,8 @@ mod tests {
             decrypt_elapsed_seconds: None,
             error: None,
             streaming_mode: Some("wasm_alac".to_string()),
+            stream_total: None,
+            replay_gain_centi_db: None,
         };
         let state = AppState {
             downloads: Arc::new(RwLock::new(HashMap::new())),
@@ -4202,7 +4306,7 @@ mod tests {
                 .write()
                 .await
                 .insert(task.id.clone(), task.clone());
-            let response = stream_growing_audio_file(state.clone(), &task, true)
+            let response = stream_growing_audio_file(state.clone(), &task, true, &HeaderMap::new())
                 .await
                 .unwrap();
             assert_eq!(response.headers()["x-accel-buffering"], "no");
@@ -4236,7 +4340,7 @@ mod tests {
             .write()
             .await
             .insert(task.id.clone(), task.clone());
-        let response = stream_growing_audio_file(state.clone(), &task, false)
+        let response = stream_growing_audio_file(state.clone(), &task, false, &HeaderMap::new())
             .await
             .unwrap();
         let mut body = response.into_body().into_data_stream();
@@ -4265,6 +4369,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn progressive_growing_stream_serves_ranges_of_the_declared_length() {
+        let directory = tempfile::tempdir().unwrap();
+        let (state, mut task) = test_cache_state(directory.path());
+        task.status = DownloadStatus::Streaming;
+        task.content_type = Some("audio/flac".to_string());
+        task.stream_total = Some(10);
+        let folder = audio_work_dir(&state, &task.work_id);
+        fs::create_dir_all(&folder).await.unwrap();
+        let path = folder.join(task.filename.as_deref().unwrap());
+        fs::write(&path, b"0123").await.unwrap();
+        state
+            .downloads
+            .write()
+            .await
+            .insert(task.id.clone(), task.clone());
+
+        let full = stream_growing_audio_file(state.clone(), &task, false, &HeaderMap::new())
+            .await
+            .unwrap();
+        assert_eq!(full.status(), StatusCode::OK);
+        assert_eq!(full.headers()[header::CONTENT_LENGTH], "10");
+        assert_eq!(full.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(full.headers()[header::CONTENT_TYPE], "audio/flac");
+
+        // A seek past the mirrored prefix waits for the bytes, then stops at
+        // the requested end instead of reading the rest of the file.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=6-8".parse().unwrap());
+        let ranged = stream_growing_audio_file(state.clone(), &task, false, &headers)
+            .await
+            .unwrap();
+        assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(ranged.headers()[header::CONTENT_RANGE], "bytes 6-8/10");
+        assert_eq!(ranged.headers()[header::CONTENT_LENGTH], "3");
+        let mut body = ranged.into_body().into_data_stream();
+        let mut next = Box::pin(body.next());
+        tokio::select! {
+            _ = &mut next => panic!("a range beyond the mirror must wait for it"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        let mut producer = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        producer.write_all(b"456789").await.unwrap();
+        producer.flush().await.unwrap();
+        assert_eq!(next.await.unwrap().unwrap(), "678");
+        assert!(body.next().await.is_none());
+
+        let mut beyond = HeaderMap::new();
+        beyond.insert(header::RANGE, "bytes=10-".parse().unwrap());
+        let error = stream_growing_audio_file(state.clone(), &task, false, &beyond)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ApiError::Http {
+                status: StatusCode::RANGE_NOT_SATISFIABLE,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn progressive_growing_stream_errors_when_the_file_ends_short() {
+        let directory = tempfile::tempdir().unwrap();
+        let (state, mut task) = test_cache_state(directory.path());
+        task.status = DownloadStatus::Completed;
+        task.stream_total = Some(10);
+        let folder = audio_work_dir(&state, &task.work_id);
+        fs::create_dir_all(&folder).await.unwrap();
+        fs::write(folder.join(task.filename.as_deref().unwrap()), b"0123")
+            .await
+            .unwrap();
+        state
+            .downloads
+            .write()
+            .await
+            .insert(task.id.clone(), task.clone());
+        let response = stream_growing_audio_file(state.clone(), &task, false, &HeaderMap::new())
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(body.next().await.unwrap().unwrap(), "0123");
+        assert!(body.next().await.unwrap().is_err());
+    }
+
+    #[tokio::test]
     async fn completed_status_racing_the_last_append_does_not_truncate_the_stream() {
         let directory = tempfile::tempdir().unwrap();
         let (state, mut task) = test_cache_state(directory.path());
@@ -4278,7 +4471,7 @@ mod tests {
             .write()
             .await
             .insert(task.id.clone(), task.clone());
-        let response = stream_growing_audio_file(state.clone(), &task, false)
+        let response = stream_growing_audio_file(state.clone(), &task, false, &HeaderMap::new())
             .await
             .unwrap();
         let mut body = response.into_body().into_data_stream();
@@ -4320,7 +4513,7 @@ mod tests {
             .write()
             .await
             .insert(task.id.clone(), task.clone());
-        let growing = stream_growing_audio_file(state.clone(), &task, true)
+        let growing = stream_growing_audio_file(state.clone(), &task, true, &HeaderMap::new())
             .await
             .unwrap();
         let identity = growing.headers()["x-audio-stream-id"].clone();
@@ -4395,7 +4588,7 @@ mod tests {
             .write()
             .await
             .insert(task.id.clone(), task.clone());
-        let growing = stream_growing_audio_file(state.clone(), &task, true)
+        let growing = stream_growing_audio_file(state.clone(), &task, true, &HeaderMap::new())
             .await
             .unwrap();
         let original_identity = growing.headers()["x-audio-stream-id"].clone();

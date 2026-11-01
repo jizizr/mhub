@@ -190,6 +190,7 @@ async fn resolve_native_with_cookie(
                         url,
                         headers: HashMap::new(),
                         max_chunk_size: None,
+                        replay_gain_centi_db: None,
                         duration: None,
                         bitrate: None,
                         format: Some(quality.ext.to_string()),
@@ -482,6 +483,7 @@ async fn get_vkeys_song_link(
         url: download_url.clone(),
         headers: HashMap::new(),
         max_chunk_size: None,
+        replay_gain_centi_db: None,
         duration: parse_vkeys_duration(&link.interval).or(detail.interval),
         // MusicTrack.bitrate 按 bps 消费，vkeys 报的是 kbps
         bitrate: parse_vkeys_kbps(&link.kbps).map(|kbps| kbps.saturating_mul(1000)),

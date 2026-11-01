@@ -169,6 +169,7 @@ async fn resolve_youtube_music_by_id(id: &str) -> Result<MusicTrack, BotError> {
         url: format.url.clone(),
         headers: HashMap::from([("User-Agent".to_string(), ANDROID_VR_USER_AGENT.to_string())]),
         max_chunk_size: Some(GOOGLE_VIDEO_MAX_CHUNK),
+        replay_gain_centi_db: None,
         duration,
         // MusicTrack.bitrate 全链路按 bps 消费（caption 展示时才除以 1000）
         bitrate: best_bitrate(format),

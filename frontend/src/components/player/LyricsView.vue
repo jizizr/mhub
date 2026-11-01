@@ -60,7 +60,9 @@ onBeforeUnmount(clearFallbackTimer);
     <div v-if="!failed" class="lyrics-view__animated" :class="{ 'is-ready': ready }" :aria-hidden="!ready" :inert="!ready">
       <AnimatedLyrics v-bind="{ ...$attrs, ...props }"
         @render-ready="handleRenderReady" @seek="emit('seek', $event)"
-        @conversion-state="emit('conversion-state', $event)" />
+        @conversion-state="emit('conversion-state', $event)">
+        <template v-if="$slots.bottom" #bottom><slot name="bottom" /></template>
+      </AnimatedLyrics>
     </div>
   </div>
 </template>

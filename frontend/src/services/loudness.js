@@ -66,11 +66,20 @@ function saveAnalysis(key, analysis) {
   }
 }
 
-/** Read synchronously when selecting a source; keep this gain for that play. */
-export function getCachedLoudness(track) {
+function cachedMeasurement(track) {
   const key = cacheKey(track);
   if (!key) return null;
   return readEntries().findLast((entry) => entry.key === key)?.analysis || null;
+}
+
+/**
+ * Read synchronously when selecting a source; keep this gain for that play.
+ * A measurement of the actual file wins; otherwise the provider's own
+ * estimate (NetEase ReplayGain) lets even a first, still-streaming play start
+ * normalized.
+ */
+export function getCachedLoudness(track) {
+  return cachedMeasurement(track) || readyAnalysis(track?.loudness_estimate);
 }
 
 function abortError() {
@@ -104,7 +113,8 @@ export async function warmLoudness(track, { signal } = {}) {
   if (signal?.aborted) throw abortError();
   const id = playbackId(track);
   if (!id) return state("unavailable");
-  const cached = getCachedLoudness(track);
+  // Only a real measurement ends warming; an estimate must not stop it.
+  const cached = cachedMeasurement(track);
   if (cached) return cached;
   const key = cacheKey(track);
   const controller = new AbortController();

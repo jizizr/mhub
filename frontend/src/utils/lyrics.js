@@ -74,8 +74,10 @@ function wordLines(lines) {
     .filter((line) => textOf(line).trim());
 }
 
-function mergeTranslation(lines, translationText) {
-  const translations = normalize(parseAny(translationText));
+// Attach a side track (translation or romanization) to the nearest unused
+// line within a second; background vocals keep only their own text.
+function mergeSide(lines, sideText, field) {
+  const translations = normalize(parseAny(sideText));
   if (!translations.length) return lines;
   const used = new Set();
   return lines.map((line) => {
@@ -92,22 +94,38 @@ function mergeTranslation(lines, translationText) {
     if (best >= 0) used.add(best);
     return {
       ...line,
-      translatedLyric: line.translatedLyric || (best >= 0 ? textOf(translations[best]) : ""),
+      [field]: line[field] || (best >= 0 ? textOf(translations[best]).trim() : ""),
     };
   });
 }
 
-export function buildLyricLines(payload) {
-  if (!payload?.available) return [];
+function withSides(lines, payload) {
+  const translated = mergeSide(lines, payload.translation, "translatedLyric");
+  return payload.roman ? mergeSide(translated, payload.roman, "romanLyric") : translated;
+}
+
+function parseLines(payload) {
   try {
     if (Array.isArray(payload.words) && payload.words.length) {
       const lines = wordLines(payload.words);
-      if (lines.length) return mergeTranslation(lines, payload.translation);
+      if (lines.length) return withSides(lines, payload);
     }
     if (!String(payload.plain || "").trim()) return normalize(parseAny(payload.translation));
-    return mergeTranslation(normalize(parseAny(payload.plain)), payload.translation);
+    return withSides(normalize(parseAny(payload.plain)), payload);
   } catch (error) {
     console.warn("[lyrics] parse failed", error);
     return normalize(parseAny(payload.plain || payload.translation));
   }
+}
+
+/**
+ * AMLL lines for a lyrics payload. Credits ("作词：…") travel with the cached
+ * lines as an extra `credits` property so every cache layer keeps them.
+ */
+export function buildLyricLines(payload) {
+  if (!payload?.available) return [];
+  const lines = parseLines(payload);
+  const credits = Array.isArray(payload.credits) ? payload.credits : [];
+  if (lines.length && credits.length) lines.credits = credits;
+  return lines;
 }

@@ -290,8 +290,13 @@ async function waitForReady(task, { allowAlacStream = false } = {}) {
     // join a task started by a WASM-capable client; later polls may expose the
     // server's ALAC mode again even when the create response cleared it.
     const quality = String(current.quality || task.quality || "").trim().toLowerCase();
+    // A growing plain FLAC/MP3 (NetEase) is natively decodable from its first
+    // bytes; lossless M4A still needs the completed browser derivative.
+    const format = String(current.format || "").trim().toLowerCase();
+    const nativeProgressive = format === "flac" || format === "mp3";
     const needsCompletedAudio = !allowAlacStream && (
-      current.streaming_mode === "wasm_alac" || ["lossless", "hires", "hi-res"].includes(quality)
+      current.streaming_mode === "wasm_alac"
+      || (["lossless", "hires", "hi-res"].includes(quality) && !nativeProgressive)
     );
     if (current.status === "completed" || (current.status === "streaming" && !needsCompletedAudio)) {
       if (allowAlacStream) return current;

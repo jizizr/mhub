@@ -4,7 +4,7 @@ import { createLyricsService, lyricIdentity } from "../src/services/lyrics.js";
 import { getTrackLyrics } from "../src/apis/music.js";
 import { buildLyricLines } from "../src/utils/lyrics.js";
 
-const KEY = "music-web-lyrics-v2";
+const KEY = "music-web-lyrics-v3";
 const track = (overrides = {}) => ({ platform: "applemusic", source_id: "123", id: "applemusic--123--high", quality: "high", title: "测试歌曲", artist: "测试艺人", ...overrides });
 const payload = { available: true, plain: "[00:00.00]第一句\n[00:12.00]第二句", translation: "[00:00.00]First line" };
 const storage = () => {

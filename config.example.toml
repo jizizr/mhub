@@ -36,6 +36,9 @@ wv_private_key = ""
 
 [music.netease]
 cookie = ""
+# Hours between login refreshes (0 = off). A refreshed Cookie is stored in the
+# private data directory and is ignored once the cookie above changes.
+refresh_hours = 0
 
 [music.tencent]
 cookie = ""

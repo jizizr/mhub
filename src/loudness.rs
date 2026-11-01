@@ -20,6 +20,7 @@ use tokio::{
 
 const VERSION: u8 = 1;
 const TARGET_LUFS: f64 = -16.0;
+const REPLAY_GAIN_REFERENCE_LUFS: f64 = -18.0;
 const TRUE_PEAK_CEILING: f64 = -1.0;
 const MAX_GAIN_DB: f64 = 6.0;
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(10 * 60);
@@ -67,6 +68,16 @@ impl LoudnessResponse {
             gain_db: None,
             version: VERSION,
         }
+    }
+
+    /// From a provider's ReplayGain 2 track gain (dB to reach -18 LUFS). The
+    /// provider gives no trustworthy true peak, so assume a full-scale one:
+    /// that never boosts above -1 dB, only attenuates loud masters.
+    pub(crate) fn from_replay_gain(gain_centi_db: i32) -> Option<Self> {
+        Self::measured(
+            REPLAY_GAIN_REFERENCE_LUFS - f64::from(gain_centi_db) / 100.0,
+            0.0,
+        )
     }
 
     fn measured(integrated_lufs: f64, true_peak_dbfs: f64) -> Option<Self> {
@@ -436,6 +447,19 @@ fn parse_summary(stderr: &str) -> Option<LoudnessResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_gain_estimate_attenuates_loud_masters_and_never_boosts_past_the_ceiling() {
+        // NetEase 65766: gain -7.291 dB, ffmpeg measured -10.7 LUFS.
+        let loud = LoudnessResponse::from_replay_gain(-729).unwrap();
+        assert_eq!(loud.state, LoudnessState::Ready);
+        assert!((loud.integrated_lufs.unwrap() - -10.71).abs() < 1e-9);
+        assert!((loud.gain_db.unwrap() - -5.29).abs() < 1e-9);
+        assert!(loud.validated().is_some());
+        // A quiet track would want +4 dB; without a real true peak it stops at -1.
+        let quiet = LoudnessResponse::from_replay_gain(200).unwrap();
+        assert_eq!(quiet.gain_db, Some(-1.0));
+    }
 
     #[test]
     fn gain_preserves_dynamic_range_and_caps_peak_and_boost() {
