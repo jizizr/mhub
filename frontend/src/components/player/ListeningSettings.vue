@@ -213,6 +213,10 @@ onBeforeUnmount(() => {
 .listening-settings__row, .listening-settings__balance { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 650; }
 .listening-settings__row label { flex: 0 0 auto; }
 .listening-settings__row select { min-width: 0; max-width: 65%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--surface); font: inherit; font-weight: 400; }
+/* The select's translucent fill would tint the native option popup almost
+   white under its light text; paint options in the opaque system colours of
+   the active color-scheme instead (dark inside the full player). */
+.listening-settings__row option { color: CanvasText; background-color: Canvas; }
 .listening-settings__section p { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 .listening-settings__section .listening-settings__note { font-size: 11px; }
 .listening-settings__section .listening-settings__live { color: var(--accent); }
