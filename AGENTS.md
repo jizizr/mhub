@@ -17,6 +17,7 @@
 | 歌词 / 繁简转换 | `frontend/src/services/lyrics.js`、`frontend/src/utils/opencc*.js` |
 | 移动端布局 | `frontend/src/styles.css`、`frontend/src/components/layout/Sidebar.vue`、`frontend/src/components/player/PlayerBar.vue` |
 | PWA / 主题 / 图标 | `frontend/src/pwa.js`、`frontend/public/sw.js`、`frontend/public/manifest*.webmanifest`、`frontend/src/utils/theme.js`、`scripts/*pwa*.mjs` |
+| 音源网关（供 Telegram bot 等使用） | `crates/music-gateway/`（共享类型、协议与客户端）、`src/api/gateway.rs` |
 
 ## 已确认的协作约定
 
@@ -27,6 +28,7 @@
 - 后台续播须核对当前音源的真实 `ended`／`error` 状态，忽略旧音源延迟事件；自然结束不等同于用户暂停。原生播放启动与音效上下文恢复并行，用户显式暂停仍须取消待完成的续播；用真实音频自然 EOF 回归，不仅测试「下一首」按钮。
 - 切歌直接替换原生音源，避免空 `load()` 释放系统媒体归属；新音源实际 `playing` 时重新发布媒体信息和控制。页面 Media Session 属性正确不代表手机通知仍存在；Android 的 Audio Session API 可用也不代表 WASM 获得系统媒体归属，真机验收单独记录。
 - Android 播放器到达 EOS 即被移出系统媒体会话，锁屏时通知立即消失且后台无法重建。自动续播须在当前曲 EOS 前让下一首播放器已在播（可静音），元素静音不影响会话归属。
+- 平台账号、实现、下载与 `music_cache` 写入只在 MHub；Telegram bot 经回环网关取歌，自身不配平台凭据。改动 `crates/music-gateway` 的线上协议时提升 `PROTOCOL_VERSION`，并同步升级 bot 所钉的 `rev`。
 - 只运行与变更相关的检查；设备实测与模拟测试分开记录。体积合格、页面主题正确，不等于手机重启或系统栏行为已验证。
 
 ## 常用检查

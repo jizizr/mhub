@@ -18,6 +18,42 @@ pub struct Settings {
     pub auth: Auth,
     #[serde(default)]
     pub audio_cache: AudioCache,
+    #[serde(default)]
+    pub gateway: Gateway,
+}
+
+/// Loopback API that lends MHub's music sources to other local services,
+/// such as the Telegram bot. Disabled while `listen` is empty.
+#[derive(Debug, Deserialize, Default)]
+pub struct Gateway {
+    /// For example `127.0.0.1:8091`. Keep it off public interfaces; the
+    /// gateway is not meant to sit behind the site's reverse proxy.
+    #[serde(default)]
+    pub listen: String,
+    /// Shared secret clients send as `Authorization: Bearer …`. Prefer
+    /// `token_file`, which keeps the secret out of the main config.
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub token_file: String,
+}
+
+impl Gateway {
+    /// The configured secret; a file takes precedence over the inline value.
+    pub fn resolve_token(&self) -> Result<String, String> {
+        let token = if self.token_file.trim().is_empty() {
+            self.token.trim().to_string()
+        } else {
+            fs::read_to_string(self.token_file.trim())
+                .map_err(|err| format!("无法读取 gateway.token_file：{err}"))?
+                .trim()
+                .to_string()
+        };
+        if token.len() < 32 {
+            return Err("gateway 令牌至少需要 32 个字符".to_string());
+        }
+        Ok(token)
+    }
 }
 
 /// Local copies of completed songs under `data/downloads`. Telegram and the

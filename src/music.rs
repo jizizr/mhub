@@ -19,11 +19,10 @@ pub use word_lyrics::WordLine;
 mod youtubemusic;
 
 use crate::{ApiError, ApiResult};
+pub use provider::{DownloadProgress, MusicPlatform, MusicSearchItem, MusicTrack};
 use provider::{
-    MusicCollection, MusicMedia, MusicPlatform, MusicProvider,
-    download_track_media_with_cover_progress,
+    MusicCollection, MusicMedia, MusicProvider, download_track_media_with_cover_progress,
 };
-pub use provider::{MusicSearchItem, MusicTrack};
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
@@ -123,65 +122,14 @@ pub struct CollectionItem {
 }
 
 pub fn platforms() -> Vec<PlatformInfo> {
-    vec![
-        PlatformInfo {
-            id: "applemusic",
-            label: "Apple Music",
-            aliases: &[
-                "am",
-                "apple",
-                "applemusic",
-                "apple-music",
-                "apple_music",
-                "苹果音乐",
-            ],
-        },
-        PlatformInfo {
-            id: "bilibili",
-            label: "Bilibili",
-            aliases: &["b", "bili", "bilibili", "哔哩哔哩", "b站"],
-        },
-        PlatformInfo {
-            id: "kugou",
-            label: "酷狗音乐",
-            aliases: &["kg", "kugou", "酷狗", "酷狗音乐"],
-        },
-        PlatformInfo {
-            id: "netease",
-            label: "网易云音乐",
-            aliases: &["163", "netease", "wyy", "网易", "网易云", "网易云音乐"],
-        },
-        PlatformInfo {
-            id: "soda",
-            label: "汽水音乐",
-            aliases: &["qs", "soda", "qishui", "汽水", "汽水音乐"],
-        },
-        PlatformInfo {
-            id: "tencent",
-            label: "QQ音乐",
-            aliases: &[
-                "qq",
-                "qqmusic",
-                "tencent",
-                "tx",
-                "qq音乐",
-                "腾讯",
-                "腾讯音乐",
-            ],
-        },
-        PlatformInfo {
-            id: "youtubemusic",
-            label: "YouTube Music",
-            aliases: &[
-                "yt",
-                "ytm",
-                "youtube",
-                "youtubemusic",
-                "youtube-music",
-                "youtube_music",
-            ],
-        },
-    ]
+    MusicPlatform::ALL
+        .into_iter()
+        .map(|platform| PlatformInfo {
+            id: platform.id(),
+            label: platform.label(),
+            aliases: platform.aliases(),
+        })
+        .collect()
 }
 
 pub fn parse_platform(value: &str) -> ApiResult<MusicPlatform> {
@@ -200,7 +148,15 @@ pub async fn search(
     keyword: &str,
     limit: usize,
 ) -> ApiResult<Vec<MusicSearchItem>> {
-    search_in_lane(platform, keyword, limit, search_gate::Lane::Interactive).await
+    match search_in_lane(platform, keyword, limit, search_gate::Lane::Interactive).await {
+        // Someone is waiting: while the catalog API rate-limits this server,
+        // Apple's public search page usually still answers. Bulk work keeps
+        // the gate's pacing instead.
+        Err(ApiError::RateLimited { .. }) if platform == MusicPlatform::AppleMusic => {
+            applemusic::search_web(keyword, limit).await
+        }
+        result => result,
+    }
 }
 
 /// A paced, cached search for resumable bulk work such as playlist import.
@@ -293,11 +249,21 @@ pub async fn collection(
     keyword: &str,
     limit: usize,
 ) -> ApiResult<Collection> {
-    let collection = provider_for(platform)
-        .collection(keyword, limit.clamp(1, MAX_COLLECTION_ITEMS + 1))
+    let collection = provider_collection(platform, keyword, limit)
         .await?
         .ok_or_else(|| ApiError::Custom("该平台暂不支持此歌单链接".to_string()))?;
     Ok(collection_to_api(collection))
+}
+
+/// `None` when the keyword is not a playlist or album of the platform.
+pub async fn provider_collection(
+    platform: MusicPlatform,
+    keyword: &str,
+    limit: usize,
+) -> ApiResult<Option<MusicCollection>> {
+    provider_for(platform)
+        .collection(keyword, limit.clamp(1, MAX_COLLECTION_ITEMS + 1))
+        .await
 }
 
 fn collection_to_api(collection: MusicCollection) -> Collection {
@@ -343,9 +309,15 @@ pub async fn resolve(options: ResolveOptions) -> ApiResult<MusicTrack> {
     }
 }
 
-pub async fn download(track: &MusicTrack, include_cover: bool) -> ApiResult<MusicMedia> {
-    let mut progress = |_| {};
-    download_track_media_with_cover_progress(track, include_cover, &mut progress).await
+pub async fn download<F>(
+    track: &MusicTrack,
+    include_cover: bool,
+    progress: &mut F,
+) -> ApiResult<MusicMedia>
+where
+    F: FnMut(DownloadProgress) + Send,
+{
+    download_track_media_with_cover_progress(track, include_cover, progress).await
 }
 
 /// Whether the resolved track can be served through the low-latency

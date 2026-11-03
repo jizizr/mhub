@@ -47,6 +47,9 @@ def allowed(path):
         return True
     if path.startswith('wasm/alac-decoder/src/'):
         return True
+    # Workspace crates such as the music gateway contract: manifest and sources.
+    if len(p.parts) >= 3 and p.parts[0] == 'crates' and (p.parts[2] == 'src' or (len(p.parts) == 3 and p.name == 'Cargo.toml')):
+        return True
     return path in {f'wasm/alac-decoder/{name}' for name in ['Cargo.toml', 'Cargo.lock', 'README.md', 'build.sh']}
 
 
@@ -55,7 +58,7 @@ def public_files(root):
     for name in ROOT_FILES | DOCS:
         if (root / name).is_file():
             yield name
-    for directory in ['src', 'frontend/src', 'frontend/tests', 'frontend/public', 'scripts', '.github/workflows', 'wasm/alac-decoder/src']:
+    for directory in ['src', 'crates', 'frontend/src', 'frontend/tests', 'frontend/public', 'scripts', '.github/workflows', 'wasm/alac-decoder/src']:
         for item in (root / directory).rglob('*'):
             relative = item.relative_to(root).as_posix()
             if item.is_file() and allowed(relative):
@@ -73,7 +76,7 @@ def check_files(root, files, staged=False):
             continue
         content = subprocess.check_output(['git', 'show', f':{name}'], cwd=root) if staged else (root / name).read_bytes()
         # Negative URL-validation tests contain explicitly fictional credentials.
-        if name.startswith(('frontend/tests/', 'src/')):
+        if name.startswith(('frontend/tests/', 'src/', 'crates/')):
             content = EXAMPLE_URL.sub(b'https://example.test', content)
         for kind, pattern in PATTERNS.items():
             if pattern.search(content):

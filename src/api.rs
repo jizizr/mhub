@@ -128,6 +128,35 @@ struct DownloadTask {
     stream_total: Option<u64>,
     /// Provider-measured ReplayGain (centi-dB), see `MusicTrack`.
     replay_gain_centi_db: Option<i32>,
+    /// Cover image on the platform, kept for gateway clients.
+    cover_url: Option<String>,
+    /// Bytes fetched by a complete (non-streaming) download so far.
+    transfer: Arc<TransferProgress>,
+    /// Telegram cache uploads started for this generation, and why the last
+    /// one failed. Gateway clients wait for the upload; the web does not.
+    upload_attempts: u8,
+    upload_error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct TransferProgress {
+    written: std::sync::atomic::AtomicU64,
+    /// 0 while the length is unknown.
+    total: std::sync::atomic::AtomicU64,
+}
+
+impl TransferProgress {
+    fn record(&self, progress: music::DownloadProgress) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.written.store(progress.written, Relaxed);
+        self.total.store(progress.total.unwrap_or(0), Relaxed);
+    }
+
+    fn snapshot(&self) -> (u64, Option<u64>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let total = self.total.load(Relaxed);
+        (self.written.load(Relaxed), (total > 0).then_some(total))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -413,7 +442,23 @@ pub struct LyricsResponse {
     pub credits: Vec<String>,
 }
 
+mod gateway;
+
 pub fn app() -> Router {
+    app_with_state(start_state(), serve_web())
+}
+
+/// The site and API together with the loopback gateway, sharing one task,
+/// inflight and cache state so their requests for a song are deduplicated.
+pub fn app_and_gateway(gateway_token: &str) -> (Router, Router) {
+    let state = start_state();
+    (
+        app_with_state(state.clone(), serve_web()),
+        gateway::router(state, gateway_token),
+    )
+}
+
+fn start_state() -> AppState {
     let data_dir = env::var("MUSIC_API_DATA_DIR").unwrap_or_else(|_| "data".to_string());
     let state = AppState {
         downloads: Arc::new(RwLock::new(HashMap::new())),
@@ -429,8 +474,7 @@ pub fn app() -> Router {
     };
     spawn_audio_cache_sweeper(state.clone());
     music::spawn_netease_session_keeper(state.data_dir.clone());
-
-    app_with_state(state, serve_web())
+    state
 }
 
 fn app_with_state(state: AppState, serve_web: bool) -> Router {
@@ -992,6 +1036,19 @@ async fn create_download(
     State(state): State<AppState>,
     Json(request): Json<DownloadRequest>,
 ) -> ApiResult<(StatusCode, Json<CreateDownloadResponse>)> {
+    let task = start_download(&state, request).await?;
+    let status = if task.status == DownloadStatus::Completed {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((status, Json(create_download_response(&state, &task))))
+}
+
+/// Joins the live task for this song and quality, completes a new one from
+/// the Telegram cache, or starts a download worker. Shared by the web API and
+/// the gateway so both always reuse the same generation.
+async fn start_download(state: &AppState, request: DownloadRequest) -> ApiResult<DownloadTask> {
     let platform = music::parse_platform(&request.platform)?;
     if request.query.trim().is_empty() {
         return Err(ApiError::Custom("query 不能为空".to_string()));
@@ -1032,12 +1089,7 @@ async fn create_download(
             })
     };
     if let Some(existing) = existing {
-        let status = if existing.status == DownloadStatus::Completed {
-            StatusCode::OK
-        } else {
-            StatusCode::ACCEPTED
-        };
-        return Ok((status, Json(create_download_response(&state, &existing))));
+        return Ok(existing);
     }
 
     // Resolve an already uploaded Telegram item before creating an async
@@ -1076,42 +1128,36 @@ async fn create_download(
         streaming_mode,
         stream_total: None,
         replay_gain_centi_db: None,
+        cover_url: resolved_track
+            .as_ref()
+            .map(|track| track.cover.clone())
+            .filter(|cover| !cover.trim().is_empty()),
+        transfer: Arc::default(),
+        upload_attempts: 0,
+        upload_error: None,
     };
 
     // Resolving and checking Telegram may have yielded to another POST for
     // this song. Only one generation may own the shared public task ID;
     // otherwise a worker could publish filenames into another generation's
     // directory. Recheck atomically before publishing or starting work.
-    if let Some(existing) = register_download_task(&state, &task).await {
-        let status = if existing.status == DownloadStatus::Completed {
-            StatusCode::OK
-        } else {
-            StatusCode::ACCEPTED
-        };
-        return Ok((status, Json(create_download_response(&state, &existing))));
+    if let Some(existing) = register_download_task(state, &task).await {
+        return Ok(existing);
     }
 
     if let Some(cache) = cached.filter(|cache| !cache.file_id.trim().is_empty()) {
-        complete_task_from_cache(&state, &id, &track_id, &cache).await?;
-        let completed = state
+        complete_task_from_cache(state, &id, &track_id, &cache).await?;
+        return state
             .downloads
             .read()
             .await
             .get(&id)
             .cloned()
-            .ok_or_else(|| ApiError::Custom("Download not found".to_string()))?;
-        return Ok((
-            StatusCode::OK,
-            Json(create_download_response(&state, &completed)),
-        ));
+            .ok_or_else(|| ApiError::Custom("Download not found".to_string()));
     }
 
-    tokio::spawn(run_download(state.clone(), id.clone()));
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(create_download_response(&state, &task)),
-    ))
+    tokio::spawn(run_download(state.clone(), id));
+    Ok(task)
 }
 
 async fn register_download_task(state: &AppState, task: &DownloadTask) -> Option<DownloadTask> {
@@ -1546,6 +1592,7 @@ async fn run_download_inner(state: AppState, id: String) -> ApiResult<()> {
         complete_task_from_cache(&state, &id, &track.id, &cache).await?;
         return Ok(());
     }
+    publish_resolved_track(&state, &id, &track).await;
     let inflight_key = inflight_key(track.platform.id(), &track.id, &task.quality);
     let (inflight, owns_inflight) = register_inflight(&state, inflight_key.clone()).await;
     if !owns_inflight {
@@ -1594,6 +1641,20 @@ async fn run_download_inner(state: AppState, id: String) -> ApiResult<()> {
     result
 }
 
+/// Lets status readers name the song while it is still downloading.
+async fn publish_resolved_track(state: &AppState, id: &str, track: &music::MusicTrack) {
+    if let Some(task) = state.downloads.write().await.get_mut(id) {
+        task.track_id = Some(track.id.clone());
+        task.title.get_or_insert_with(|| track.song.clone());
+        task.artist.get_or_insert_with(|| track.singer.clone());
+        task.album.get_or_insert_with(|| track.album.clone());
+        task.source_url.get_or_insert_with(|| track.link.clone());
+        if !track.cover.trim().is_empty() {
+            task.cover_url.get_or_insert_with(|| track.cover.clone());
+        }
+    }
+}
+
 async fn download_provider_track(
     state: AppState,
     id: String,
@@ -1602,7 +1663,9 @@ async fn download_provider_track(
     inflight_key: String,
     inflight: Arc<InflightDownload>,
 ) -> ApiResult<()> {
-    let media = music::download(&track, task.include_cover).await?;
+    let transfer = task.transfer.clone();
+    let mut progress = |progress| transfer.record(progress);
+    let media = music::download(&track, task.include_cover, &mut progress).await?;
 
     let dir = audio_work_dir(&state, &task.work_id);
     fs::create_dir_all(&dir).await?;
@@ -1645,6 +1708,7 @@ async fn download_provider_track(
         from_user_id: SETTINGS.bot.owner,
         from_chat_id: upload_chat_id,
     };
+    record_upload_attempt(&state, &id, &task.work_id).await;
     tokio::spawn(upload_audio_to_telegram_cache(TelegramCacheUpload {
         state: state.clone(),
         task_id: id.clone(),
@@ -1671,6 +1735,7 @@ async fn download_provider_track(
     task.artist = Some(track.singer);
     task.album = Some(track.album);
     task.source_url = Some(track.link);
+    task.cover_url = Some(track.cover).filter(|cover| !cover.trim().is_empty());
     task.filename = Some(audio_filename);
     task.cover_filename = cover_filename;
     task.file_id = None;
@@ -1725,6 +1790,7 @@ async fn download_provider_track_streaming(
         current.artist = Some(track.singer.clone());
         current.album = Some(track.album.clone());
         current.source_url = Some(track.link.clone());
+        current.cover_url = Some(track.cover.clone()).filter(|cover| !cover.trim().is_empty());
         current.filename = Some(streaming_filename.clone());
         current.content_type = Some(audio_content_type.clone());
         current.bitrate = track.bitrate;
@@ -1852,6 +1918,7 @@ async fn download_provider_track_streaming(
         from_user_id: SETTINGS.bot.owner,
         from_chat_id: upload_chat_id,
     };
+    record_upload_attempt(&state, &id, &task.work_id).await;
     tokio::spawn(upload_audio_to_telegram_cache(TelegramCacheUpload {
         state: state.clone(),
         task_id: id.clone(),
@@ -1895,9 +1962,16 @@ fn streaming_fallback_reason(error: &ApiError) -> String {
     if matches!(error, ApiError::Request(_) | ApiError::Retry(_)) {
         return "provider HTTP request failed before the first audio fragment".to_string();
     }
-    let reason = error.to_string();
-    let urls = regex::Regex::new(r#"(?i)(?:https?|skd)://[^\s\"'<>]+"#).unwrap();
-    urls.replace_all(&reason, "[redacted URL]")
+    redact_error_message(error)
+}
+
+/// An error's text without URLs, which may carry signed queries or tokens.
+fn redact_error_message(error: &(impl std::fmt::Display + ?Sized)) -> String {
+    lazy_static::lazy_static! {
+        static ref URLS: regex::Regex =
+            regex::Regex::new(r#"(?i)(?:https?|skd)://[^\s\"'<>]+"#).unwrap();
+    }
+    URLS.replace_all(&error.to_string(), "[redacted URL]")
         .chars()
         .take(500)
         .collect()
@@ -2076,7 +2150,13 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
         Ok(uploaded) => uploaded,
         Err(err) => {
             tracing::warn!("failed to upload audio to telegram cache: {err}");
+            if let Some(task) = job.state.downloads.write().await.get_mut(&job.task_id)
+                && task.work_id == job.work_id
+            {
+                task.upload_error = Some(redact_error_message(&err));
+            }
             remove_inflight(&job.state, &job.inflight_key).await;
+            notify_task_change(&job.state);
             return;
         }
     };
@@ -2095,8 +2175,19 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
     {
         task.file_id = Some(cache.file_id.clone());
         task.thumb_file_id = (!cache.thumb_file_id.is_empty()).then(|| cache.thumb_file_id.clone());
+        task.upload_error = None;
     }
     remove_inflight(&job.state, &job.inflight_key).await;
+    notify_task_change(&job.state);
+}
+
+async fn record_upload_attempt(state: &AppState, id: &str, work_id: &str) {
+    if let Some(task) = state.downloads.write().await.get_mut(id)
+        && task.work_id == work_id
+    {
+        task.upload_attempts = task.upload_attempts.saturating_add(1);
+        task.upload_error = None;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2447,6 +2538,10 @@ fn task_from_cache(
         streaming_mode: None,
         stream_total: None,
         replay_gain_centi_db: None,
+        cover_url: None,
+        transfer: Arc::default(),
+        upload_attempts: 0,
+        upload_error: None,
     }
 }
 
@@ -4265,6 +4360,10 @@ mod tests {
             streaming_mode: Some("wasm_alac".to_string()),
             stream_total: None,
             replay_gain_centi_db: None,
+            cover_url: None,
+            transfer: Arc::default(),
+            upload_attempts: 0,
+            upload_error: None,
         };
         let state = AppState {
             downloads: Arc::new(RwLock::new(HashMap::new())),

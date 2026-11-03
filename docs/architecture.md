@@ -25,6 +25,12 @@ ALAC 解码器只把完整数据包解码为 PCM，不处理账号、网络或�
 
 浏览器本地缓存按歌曲、音质和音频表示区分，歌词原文跨音质复用；当前曲目完整缓存后才请求下一首。服务器维护本地文件与任务，并可复用已有 Telegram 缓存记录；持久化状态放在数据目录，凭据通过独立配置读取。
 
+### 音源网关
+
+`crates/music-gateway` 是 MHub 与其他服务（目前是 Telegram bot）之间的契约：平台、音质、搜索结果、歌词、曲目元数据、媒体任务与错误码，以及 `client` 特性下的 HTTP 客户端。MHub 的平台枚举与搜索结果类型直接来自该 crate，两端编译期共享同一份定义，`PROTOCOL_VERSION` 不一致时网关拒绝请求。
+
+网关（`src/api/gateway.rs`）只监听 `[gateway] listen` 配置的回环地址，按 Bearer 令牌鉴权。媒体请求先用 `/v1/media/lookup` 判断是否已在 Telegram 缓存（不触发下载），需要下载时 `/v1/media` 复用网页的 `start_download`、inflight 去重与后台上传，`GET /v1/media/:id` 长轮询下载字节进度、上传阶段，直到返回 `file_id`；上传失败时从本地副本重试一次，副本已清理则让任务失败、下次请求重新下载。客户端发现 `file_id` 被 Telegram 拒绝时调用 `/v1/cache/invalidate`。MHub 因此是平台账号、下载和 `music_cache` 的唯一使用方与写入方，客户端只负责自己的用户限流和发送。
+
 ## 可维护性
 
 - Rust 和 npm lockfile 固定依赖；Docker 重新构建解码器与前端。

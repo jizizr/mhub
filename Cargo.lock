@@ -1723,6 +1723,7 @@ dependencies = [
  "lazy_static",
  "md5",
  "mime_guess",
+ "music-gateway",
  "oxideav-mp4",
  "prost",
  "protobuf",
@@ -1757,6 +1758,17 @@ dependencies = [
  "widevine",
  "widevine-proto",
  "yrs",
+]
+
+[[package]]
+name = "music-gateway"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

@@ -37,6 +37,7 @@ RUN npm run build
 
 FROM rust-base AS backend
 COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
 COPY src ./src
 RUN cargo build --release --locked --bin music-api
 

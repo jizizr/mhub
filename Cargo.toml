@@ -6,6 +6,11 @@ license = "AGPL-3.0-only"
 description = "A self-hosted music player with a Rust streaming backend and Vue frontend"
 publish = false
 
+[workspace]
+members = ["crates/music-gateway"]
+# Built separately for wasm32 with its own lockfile.
+exclude = ["wasm/alac-decoder"]
+
 [dependencies]
 aes = "0.8"
 async-trait = "0.1"
@@ -18,6 +23,7 @@ encoding_rs = "0.8"
 flate2 = "1"
 futures = "0.3"
 lazy_static = "1.5"
+music-gateway = { path = "crates/music-gateway" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 md5 = "0.7"
 mime_guess = "2"
@@ -57,6 +63,7 @@ dashmap = "6"
 webauthn-rs-proto = "0.5"
 
 [dev-dependencies]
+music-gateway = { path = "crates/music-gateway", features = ["client"] }
 tempfile = "3"
 tokio-tungstenite = "0.24"
 

@@ -51,6 +51,16 @@ enabled = true
 base_url = "https://api.vkeys.cn"
 token = ""
 
+[gateway]
+# Loopback API lending these music accounts, downloads and the Telegram cache
+# to local services such as the Telegram bot, so their accounts are configured
+# only here. Empty listen disables it; keep it on a loopback address.
+listen = ""
+# listen = "127.0.0.1:8091"
+# At least 32 characters, shared with the clients. Prefer a 0600 file.
+token_file = ""
+# token = ""
+
 [auth]
 # Accounts and cross-device playlist/queue sync (needs db.mysql.url).
 # Leave rp_origin empty to disable. Passkeys are bound to this origin.

@@ -115,6 +115,31 @@ pub async fn upsert_music_cache(cache: &MusicCache) -> ApiResult<()> {
     Ok(())
 }
 
+/// Removes the entry only while it still holds `file_id`, so a replacement
+/// uploaded in the meantime survives. Returns whether a row was deleted.
+pub async fn delete_music_cache(
+    platform: &str,
+    track_id: &str,
+    quality: &str,
+    file_id: &str,
+) -> ApiResult<bool> {
+    let pool = pool().await?;
+    ensure_schema(pool).await?;
+    let result = sqlx::query(
+        r#"
+        DELETE FROM music_cache
+        WHERE platform = ? AND track_id = ? AND quality = ? AND file_id = ?
+        "#,
+    )
+    .bind(platform)
+    .bind(track_id)
+    .bind(quality)
+    .bind(file_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 async fn ensure_schema(pool: &MySqlPool) -> ApiResult<()> {
     MUSIC_CACHE_SCHEMA
         .get_or_try_init(|| async {
@@ -157,7 +182,7 @@ async fn pool() -> ApiResult<&'static MySqlPool> {
             let url = SETTINGS.db.mysql.url.trim();
             if url.is_empty() {
                 return Err(ApiError::Custom(
-                    "db.mysql.url 未配置，无法复用 bot-rs music_cache".to_string(),
+                    "db.mysql.url 未配置，无法使用 music_cache".to_string(),
                 ));
             }
             MySqlPoolOptions::new()

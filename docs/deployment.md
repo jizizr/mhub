@@ -12,7 +12,7 @@
 
 | 位置 | 用途 | 生效方式 |
 | --- | --- | --- |
-| `config.toml` | 平台凭据、wrapper 地址、可选数据库、Telegram 和账号 `[auth]` | 修改后重建容器进程 |
+| `config.toml` | 平台凭据、wrapper 地址、可选数据库、Telegram、账号 `[auth]` 和音源网关 `[gateway]` | 修改后重建容器进程 |
 | `.env` | 监听地址、端口、日志级别及可选媒体域 | `docker compose up -d` |
 | `MUSIC_MEDIA_BASE_URL` | 已完成媒体的独立源；默认同源 | 改动后 `docker compose up -d --build` |
 | `MUSIC_LEGACY_MEDIA_BASE_URL` | 迁移后旧队列媒体地址的兼容源 | 改动后重新构建前端 |
@@ -29,6 +29,8 @@
 - **MySQL**：填写已有兼容 `music_cache` 表的数据库 URL；不启用数据库时仍可运行应用，但不能复用数据库记录的远端缓存。除启用账号后自动创建的 `mhub_` 前缀表外，本项目不会创建或迁移外部数据库。
 - **Telegram**：填写 Bot token、缓存 chat ID 和可选 Bot API 地址。大文件通常需要自建 Local Bot API。该服务与本容器必须共享文件存储，并通过 `MUSIC_API_TELEGRAM_LOCAL_ROOT`、`MUSIC_API_TELEGRAM_CONTAINER_ROOT` 对齐路径；可在自己的 Compose override 中添加只读共享卷和这两个环境变量。不要把整个账号数据目录复制进镜像。
 - **本地音频缓存**：`data/downloads` 下每首歌一个目录，存放解密后的音频和按需生成的 ALAC 包、浏览器用 FLAC。它只是 Telegram 与各平台之上的加速层：后端每 15 分钟（以及启动时）清理一次，连续 `[audio_cache] idle_hours`（默认 72）小时无人请求的目录被删除，总量超过 `max_gib`（默认 20）时从最久未用的开始删到 90%。正在下载或 30 分钟内写入、请求过的目录不会被删。已上传 Telegram 的歌之后从 Telegram 取；未上传的（未配置 Telegram 或上传失败）会重新下载。Local Bot API 自己的文件目录不归本服务管理。
+
+- **音源网关（可选）**：让同机的其他服务（如 Telegram bot）借用本服务的平台账号、下载和 Telegram 缓存，账号只需在这里配置一次。在 `[gateway]` 设置 `listen`（只用回环地址，例如 `127.0.0.1:8091`，不要经反向代理或 CDN 暴露）和至少 32 字符的令牌，令牌建议放在权限 0600 的 `token_file` 中，并在客户端配置相同令牌。网关与网站共用同一套播放任务：网页和 bot 同时请求同一首歌只下载、上传一次；平台请求、限流、Apple wrapper 并发和网易登录续期都只在这里发生。容器部署时，网关端口须发布到宿主机回环地址或放进与客户端共享的内部网络。客户端用 Telegram `file_id` 发送，因此必须使用同一个 Bot token。接口与客户端见 `crates/music-gateway`。
 
 本仓库不分发 wrapper 二进制或第三方服务的认证数据，也不把任何外部服务的认证操作伪装成镜像首次启动过程。
 

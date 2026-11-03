@@ -1,3 +1,4 @@
+use music_api::settings::SETTINGS;
 use std::{env, net::SocketAddr};
 
 #[tokio::main]
@@ -10,18 +11,52 @@ async fn main() {
         .init();
 
     let bind = env::var("MUSIC_API_BIND").unwrap_or_else(|_| "127.0.0.1:8000".to_string());
-    let addr: SocketAddr = bind
-        .parse()
-        .unwrap_or_else(|err| panic!("invalid MUSIC_API_BIND {bind}: {err}"));
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .unwrap_or_else(|err| panic!("failed to bind {addr}: {err}"));
+    let addr = parse_addr("MUSIC_API_BIND", &bind);
+    let listener = bind_listener(addr).await;
+
+    let gateway_listen = SETTINGS.gateway.listen.trim();
+    let app = if gateway_listen.is_empty() {
+        music_api::api::app()
+    } else {
+        // A misconfigured gateway must fail loudly rather than run open or
+        // silently leave its clients without music.
+        let token = SETTINGS
+            .gateway
+            .resolve_token()
+            .unwrap_or_else(|err| panic!("invalid [gateway] config: {err}"));
+        let gateway_addr = parse_addr("gateway.listen", gateway_listen);
+        if !gateway_addr.ip().is_loopback() {
+            tracing::warn!("music gateway listens on non-loopback address {gateway_addr}");
+        }
+        let gateway_listener = bind_listener(gateway_addr).await;
+        let (app, gateway) = music_api::api::app_and_gateway(&token);
+        tracing::info!("music gateway listening on http://{gateway_addr}");
+        tokio::spawn(async move {
+            axum::serve(gateway_listener, gateway)
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+                .expect("gateway server failed");
+        });
+        app
+    };
 
     tracing::info!("music-api listening on http://{addr}");
-    axum::serve(listener, music_api::api::app())
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server failed");
+}
+
+fn parse_addr(name: &str, value: &str) -> SocketAddr {
+    value
+        .parse()
+        .unwrap_or_else(|err| panic!("invalid {name} {value}: {err}"))
+}
+
+async fn bind_listener(addr: SocketAddr) -> tokio::net::TcpListener {
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .unwrap_or_else(|err| panic!("failed to bind {addr}: {err}"))
 }
 
 async fn shutdown_signal() {

@@ -14,6 +14,7 @@ use protobuf::Message;
 use regex::Regex;
 use reqwest::Client;
 use rsa::{RsaPrivateKey, pkcs1::DecodeRsaPrivateKey};
+use scraper::{Html, Selector};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::{
     collections::HashMap,
@@ -85,7 +86,8 @@ lazy_static! {
     static ref TOKEN_PATTERN: Regex =
         Regex::new(r"eyJ[A-Za-z0-9_-]{40,}\.[A-Za-z0-9_-]{40,}\.[A-Za-z0-9_-]{40,}").unwrap();
     static ref APPLE_URL_PATTERN: Regex = Regex::new(r"https?://[^\s]+").unwrap();
-    static ref APPLE_SONG_PATH_RE: Regex = Regex::new(r"^/[a-z]{2}/song/[^/]+/(\d{6,})$").unwrap();
+    static ref APPLE_SONG_PATH_RE: Regex =
+        Regex::new(r"^/[a-z]{2}/song/(?:[^/]+/)?(\d{6,})/?$").unwrap();
     // Recommendation cards deliberately omit Apple's descriptive URL slug,
     // which can contain account names. Accept both those canonical links and
     // the named share links used by manual imports.
@@ -522,7 +524,20 @@ async fn resolve_apple_track(
         id
     };
 
-    let song = get_apple_song(&id).await?;
+    let song = match get_apple_song(&id).await {
+        Err(error) if should_search_numeric_title(keyword, selected_id, &error) => {
+            let found = APPLE_MUSIC_PROVIDER
+                .search(keyword, 1)
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| BotError::Custom("没有找到可下载的音乐".to_string()))?;
+            get_apple_song(&found.id).await?
+        }
+        result => result?,
+    };
+    // The catalog's id, which differs from `id` after a numeric-title search.
+    let id = song.id.clone();
     let attrs = song.attributes;
     let expected_duration = attrs
         .duration_in_millis
@@ -731,8 +746,6 @@ struct WebPlaybackAsset {
 
 #[derive(Clone, Default, Deserialize)]
 struct WebPlaybackMetadata {
-    #[serde(default, rename = "bitRate")]
-    bit_rate: i64,
     #[serde(default)]
     duration: i64,
 }
@@ -901,12 +914,7 @@ async fn get_catalog_enhanced_hls_master_url(track_id: &str) -> Result<String, B
         .extended_asset_urls
         .map(|assets| assets.enhanced_hls)
         .unwrap_or_default();
-    if url.trim().is_empty() {
-        return Err(BotError::Custom(
-            "Apple Music catalog 没有返回 enhancedHls".to_string(),
-        ));
-    }
-    Ok(url)
+    validate_hls_master_url(&url, "catalog enhancedHls")
 }
 
 async fn get_apple_webplayback_assets(
@@ -1007,55 +1015,42 @@ where
             .map(quality_from_str)
             .unwrap_or(AppleMusicQuality::High);
         let expected_duration = internal_query_u32(query, "duration");
-        let lite_result = download_via_wrapper_lite_with_progress_stats(
+        let lite_error = match download_via_wrapper_lite_with_progress_stats(
             track_id,
             quality,
             expected_duration,
             progress,
         )
-        .await;
-        match lite_result {
+        .await
+        {
             Ok(result) => return Ok(result),
-            Err(lite_error) => {
-                // Keep the existing raw TCP wrapper as an automatic rollback
-                // path. A bad lite template, an old lite container, or a
-                // transient HTTP error must never make a previously playable
-                // track fail outright.
-                if let Some(host) = apple_wrapper_host_opt() {
-                    eprintln!(
-                        "Apple Music wrapper-lite failed for {track_id}, falling back to legacy wrapper: {lite_error}"
-                    );
-                    return download_via_wrapper_with_progress_stats(
-                        &host,
-                        track_id,
-                        quality,
-                        expected_duration,
-                        progress,
-                    )
-                    .await;
+            Err(error) => apple_error_summary(&error),
+        };
+        // A bad lite template, an old lite container or a transient HTTP error
+        // must never make a previously playable track fail outright: try the
+        // raw TCP wrapper, then a full-length AAC asset where that is allowed.
+        let mut failures = vec![format!("wrapper-lite：{lite_error}")];
+        if let Some(host) = apple_wrapper_host_opt() {
+            tracing::warn!(
+                "Apple Music wrapper-lite failed for {track_id}; trying TCP wrapper: {lite_error}"
+            );
+            match download_via_wrapper_with_progress_stats(
+                &host,
+                track_id,
+                quality,
+                expected_duration,
+                progress,
+            )
+            .await
+            {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    failures.push(format!("TCP wrapper：{}", apple_error_summary(&error)))
                 }
-                let media_user_token =
-                    normalize_media_user_token(SETTINGS.music.applemusic.media_user_token.trim());
-                if !media_user_token.is_empty()
-                    && matches!(
-                        quality,
-                        AppleMusicQuality::Standard | AppleMusicQuality::High
-                    )
-                {
-                    eprintln!(
-                        "Apple Music wrapper-lite failed for {track_id}, falling back to Widevine: {lite_error}"
-                    );
-                    return download_via_widevine_with_progress(
-                        track_id,
-                        expected_duration,
-                        progress,
-                    )
-                    .await
-                    .map(|data| (data, None));
-                }
-                return Err(lite_error);
             }
         }
+        return download_aac_fallback(track_id, quality, expected_duration, progress, failures)
+            .await;
     }
     if let Some(payload) = url.strip_prefix(APPLE_WIDEVINE_SCHEME) {
         let (track_id, query) = payload.split_once('?').unwrap_or((payload, ""));
@@ -1065,13 +1060,15 @@ where
             ));
         }
         let expected_duration = internal_query_u32(query, "duration");
+        let quality = internal_query_quality(query);
         // applemusic-widevine:// URLs are only minted when no wrapper endpoint
         // is configured (get_apple_download_url_with_quality), and the endpoint
         // list is immutable for the process lifetime, so there is no wrapper
         // fallback to attempt here.
-        return download_via_widevine_with_progress(track_id, expected_duration, progress)
+        return download_via_widevine_with_progress(track_id, quality, expected_duration, progress)
             .await
-            .map(|data| (data, None));
+            .map(|data| (data, None))
+            .map_err(|error| BotError::Custom(apple_error_summary(&error)));
     }
 
     let payload = url
@@ -1084,15 +1081,100 @@ where
     if host.trim().is_empty() || track_id.trim().is_empty() {
         return Err(BotError::Custom("Apple Music wrapper URL 无效".to_string()));
     }
-    let quality = query
-        .split('&')
-        .filter_map(|part| part.split_once('='))
-        .find_map(|(key, value)| (key == "quality").then_some(value))
-        .map(quality_from_str)
-        .unwrap_or(AppleMusicQuality::High);
+    let quality = internal_query_quality(query);
     let expected_duration = internal_query_u32(query, "duration");
-    download_via_wrapper_with_progress_stats(host, track_id, quality, expected_duration, progress)
-        .await
+    match download_via_wrapper_with_progress_stats(
+        host,
+        track_id,
+        quality,
+        expected_duration,
+        progress,
+    )
+    .await
+    {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let failures = vec![format!("TCP wrapper：{}", apple_error_summary(&error))];
+            download_aac_fallback(track_id, quality, expected_duration, progress, failures).await
+        }
+    }
+}
+
+fn internal_query_quality(query: &str) -> AppleMusicQuality {
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "quality")
+        .map(|(_, value)| quality_from_str(&value))
+        .unwrap_or(AppleMusicQuality::High)
+}
+
+/// The nominal AAC rate a Widevine asset should match; lossless tiers never
+/// fall back to AAC.
+fn widevine_target_kbps(quality: AppleMusicQuality) -> Option<i64> {
+    match quality {
+        AppleMusicQuality::Standard => Some(128),
+        AppleMusicQuality::High => Some(256),
+        AppleMusicQuality::Lossless | AppleMusicQuality::HiRes => None,
+    }
+}
+
+fn apple_error_summary(error: &BotError) -> String {
+    // Provider errors can contain signed media URLs. Neither replies nor
+    // fallback logs may expose the authorization query to another user.
+    lazy_static! {
+        static ref URLS: Regex = Regex::new(r#"(?i)(?:https?|skd)://[^\s\"'<>]+"#).unwrap();
+    }
+    URLS.replace_all(&error.to_string(), "[已隐藏资源地址]")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(800)
+        .collect()
+}
+
+fn apple_download_failure(quality: AppleMusicQuality, failures: &[String]) -> BotError {
+    let reason = if widevine_target_kbps(quality).is_some() {
+        "Apple Music 音频获取失败"
+    } else {
+        "Apple Music 未取得所请求的无损音频流，不会自动改为有损 AAC；可选择 High 或 Standard 重试"
+    };
+    BotError::Custom(format!("{reason}；{}", failures.join("；")))
+}
+
+/// Last resort after the wrappers failed: a full-length WebPlayback AAC asset
+/// with the configured account, for Standard and High only.
+async fn download_aac_fallback<F>(
+    track_id: &str,
+    quality: AppleMusicQuality,
+    expected_duration: Option<u32>,
+    progress: &mut F,
+    mut failures: Vec<String>,
+) -> Result<(Vec<u8>, Option<Duration>), BotError>
+where
+    F: FnMut(DownloadProgress) + Send,
+{
+    if widevine_target_kbps(quality).is_none() {
+        return Err(apple_download_failure(quality, &failures));
+    }
+    if normalize_media_user_token(SETTINGS.music.applemusic.media_user_token.trim()).is_empty() {
+        failures.push("Widevine AAC：未配置 media-user-token，无法尝试备用音源".into());
+        return Err(apple_download_failure(quality, &failures));
+    }
+    tracing::warn!(
+        "Apple Music wrappers failed for {track_id}; trying Widevine AAC: {}",
+        failures.join("；")
+    );
+    // Restart the progress the failed source may have reported.
+    progress(DownloadProgress {
+        written: 0,
+        total: None,
+    });
+    match download_via_widevine_with_progress(track_id, quality, expected_duration, progress).await
+    {
+        Ok(data) => Ok((data, None)),
+        Err(error) => {
+            failures.push(format!("Widevine AAC：{}", apple_error_summary(&error)));
+            Err(apple_download_failure(quality, &failures))
+        }
+    }
 }
 
 fn internal_query_u32(query: &str, key: &str) -> Option<u32> {
@@ -1116,12 +1198,19 @@ async fn download_via_wrapper(
 
 async fn download_via_widevine_with_progress<F>(
     track_id: &str,
+    quality: AppleMusicQuality,
     expected_duration: Option<u32>,
     progress: &mut F,
 ) -> Result<Vec<u8>, BotError>
 where
     F: FnMut(DownloadProgress) + Send,
 {
+    if widevine_target_kbps(quality).is_none() {
+        return Err(apple_download_failure(
+            quality,
+            &["Widevine 仅支持 AAC 音源".into()],
+        ));
+    }
     let media_user_token =
         normalize_media_user_token(SETTINGS.music.applemusic.media_user_token.trim());
     if media_user_token.is_empty() {
@@ -1130,10 +1219,10 @@ where
         ));
     }
     let assets = get_apple_webplayback_assets(track_id, media_user_token.clone()).await?;
-    let asset = select_widevine_asset(&assets)
-        .ok_or_else(|| BotError::Custom("Apple Music 没有返回 Widevine AAC 资源".to_string()))?;
+    let asset = select_widevine_asset(&assets, quality, expected_duration)?;
     validate_webplayback_asset_duration(asset, expected_duration)?;
     let hls = download_text(&asset.url).await?;
+    validate_widevine_hls_duration(&hls, expected_duration)?;
     let widevine_media = parse_widevine_hls(&asset.url, &hls)?;
     let encrypted = download_bytes_with_progress(&widevine_media.mp4_url, progress).await?;
     let key = acquire_widevine_content_key(
@@ -1259,12 +1348,10 @@ async fn download_via_wrapper_lite_endpoint<F>(
 where
     F: FnMut(DownloadProgress) + Send,
 {
-    let master_url = wrapper_lite_m3u8_url(endpoint, track_id).await?;
-    if !is_m3u8_url(&master_url) {
-        return Err(BotError::Custom(format!(
-            "Apple Music wrapper-lite 返回了无效 m3u8：{master_url}"
-        )));
-    }
+    let master_url = validate_hls_master_url(
+        &wrapper_lite_m3u8_url(endpoint, track_id).await?,
+        "wrapper-lite",
+    )?;
     let master = download_text(&master_url).await?;
     let variants = parse_enhanced_hls_master(&master)?;
     let variant = select_variant_for_quality(&variants, quality)
@@ -2269,11 +2356,6 @@ where
 {
     let master_url =
         enhanced_hls_master_url(&endpoint, track_id, quality, catalog_master_url).await?;
-    if !is_m3u8_url(&master_url) {
-        return Err(BotError::Custom(format!(
-            "Apple Music wrapper 返回了无效 m3u8：{master_url}"
-        )));
-    }
 
     let master = download_text(&master_url).await?;
     let variants = parse_enhanced_hls_master(&master)?;
@@ -2309,21 +2391,17 @@ async fn enhanced_hls_master_url(
     quality: AppleMusicQuality,
     catalog_master_url: &mut Option<Result<String, String>>,
 ) -> Result<String, BotError> {
-    if quality == AppleMusicQuality::HiRes {
+    // Hi-Res asks the device first; the catalog has no Hi-Res masters for
+    // some accounts. Both answers are validated, and a failure keeps the
+    // reason from each source without their signed URLs.
+    let device_error = if quality == AppleMusicQuality::HiRes {
         match wrapper_get_m3u8_url(endpoint, track_id).await {
-            Ok(url) if is_m3u8_url(&url) => return Ok(url),
-            Ok(url) => {
-                eprintln!(
-                    "Apple Music wrapper device m3u8 invalid for {track_id}: {url}; falling back to catalog enhancedHls"
-                );
-            }
-            Err(err) => {
-                eprintln!(
-                    "Apple Music wrapper device m3u8 unavailable for {track_id}: {err}; falling back to catalog enhancedHls"
-                );
-            }
+            Ok(url) => return Ok(url),
+            Err(error) => Some(apple_error_summary(&error)),
         }
-    }
+    } else {
+        None
+    };
 
     let catalog_result = match catalog_master_url.as_ref() {
         Some(result) => result.clone(),
@@ -2331,37 +2409,100 @@ async fn enhanced_hls_master_url(
             .insert(
                 get_catalog_enhanced_hls_master_url(track_id)
                     .await
-                    .map_err(|err| err.to_string()),
+                    .map_err(|err| apple_error_summary(&err)),
             )
             .clone(),
     };
-    // A catalog URL that is not an .m3u8 is treated like a catalog failure so
-    // the wrapper device m3u8 fallback still runs and the error names the
-    // actual source instead of blaming the wrapper.
     let catalog_err = match catalog_result {
-        Ok(url) if is_m3u8_url(&url) => return Ok(url),
-        Ok(url) => format!("Apple Music catalog enhancedHls 无效：{url}"),
+        Ok(url) => match validate_hls_master_url(&url, "catalog enhancedHls") {
+            Ok(url) => return Ok(url),
+            Err(error) => apple_error_summary(&error),
+        },
         Err(err) => err,
     };
-    if quality == AppleMusicQuality::HiRes {
-        return Err(BotError::Custom(catalog_err));
-    }
-    match wrapper_get_m3u8_url(endpoint, track_id).await {
-        Ok(url) if is_m3u8_url(&url) => Ok(url),
-        Ok(url) => Err(BotError::Custom(format!(
-            "Apple Music catalog enhancedHls 获取失败：{catalog_err}；wrapper device m3u8 无效：{url}"
-        ))),
-        Err(wrapper_err) => Err(BotError::Custom(format!(
-            "Apple Music catalog enhancedHls 获取失败：{catalog_err}；wrapper device m3u8 也失败：{wrapper_err}"
-        ))),
-    }
+    let device_error = match device_error {
+        Some(error) => error,
+        None => match wrapper_get_m3u8_url(endpoint, track_id).await {
+            Ok(url) => return Ok(url),
+            Err(error) => apple_error_summary(&error),
+        },
+    };
+    Err(BotError::Custom(format!(
+        "catalog enhancedHls：{catalog_err}；wrapper device：{device_error}"
+    )))
 }
 
-fn select_widevine_asset(assets: &[WebPlaybackAsset]) -> Option<&WebPlaybackAsset> {
-    assets
-        .iter()
-        .find(|asset| asset.flavor.as_deref() == Some("28:ctrp256"))
-        .or_else(|| assets.iter().max_by_key(|asset| asset.metadata.bit_rate))
+/// The nominal rate of an AAC CTR asset, the only family the local Widevine
+/// path decrypts. WebPlayback's `bitRate` is ignored so misleading metadata
+/// cannot promote a low-rate asset.
+fn widevine_asset_kbps(asset: &WebPlaybackAsset) -> Option<i64> {
+    validate_hls_master_url(&asset.url, "WebPlayback").ok()?;
+    let (asset_type, flavor) = asset.flavor.as_deref()?.split_once(':')?;
+    if asset_type.is_empty() || !asset_type.bytes().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let rate = flavor.strip_prefix("ctrp")?;
+    if rate.is_empty() || !rate.bytes().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let rate = rate.parse::<i64>().ok()?;
+    matches!(rate, 64 | 128 | 256).then_some(rate)
+}
+
+/// The full-length asset closest to the quality's AAC rate.
+fn select_widevine_asset(
+    assets: &[WebPlaybackAsset],
+    quality: AppleMusicQuality,
+    expected_duration: Option<u32>,
+) -> Result<&WebPlaybackAsset, BotError> {
+    let target = widevine_target_kbps(quality)
+        .ok_or_else(|| apple_download_failure(quality, &["Widevine 仅支持 AAC 音源".into()]))?;
+    let mut selected: Option<(&WebPlaybackAsset, i64)> = None;
+    let mut preview_error = None;
+    for asset in assets {
+        let Some(rate) = widevine_asset_kbps(asset) else {
+            continue;
+        };
+        if let Err(error) = validate_webplayback_asset_duration(asset, expected_duration) {
+            preview_error = Some(error);
+            continue;
+        }
+        if selected.is_none_or(|(_, current)| (rate - target).abs() < (current - target).abs()) {
+            selected = Some((asset, rate));
+        }
+    }
+    selected.map(|(asset, _)| asset).ok_or_else(|| {
+        preview_error.unwrap_or_else(|| {
+            BotError::Custom("Apple Music 没有返回可用的 Widevine AAC CTR 完整资源".into())
+        })
+    })
+}
+
+/// A preview can hide behind full-length asset metadata; its playlist cannot.
+fn validate_widevine_hls_duration(
+    content: &str,
+    expected_duration: Option<u32>,
+) -> Result<(), BotError> {
+    let mut duration = 0.0;
+    let mut has_duration = false;
+    for line in content.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("#EXTINF:") {
+            let seconds = value
+                .split(',')
+                .next()
+                .unwrap_or_default()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(|| BotError::Custom("Apple Music Widevine playlist 时长无效".into()))?;
+            duration += seconds;
+            has_duration = true;
+        }
+    }
+    if has_duration {
+        validate_hls_media_duration(duration, expected_duration)?;
+    }
+    Ok(())
 }
 
 fn validate_webplayback_asset_duration(
@@ -2751,13 +2892,7 @@ async fn wrapper_get_m3u8_url(
     tokio::time::timeout(APPLE_WRAPPER_M3U8_TIMEOUT, reader.read_line(&mut url))
         .await
         .map_err(|_| BotError::Custom("Apple Music wrapper m3u8 读取超时".to_string()))??;
-    let url = url.trim().to_string();
-    if url.is_empty() || url == "\0" {
-        return Err(BotError::Custom(
-            "Apple Music wrapper 没有返回 m3u8".to_string(),
-        ));
-    }
-    Ok(url)
+    validate_hls_master_url(url.trim_matches('\0'), "wrapper device")
 }
 
 async fn download_text(url: &str) -> Result<String, BotError> {
@@ -2978,10 +3113,7 @@ async fn apple_get_json<T: serde::de::DeserializeOwned>(
         });
     }
     if !response.status().is_success() {
-        return Err(BotError::Custom(format!(
-            "Apple Music API 请求失败：HTTP {}",
-            response.status()
-        )));
+        return Err(apple_api_error(url, response.status()));
     }
     Ok(response.json().await?)
 }
@@ -3011,10 +3143,7 @@ async fn apple_get_json_with_media_user_token<T: serde::de::DeserializeOwned>(
         .await;
     }
     if !response.status().is_success() {
-        return Err(BotError::Custom(format!(
-            "Apple Music API 请求失败：HTTP {}",
-            response.status()
-        )));
+        return Err(apple_api_error(url, response.status()));
     }
     Ok(response.json().await?)
 }
@@ -3050,10 +3179,7 @@ async fn apple_post_json_with_media_user_token<T: serde::de::DeserializeOwned>(
         .await;
     }
     if !response.status().is_success() {
-        return Err(BotError::Custom(format!(
-            "Apple Music API 请求失败：HTTP {}",
-            response.status()
-        )));
+        return Err(apple_api_error(url, response.status()));
     }
     Ok(response.json().await?)
 }
@@ -3171,6 +3297,139 @@ fn song_to_item(song: AppleMusicResource) -> MusicSearchItem {
         },
         cover,
     }
+}
+
+/// Keeps the status so callers can tell a missing catalog id from an outage;
+/// only the path is named, never the query with its tokens.
+fn apple_api_error(url: &str, status: reqwest::StatusCode) -> BotError {
+    let path = Url::parse(url)
+        .map(|url| url.path().to_string())
+        .unwrap_or_default();
+    BotError::Http {
+        status,
+        message: format!("Apple Music API 请求失败：HTTP {status}（{path}）"),
+    }
+}
+
+/// A bare number that is no catalog id is most likely a song title ("1989").
+fn should_search_numeric_title(keyword: &str, selected_id: Option<&str>, error: &BotError) -> bool {
+    selected_id.is_none()
+        && is_apple_numeric_id(keyword.trim())
+        && matches!(
+            error,
+            BotError::Http {
+                status: reqwest::StatusCode::NOT_FOUND,
+                ..
+            }
+        )
+}
+
+/// The public search page, used while the catalog API rate-limits this
+/// server for interactive searches.
+pub(super) async fn search_web(
+    keyword: &str,
+    limit: usize,
+) -> Result<Vec<MusicSearchItem>, BotError> {
+    ensure_apple_enabled()?;
+    let mut url = Url::parse(&format!(
+        "{APPLE_MUSIC_ORIGIN}/{}/search",
+        apple_storefront()
+    ))
+    .map_err(|err| BotError::Custom(format!("Apple Music 网页搜索地址无效：{err}")))?;
+    url.query_pairs_mut().append_pair("term", keyword);
+    let response = CLIENT
+        .get(url)
+        .header("User-Agent", APPLE_MUSIC_UA)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(BotError::Custom(format!(
+            "Apple Music 网页搜索失败：HTTP {}",
+            response.status()
+        )));
+    }
+    parse_apple_web_search_results(&response.text().await?, limit.clamp(1, 25))
+}
+
+fn parse_apple_web_search_results(
+    html: &str,
+    limit: usize,
+) -> Result<Vec<MusicSearchItem>, BotError> {
+    lazy_static! {
+        static ref RESULT: Selector =
+            Selector::parse(r#"[data-testid="top-search-result"]"#).unwrap();
+        static ref ACTION: Selector = Selector::parse(r#"a[data-testid="click-action"]"#).unwrap();
+        static ref TITLE: Selector =
+            Selector::parse(r#"[data-testid="top-search-result-title"]"#).unwrap();
+        static ref SUBTITLE: Selector =
+            Selector::parse(r#"[data-testid="top-search-result-subtitle"]"#).unwrap();
+        static ref ARTWORK: Selector = Selector::parse("source[srcset]").unwrap();
+    }
+    let text = |element: scraper::ElementRef| {
+        element
+            .text()
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut items: Vec<MusicSearchItem> = Vec::new();
+    for result in Html::parse_document(html).select(&RESULT) {
+        let Some(id) = result
+            .select(&ACTION)
+            .next()
+            .and_then(|action| action.value().attr("href"))
+            .and_then(parse_apple_track_id)
+        else {
+            continue;
+        };
+        let Some(title) = result
+            .select(&TITLE)
+            .next()
+            .map(text)
+            .filter(|title| !title.is_empty())
+        else {
+            continue;
+        };
+        if items.iter().any(|item| item.id == id) {
+            continue;
+        }
+        let subtitle = result
+            .select(&SUBTITLE)
+            .next()
+            .map(text)
+            .unwrap_or_default();
+        let aria_label = result.value().attr("aria-label").unwrap_or_default();
+        let singer = [subtitle.as_str(), aria_label]
+            .into_iter()
+            .filter_map(|value| value.rsplit('·').next().map(str::trim))
+            .find(|value| !value.is_empty())
+            .unwrap_or("未知歌手")
+            .to_string();
+        let cover = result
+            .select(&ARTWORK)
+            .next()
+            .and_then(|element| element.value().attr("srcset"))
+            .and_then(|srcset| srcset.split(',').next())
+            .and_then(|candidate| candidate.split_whitespace().next())
+            .unwrap_or_default()
+            .to_string();
+        items.push(MusicSearchItem {
+            platform: MusicPlatform::AppleMusic,
+            id,
+            song: title,
+            singer,
+            cover,
+        });
+        if items.len() >= limit {
+            break;
+        }
+    }
+    if items.is_empty() {
+        return Err(BotError::Custom(
+            "Apple Music 网页搜索没有找到歌曲".to_string(),
+        ));
+    }
+    Ok(items)
 }
 
 fn parse_apple_track_id(text: &str) -> Option<String> {
@@ -3816,6 +4075,52 @@ fn absolute_hls_url(base_url: &str, value: &str) -> String {
         .rsplit_once('/')
         .map(|(base, _)| format!("{base}/{value}"))
         .unwrap_or_else(|| value.to_string())
+}
+
+/// An absolute HTTP(S) HLS playlist address. Protected `.m4p` files, other
+/// schemes, embedded credentials and invisible characters are rejected, and
+/// the address never appears in the error.
+fn validate_hls_master_url(value: &str, source: &str) -> Result<String, BotError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(BotError::Custom(format!(
+            "Apple Music {source} 没有返回 HLS 播放列表"
+        )));
+    }
+    if value.chars().any(|ch| {
+        ch.is_control()
+            || ch.is_whitespace()
+            || matches!(ch, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+    }) {
+        return Err(BotError::Custom(format!(
+            "Apple Music {source} 返回的 HLS 地址包含空白或不可见控制字符"
+        )));
+    }
+    let url = Url::parse(value)
+        .ok()
+        .filter(|url| {
+            matches!(url.scheme(), "https" | "http")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+        })
+        .ok_or_else(|| {
+            BotError::Custom(format!(
+                "Apple Music {source} 返回了无效的 HTTP(S) HLS 地址"
+            ))
+        })?;
+    let path = url.path().to_ascii_lowercase();
+    if path.ends_with(".m4p") {
+        return Err(BotError::Custom(format!(
+            "Apple Music {source} 返回了受保护的 M4P 文件，未返回可用的 HLS 播放列表"
+        )));
+    }
+    if !path.ends_with(".m3u8") {
+        return Err(BotError::Custom(format!(
+            "Apple Music {source} 返回的资源不是 HLS 播放列表"
+        )));
+    }
+    Ok(value.to_string())
 }
 
 fn is_m3u8_url(value: &str) -> bool {
@@ -5930,10 +6235,7 @@ mod tests {
         let asset = WebPlaybackAsset {
             url: "https://example.test/preview.m3u8".to_string(),
             flavor: Some("28:ctrp256".to_string()),
-            metadata: WebPlaybackMetadata {
-                bit_rate: 256,
-                duration: 23_777,
-            },
+            metadata: WebPlaybackMetadata { duration: 23_777 },
         };
         let err = validate_webplayback_asset_duration(&asset, Some(232))
             .expect_err("preview asset should be rejected");
@@ -6519,6 +6821,329 @@ track.m4a
             "{} -> {} bytes\n{stdout}",
             track.file_name(),
             media.audio.len()
+        );
+    }
+
+    // Ported from the Telegram bot's Apple Music provider (2026-10-18), which
+    // now uses these paths through the gateway.
+
+    #[test]
+    fn numeric_title_fallback_is_only_for_bare_input_and_catalog_404() {
+        let error = apple_api_error(
+            "https://amp-api.music.apple.com/v1/catalog/cn/songs/123456?token=secret",
+            reqwest::StatusCode::NOT_FOUND,
+        );
+        assert!(should_search_numeric_title(" 123456 ", None, &error));
+        assert!(!should_search_numeric_title(
+            "123456",
+            Some("123456"),
+            &error
+        ));
+        assert!(!should_search_numeric_title("am:123456", None, &error));
+        assert!(!should_search_numeric_title(
+            "https://music.apple.com/cn/song/123456",
+            None,
+            &error
+        ));
+        assert!(!should_search_numeric_title(
+            "123456",
+            None,
+            &apple_api_error(
+                "https://amp-api.music.apple.com/v1/catalog/cn/songs/123456",
+                reqwest::StatusCode::UNAUTHORIZED
+            )
+        ));
+        assert!(!error.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn hls_validation_accepts_signed_playlists_but_not_other_schemes() {
+        assert!(
+            validate_hls_master_url("https://example.com/audio.m3u8?token=signature", "t").is_ok()
+        );
+        assert!(validate_hls_master_url("https://example.com/audio.mp4?file=.m3u8", "t").is_err());
+        assert!(validate_hls_master_url("file:///audio.m3u8", "t").is_err());
+    }
+
+    #[test]
+    fn hls_validation_classifies_protected_files_without_disclosing_signatures() {
+        let error = validate_hls_master_url(
+            "https://example.test/audio.lwhq.aac.a.m4p?accessKey=TEST_SECRET",
+            "wrapper device",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("受保护的 M4P 文件"));
+        assert!(error.contains("wrapper device"));
+        assert!(!error.contains("TEST_SECRET"));
+        assert!(!error.contains("https://"));
+        assert_eq!(
+            validate_hls_master_url(
+                " \nhttps://example.test/master.m3u8?token=test#part\r\n",
+                "catalog",
+            )
+            .unwrap(),
+            "https://example.test/master.m3u8?token=test#part"
+        );
+    }
+
+    #[test]
+    fn hls_validation_rejects_empty_control_and_non_http_addresses() {
+        for value in [
+            "",
+            " \n",
+            "\0",
+            "\0\0",
+            "\u{feff}",
+            "https://example.test/ma\nster.m3u8",
+            "https://example.test/master.m3u8?x=\u{200b}",
+            "file:///master.m3u8",
+            "https://user:secret@example.test/master.m3u8",
+            "https://example.test/audio.mp4?format=.m3u8",
+        ] {
+            assert!(
+                validate_hls_master_url(value, "wrapper-lite").is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_error_summaries_preserve_stages_and_redact_urls() {
+        let lite = apple_error_summary(&BotError::Custom(
+            "HTTP failed https://example.test/a.m3u8?accessKey=TEST_SECRET\n".into(),
+        ));
+        let error = apple_download_failure(
+            AppleMusicQuality::HiRes,
+            &[
+                format!("wrapper-lite：{lite}"),
+                "TCP wrapper：catalog 未提供流".into(),
+            ],
+        )
+        .to_string();
+        assert!(error.contains("未取得所请求的无损音频流"));
+        assert!(error.contains("wrapper-lite"));
+        assert!(error.contains("TCP wrapper"));
+        assert!(!error.contains("TEST_SECRET"));
+        assert!(!error.contains('\n'));
+    }
+
+    #[tokio::test]
+    async fn lossless_direct_and_fallback_paths_never_start_widevine_downloads() {
+        let mut updates = Vec::new();
+        for quality in [AppleMusicQuality::Lossless, AppleMusicQuality::HiRes] {
+            let mut progress = |update| updates.push(update);
+            let error = download_internal_url_with_progress_stats(
+                &apple_widevine_internal_url("1328749645", quality, Some(278)),
+                &mut progress,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("不会自动改为有损 AAC"));
+            let error = download_aac_fallback(
+                "1328749645",
+                quality,
+                Some(278),
+                &mut progress,
+                vec!["wrapper-lite：M4P".into(), "TCP wrapper：无 HLS".into()],
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("wrapper-lite：M4P"));
+            assert!(error.to_string().contains("TCP wrapper：无 HLS"));
+        }
+        assert!(
+            updates.is_empty(),
+            "must reject before any download progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_and_device_errors_survive_both_hls_lookup_orders() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        for quality in [AppleMusicQuality::High, AppleMusicQuality::HiRes] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap().to_string();
+            let responder = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let length = socket.read_u8().await.unwrap();
+                let mut id = vec![0; length as usize];
+                socket.read_exact(&mut id).await.unwrap();
+                assert_eq!(id, b"1328749645");
+                socket
+                    .write_all(b"https://example.test/audio.m4p?accessKey=TEST_SECRET\n")
+                    .await
+                    .unwrap();
+            });
+            let endpoint = AppleWrapperEndpoint {
+                index: None,
+                spec: address.clone(),
+                decrypt_addr: address.clone(),
+                m3u8_addr: address,
+            };
+            let mut catalog = Some(Err("catalog 没有 enhancedHls".into()));
+            let error = enhanced_hls_master_url(&endpoint, "1328749645", quality, &mut catalog)
+                .await
+                .unwrap_err()
+                .to_string();
+            responder.await.unwrap();
+            assert!(error.contains("catalog 没有 enhancedHls"));
+            assert!(error.contains("受保护的 M4P 文件"));
+            assert!(!error.contains("TEST_SECRET"));
+        }
+    }
+
+    fn webplayback_test_asset(flavor: &str, rate: i64, duration: i64) -> WebPlaybackAsset {
+        serde_json::from_value(serde_json::json!({
+            "URL": format!("https://example.test/{flavor}.m3u8"),
+            "flavor": flavor,
+            "metadata": { "bitRate": rate, "duration": duration },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn widevine_selection_respects_quality_and_known_encryption_family() {
+        let assets = vec![
+            webplayback_test_asset("28:cbcp256", 256, 278_361),
+            webplayback_test_asset("28:ibhp256", 256, 278_361),
+            webplayback_test_asset("32:ctrp64", 64, 278_361),
+            webplayback_test_asset("28:ctrp256", 256, 278_361),
+        ];
+        let flavor = |quality| {
+            select_widevine_asset(&assets, quality, Some(278))
+                .unwrap()
+                .flavor
+                .clone()
+        };
+        assert_eq!(
+            flavor(AppleMusicQuality::Standard).as_deref(),
+            Some("32:ctrp64")
+        );
+        assert_eq!(
+            flavor(AppleMusicQuality::High).as_deref(),
+            Some("28:ctrp256")
+        );
+        for quality in [AppleMusicQuality::Lossless, AppleMusicQuality::HiRes] {
+            assert!(select_widevine_asset(&assets, quality, Some(278)).is_err());
+        }
+    }
+
+    #[test]
+    fn widevine_selection_ignores_fake_rates_and_prefers_full_assets() {
+        let assets = vec![
+            webplayback_test_asset("28:ctrp256", 256, 30_000),
+            webplayback_test_asset("32:ctrp64", 256_000_000, 278_361),
+            webplayback_test_asset("28:ctrp256", 256, 278_361),
+            webplayback_test_asset("28:ctrp128", 128, 278_361),
+            webplayback_test_asset("99:ctrp999999", 999_999, 278_361),
+        ];
+        assert!(std::ptr::eq(
+            select_widevine_asset(&assets, AppleMusicQuality::High, Some(278)).unwrap(),
+            &assets[2]
+        ));
+        assert!(std::ptr::eq(
+            select_widevine_asset(&assets, AppleMusicQuality::Standard, Some(278)).unwrap(),
+            &assets[3]
+        ));
+        let error = select_widevine_asset(&assets[..1], AppleMusicQuality::High, Some(278))
+            .err()
+            .unwrap();
+        assert!(is_apple_preview_error(&error));
+    }
+
+    #[test]
+    fn widevine_selection_rejects_non_hls_and_unknown_asset_types() {
+        let mut protected = webplayback_test_asset("28:ctrp256", 256, 278_361);
+        protected.url = "https://example.test/audio.m4p?accessKey=test".into();
+        let mut unknown = webplayback_test_asset("28:ctrp256", 256, 278_361);
+        unknown.flavor = None;
+        let assets = vec![
+            protected,
+            unknown,
+            webplayback_test_asset("28:cbcp256", 256, 278_361),
+        ];
+        assert!(select_widevine_asset(&assets, AppleMusicQuality::High, Some(278)).is_err());
+    }
+
+    #[test]
+    fn widevine_hls_duration_rejects_previews_even_when_asset_metadata_was_full() {
+        let error = validate_widevine_hls_duration("#EXTM3U\n#EXTINF:23.777,\na.m4a\n", Some(278))
+            .unwrap_err();
+        assert!(is_apple_preview_error(&error));
+        validate_widevine_hls_duration(
+            "#EXTM3U\n#EXTINF:140,\na.m4a\n#EXTINF:138.361,\na.m4a\n",
+            Some(278),
+        )
+        .unwrap();
+        // Some WebPlayback manifests omit EXTINF; retain the metadata check.
+        validate_widevine_hls_duration("#EXTM3U\n#EXT-X-MAP:URI=\"a.m4a\"", Some(278)).unwrap();
+        assert!(validate_widevine_hls_duration("#EXTINF:NaN,", Some(278)).is_err());
+        assert!(validate_widevine_hls_duration("#EXTINF:-1,", Some(278)).is_err());
+    }
+
+    #[test]
+    fn parses_slugless_song_links() {
+        for link in [
+            "https://music.apple.com/cn/song/1624001324",
+            "https://music.apple.com/cn/song/1624001324/",
+            "https://music.apple.com/cn/song/name/1624001324/",
+        ] {
+            assert_eq!(
+                parse_apple_track_id(link),
+                Some("1624001324".into()),
+                "{link}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_apple_web_search_results() {
+        let html = r#"
+            <div data-testid="top-search-result" aria-label="晴天 · 歌曲 · 周杰伦">
+              <a data-testid="click-action" href="https://music.apple.com/cn/album/x/535824731?i=535824738"></a>
+              <div data-testid="top-search-result-title">晴天</div>
+              <div data-testid="top-search-result-subtitle">歌曲 · 周杰伦</div>
+              <picture><source srcset="https://example.test/220x220.jpg 220w"></picture>
+            </div>
+            <div data-testid="top-search-result" aria-label="晴天 · 歌曲 · 周杰伦">
+              <a data-testid="click-action" href="https://music.apple.com/cn/album/x/535824731?i=535824738"></a>
+              <div data-testid="top-search-result-title">重复结果</div>
+            </div>
+            <div data-testid="top-search-result" aria-label="晴天 (Live) · 歌曲 · 周杰伦">
+              <a data-testid="click-action" href="https://music.apple.com/cn/album/x/535913600?i=535913714"></a>
+              <div data-testid="top-search-result-title">晴天 (Live)</div>
+              <div data-testid="top-search-result-subtitle">歌曲 · 周杰伦</div>
+            </div>
+        "#;
+        let items = parse_apple_web_search_results(html, 2).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "535824738");
+        assert_eq!(items[0].song, "晴天");
+        assert_eq!(items[0].singer, "周杰伦");
+        assert_eq!(items[0].cover, "https://example.test/220x220.jpg");
+        assert_eq!(items[1].id, "535913714");
+        assert!(parse_apple_web_search_results("<html></html>", 2).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Apple catalog; no Telegram or download"]
+    async fn live_numeric_title_resolves() {
+        let direct = get_apple_song("123456").await;
+        assert!(matches!(
+            direct,
+            Err(BotError::Http {
+                status: reqwest::StatusCode::NOT_FOUND,
+                ..
+            })
+        ));
+        let track = resolve_with_quality("123456", None, "high").await.unwrap();
+        assert_ne!(track.id, "123456");
+        assert!(!track.song.is_empty());
+        assert!(
+            resolve_with_quality("123456", Some("123456"), "high")
+                .await
+                .is_err()
         );
     }
 }

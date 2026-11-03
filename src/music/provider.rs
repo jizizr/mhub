@@ -7,8 +7,8 @@ use reqwest::{
 };
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{collections::HashMap, fmt, time::Duration};
+use serde::{Deserialize, de::DeserializeOwned};
+use std::{collections::HashMap, time::Duration};
 
 /// 单次音频下载的硬上限（Telegram 本地 Bot API 上传上限即 2 GiB）：
 /// 防止异常服务端让流式/分段下载无界增长耗尽内存
@@ -52,136 +52,16 @@ pub trait MusicProvider: Sync {
     ) -> Result<MusicTrack, BotError>;
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize)]
-pub enum MusicPlatform {
-    #[serde(rename = "applemusic")]
-    AppleMusic,
-    #[serde(rename = "bilibili")]
-    Bilibili,
-    #[serde(rename = "kugou")]
-    Kugou,
-    #[serde(rename = "netease")]
-    Netease,
-    #[serde(rename = "soda")]
-    Soda,
-    #[serde(rename = "tencent")]
-    #[default]
-    Tencent,
-    #[serde(rename = "youtubemusic")]
-    YouTubeMusic,
-}
-
-impl MusicPlatform {
-    pub fn id(self) -> &'static str {
-        match self {
-            MusicPlatform::AppleMusic => "applemusic",
-            MusicPlatform::Bilibili => "bilibili",
-            MusicPlatform::Kugou => "kugou",
-            MusicPlatform::Netease => "netease",
-            MusicPlatform::Soda => "soda",
-            MusicPlatform::Tencent => "tencent",
-            MusicPlatform::YouTubeMusic => "youtubemusic",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            MusicPlatform::AppleMusic => "Apple Music",
-            MusicPlatform::Bilibili => "Bilibili",
-            MusicPlatform::Kugou => "酷狗音乐",
-            MusicPlatform::Netease => "网易云音乐",
-            MusicPlatform::Soda => "汽水音乐",
-            MusicPlatform::Tencent => "QQ音乐",
-            MusicPlatform::YouTubeMusic => "YouTube Music",
-        }
-    }
-
-    /// Whether the platform can serve lyrics at all: Bilibili and Kugou never
-    /// override the default `lyrics()` (which returns `Ok(None)`), so showing
-    /// them a lyrics button would always dead-end in an alert. Keep this in
-    /// sync if a provider gains a `lyrics()` implementation.
-    pub fn supports_lyrics(self) -> bool {
-        !matches!(self, MusicPlatform::Bilibili | MusicPlatform::Kugou)
-    }
-
-    pub fn from_alias(alias: &str) -> Option<Self> {
-        match alias.trim().to_ascii_lowercase().as_str() {
-            "am" | "apple" | "applemusic" | "apple-music" | "apple_music" | "苹果音乐" => {
-                Some(MusicPlatform::AppleMusic)
-            }
-            "b" | "bili" | "bilibili" | "哔哩哔哩" | "b站" => Some(MusicPlatform::Bilibili),
-            "kg" | "kugou" | "酷狗" | "酷狗音乐" => Some(MusicPlatform::Kugou),
-            "163" | "netease" | "wyy" | "网易" | "网易云" | "网易云音乐" => {
-                Some(MusicPlatform::Netease)
-            }
-            "qs" | "soda" | "qishui" | "汽水" | "汽水音乐" => Some(MusicPlatform::Soda),
-            "qq" | "qqmusic" | "tencent" | "tx" | "qq音乐" | "腾讯" | "腾讯音乐" => {
-                Some(MusicPlatform::Tencent)
-            }
-            "yt" | "ytm" | "youtube" | "youtubemusic" | "youtube-music" | "youtube_music" => {
-                Some(MusicPlatform::YouTubeMusic)
-            }
-            _ => None,
-        }
-    }
-
-    pub fn callback_code(self) -> &'static str {
-        match self {
-            MusicPlatform::AppleMusic => "a",
-            MusicPlatform::Bilibili => "b",
-            MusicPlatform::Kugou => "k",
-            MusicPlatform::Netease => "n",
-            MusicPlatform::Soda => "s",
-            MusicPlatform::Tencent => "t",
-            MusicPlatform::YouTubeMusic => "y",
-        }
-    }
-
-    pub fn from_callback_code(code: &str) -> Option<Self> {
-        match code {
-            "a" => Some(MusicPlatform::AppleMusic),
-            "b" => Some(MusicPlatform::Bilibili),
-            "k" => Some(MusicPlatform::Kugou),
-            "n" => Some(MusicPlatform::Netease),
-            "s" => Some(MusicPlatform::Soda),
-            "t" => Some(MusicPlatform::Tencent),
-            "y" => Some(MusicPlatform::YouTubeMusic),
-            _ => None,
-        }
-    }
-
-    pub fn from_stored_default(value: &str) -> Self {
-        Self::from_alias(value).unwrap_or_default()
-    }
-}
-
-impl fmt::Display for MusicPlatform {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.id())
-    }
-}
+/// Platform, search result and collection types are shared with gateway
+/// clients through `music-gateway`, so both sides always agree on them.
+pub use music_gateway::{
+    Collection as MusicCollection, Platform as MusicPlatform, SearchItem as MusicSearchItem,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MusicQuery {
     pub platform: MusicPlatform,
     pub keyword: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct MusicSearchItem {
-    pub platform: MusicPlatform,
-    pub id: String,
-    pub song: String,
-    pub singer: String,
-    pub cover: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MusicCollection {
-    pub platform: MusicPlatform,
-    pub id: String,
-    pub title: String,
-    pub items: Vec<MusicSearchItem>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -217,6 +97,23 @@ pub struct MusicTrack {
 }
 
 impl MusicTrack {
+    /// The metadata gateway clients see; the source URL and request headers
+    /// may carry signatures or account Cookies and never leave MHub.
+    pub fn gateway_track(&self) -> music_gateway::Track {
+        music_gateway::Track {
+            platform: self.platform,
+            id: self.id.clone(),
+            song: self.song.clone(),
+            singer: self.singer.clone(),
+            album: self.album.clone(),
+            cover: self.cover.clone(),
+            link: self.link.clone(),
+            duration: self.duration,
+            bitrate: self.bitrate,
+            format: Some(self.file_extension()),
+        }
+    }
+
     pub fn file_name(&self) -> String {
         let ext = self.file_extension();
         format!("{} - {}.{}", self.song, self.singer, ext)
@@ -1037,5 +934,454 @@ mod tests {
         assert!(MusicPlatform::Soda.supports_lyrics());
         assert!(MusicPlatform::Tencent.supports_lyrics());
         assert!(MusicPlatform::YouTubeMusic.supports_lyrics());
+    }
+
+    // Moved from the Telegram bot, which now downloads through the gateway.
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn downloads_audio_bytes_without_telegram() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = stream.read(&mut buf).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nmusic",
+                )
+                .await
+                .unwrap();
+        });
+
+        let bytes = download_url(&format!("http://{addr}/track.mp3"))
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"music");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_partial_content_without_range_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = stream.read(&mut buf).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-4/10\r\nContent-Length: 5\r\nConnection: close\r\n\r\nmusic",
+                )
+                .await
+                .unwrap();
+        });
+
+        let err = download_url(&format!("http://{addr}/track.mp3"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("未请求分段却收到 206"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn downloads_audio_reports_progress_without_telegram() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = stream.read(&mut buf).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nmusic",
+                )
+                .await
+                .unwrap();
+            stream.write_all(b"bytes").await.unwrap();
+        });
+
+        let mut reports = Vec::new();
+        let bytes = download_url_with_headers_progress(
+            &format!("http://{addr}/track.mp3"),
+            &Default::default(),
+            &mut |progress| reports.push(progress),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bytes, b"musicbytes");
+        assert_eq!(
+            reports.last(),
+            Some(&DownloadProgress {
+                written: 10,
+                total: Some(10),
+            })
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn downloads_track_media_with_provider_headers_without_telegram() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 2048];
+            let size = stream.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..size]);
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-music-token: test-token")
+            );
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nmusic",
+                )
+                .await
+                .unwrap();
+        });
+
+        let track = MusicTrack {
+            id: "1".to_string(),
+            platform: MusicPlatform::Bilibili,
+            song: "song".to_string(),
+            singer: "singer".to_string(),
+            album: String::new(),
+            cover: String::new(),
+            link: "https://example.com".to_string(),
+            url: format!("http://{addr}/track.m4a"),
+            headers: [("x-music-token".to_string(), "test-token".to_string())]
+                .into_iter()
+                .collect(),
+            max_chunk_size: None,
+            replay_gain_centi_db: None,
+            duration: None,
+            bitrate: None,
+            format: Some("m4a".to_string()),
+        };
+        let media = download_track_media(&track).await.unwrap();
+        assert_eq!(media.audio, b"music");
+        assert!(media.cover.is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn downloads_track_media_with_bounded_range_chunks_without_telegram() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (expected_range, content_range, body) in [
+                ("bytes=0-4", "bytes 0-4/10", "music"),
+                ("bytes=5-9", "bytes 5-9/10", "bytes"),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0; 2048];
+                let size = stream.read(&mut buf).await.unwrap();
+                let request = String::from_utf8_lossy(&buf[..size]);
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains(&format!("range: {expected_range}"))
+                );
+                let response = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: {content_range}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let track = MusicTrack {
+            id: "dQw4w9WgXcQ".to_string(),
+            platform: MusicPlatform::YouTubeMusic,
+            song: "song".to_string(),
+            singer: "singer".to_string(),
+            album: String::new(),
+            cover: String::new(),
+            link: "https://music.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
+            url: format!("http://{addr}/track.m4a"),
+            headers: Default::default(),
+            max_chunk_size: Some(5),
+            replay_gain_centi_db: None,
+            duration: None,
+            bitrate: None,
+            format: Some("m4a".to_string()),
+        };
+        let media = download_track_media(&track).await.unwrap();
+        assert_eq!(media.audio, b"musicbytes");
+        server.await.unwrap();
+    }
+
+    fn bounded_range_test_track(addr: std::net::SocketAddr) -> MusicTrack {
+        MusicTrack {
+            id: "dQw4w9WgXcQ".to_string(),
+            platform: MusicPlatform::YouTubeMusic,
+            song: "song".to_string(),
+            singer: "singer".to_string(),
+            album: String::new(),
+            cover: String::new(),
+            link: "https://music.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
+            url: format!("http://{addr}/track.m4a"),
+            headers: Default::default(),
+            max_chunk_size: Some(5),
+            replay_gain_centi_db: None,
+            duration: None,
+            bitrate: None,
+            format: Some("m4a".to_string()),
+        }
+    }
+
+    /// 按脚本逐个应答请求；`None` 的 Content-Range 表示不发送该头。
+    fn spawn_scripted_range_server(
+        listener: tokio::net::TcpListener,
+        script: Vec<(&'static str, Option<&'static str>, &'static str)>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            for (status_line, content_range, body) in script {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0; 2048];
+                let _ = stream.read(&mut buf).await.unwrap();
+                let range_header = content_range
+                    .map(|value| format!("Content-Range: {value}\r\n"))
+                    .unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\n{range_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_replaces_buffer_on_midstream_200() {
+        // 首段 206 后服务端忽略 Range 改回 200：正文是完整对象，必须整体替换而非拼接
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![
+                ("206 Partial Content", Some("bytes 0-4/*"), "music"),
+                ("200 OK", None, "musicbytes"),
+            ],
+        );
+        let media = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap();
+        assert_eq!(media.audio, b"musicbytes");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_accepts_verified_416_completion() {
+        // total 为 * 时由 416 的 bytes */total 判定结束：长度一致才算下载完整
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![
+                ("206 Partial Content", Some("bytes 0-4/*"), "music"),
+                ("206 Partial Content", Some("bytes 5-9/*"), "bytes"),
+                ("416 Range Not Satisfiable", Some("bytes */10"), ""),
+            ],
+        );
+        let media = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap();
+        assert_eq!(media.audio, b"musicbytes");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_rejects_early_416_with_length_mismatch() {
+        // 服务端提前 416 且完整长度对不上：必须报错而不是静默产出截断文件
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![
+                ("206 Partial Content", Some("bytes 0-4/*"), "music"),
+                ("416 Range Not Satisfiable", Some("bytes */12"), ""),
+            ],
+        );
+        let err = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("文件不完整"),
+            "unexpected error: {err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_rejects_overflowing_range_end() {
+        // range_end 为 u64::MAX 时区间长度/下一起点都会溢出：
+        // 必须直接拒绝，而不是 debug panic / release 下 offset 饱和死循环
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![(
+                "206 Partial Content",
+                Some("bytes 0-18446744073709551615/*"),
+                "",
+            )],
+        );
+        let err = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("异常区间"),
+            "unexpected error: {err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_remembers_total_across_star_responses() {
+        // 首段报过具体 total 后，后续响应降级为 * 不应丢失已知完整长度：
+        // 收满 10 字节即结束，不发起第三次请求（服务端只应答两次）
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![
+                ("206 Partial Content", Some("bytes 0-4/10"), "music"),
+                ("206 Partial Content", Some("bytes 5-9/*"), "bytes"),
+            ],
+        );
+        let media = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap();
+        assert_eq!(media.audio, b"musicbytes");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_rejects_range_beyond_declared_total() {
+        // bytes 0-4/3 自相矛盾：区间超出自己声明的完整长度，
+        // 放行会因 buf.len() >= total 被误判为下载成功
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![("206 Partial Content", Some("bytes 0-4/3"), "music")],
+        );
+        let err = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("超出声明的完整长度"),
+            "unexpected error: {err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_rejects_star_segment_beyond_known_total() {
+        // 已知完整长度 10 后，自报 * 的分段也不得越过边界：
+        // 0-4/10 + 5-14/* 若放行，15 字节会因 buf.len() >= 10 被误判成功
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![
+                ("206 Partial Content", Some("bytes 0-4/10"), "music"),
+                ("206 Partial Content", Some("bytes 5-14/*"), "0123456789"),
+            ],
+        );
+        let err = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("超出声明的完整长度"),
+            "unexpected error: {err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_rejects_total_beyond_size_cap() {
+        // 首段就声明完整长度 3 GB（超过 2 GiB 上限）：不可能上传，
+        // 应立即拒绝而不是继续下载直到撞上本地缓冲上限
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![("206 Partial Content", Some("bytes 0-4/3000000000"), "music")],
+        );
+        let err = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("超过大小上限"),
+            "unexpected error: {err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_rejects_416_shrinking_known_total() {
+        // 已由 206 校验过完整长度为 10，416 却自报 5：
+        // 若信任 416 就会把 5 字节的截断文件当成完整文件
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![
+                ("206 Partial Content", Some("bytes 0-4/10"), "music"),
+                ("416 Range Not Satisfiable", Some("bytes */5"), ""),
+            ],
+        );
+        let err = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("不一致"),
+            "unexpected error: {err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_rejects_total_changing_across_responses() {
+        // 两段声明的完整长度不同，说明资源中途变了，拼出来的文件来自两个版本
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = spawn_scripted_range_server(
+            listener,
+            vec![
+                ("206 Partial Content", Some("bytes 0-4/20"), "music"),
+                ("206 Partial Content", Some("bytes 5-9/40"), "bytes"),
+            ],
+        );
+        let err = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("完整长度前后不一致"),
+            "unexpected error: {err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_range_download_rejects_206_without_content_range() {
+        // 206 缺少合法 Content-Range 时无法验证推进与完整性，必须拒绝
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server =
+            spawn_scripted_range_server(listener, vec![("206 Partial Content", None, "music")]);
+        let err = download_track_media(&bounded_range_test_track(addr))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("缺少合法 Content-Range"),
+            "unexpected error: {err}"
+        );
+        server.await.unwrap();
     }
 }
