@@ -134,8 +134,9 @@ pub struct MediaRequest {
     #[serde(default)]
     pub selected_id: Option<String>,
     pub quality: Quality,
-    /// Embed the cover as the audio thumbnail when the file is first uploaded.
-    /// The cached file is shared, so this has no effect on a cache hit.
+    /// No longer has any effect: the cached upload is shared by every client
+    /// and always carries the cover as its thumbnail. Kept so older clients
+    /// still parse.
     #[serde(default = "default_true")]
     pub include_cover: bool,
     /// On a lookup, wait (briefly) for lyrics to be written into a cached

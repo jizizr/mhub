@@ -1,10 +1,12 @@
 use crate::{ApiError, ApiResult, settings::SETTINGS};
+use image::{DynamicImage, ImageFormat, imageops::FilterType};
 use lazy_static::lazy_static;
 use reqwest::{Client, Response, multipart};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
     env,
+    io::Cursor,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -450,4 +452,69 @@ fn bot_token() -> ApiResult<&'static str> {
         ));
     }
     Ok(token)
+}
+
+/// The bytes of a file the bot can see, read from the local Bot API
+/// server's disk when it is there.
+pub async fn read_file(file_id: &str) -> ApiResult<Vec<u8>> {
+    let file = get_file(file_id).await?;
+    if let Some(path) = local_file_path(&file.file_path)
+        && let Ok(bytes) = tokio::fs::read(&path).await
+    {
+        return Ok(bytes);
+    }
+    let response = download_file(&file.file_path).await?;
+    let bytes = response.error_for_status()?.bytes().await?;
+    if file
+        .file_size
+        .is_some_and(|size| size != bytes.len() as u64)
+    {
+        return Err(ApiError::Custom("Telegram 文件下载不完整".to_string()));
+    }
+    Ok(bytes.to_vec())
+}
+
+/// A cover turned into what Telegram accepts as an audio thumbnail: a JPEG
+/// of at most 320 px and 200 KB.
+pub fn audio_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let image = image::load_from_memory(bytes).ok()?;
+    let image = DynamicImage::ImageRgb8(image.resize(320, 320, FilterType::Lanczos3).to_rgb8());
+    for quality in [85, 75, 65, 55, 45, 35] {
+        let mut out = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+        if encoder.encode_image(&image).is_ok() && out.len() <= 200 * 1024 {
+            return Some(out);
+        }
+    }
+    let mut out = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut out), ImageFormat::Jpeg)
+        .ok()?;
+    (out.len() <= 200 * 1024).then_some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageBuffer, Rgb};
+
+    #[test]
+    fn cover_is_resized_to_telegram_thumbnail() {
+        let image = ImageBuffer::from_fn(1200, 1200, |x, y| {
+            Rgb([(x % 255) as u8, (y % 255) as u8, ((x + y) % 255) as u8])
+        });
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .unwrap();
+
+        let thumb = audio_thumbnail(&bytes).unwrap();
+
+        assert!(thumb.len() <= 200 * 1024);
+        assert_eq!(&thumb[..3], &[0xff, 0xd8, 0xff]);
+        assert!(audio_thumbnail(&[]).is_none());
+    }
 }

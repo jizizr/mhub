@@ -22,12 +22,11 @@ use axum::{
     routing::{get, post},
 };
 use futures::{StreamExt, stream};
-use image::{DynamicImage, ImageFormat, imageops::FilterType};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     env,
-    io::{Cursor, SeekFrom},
+    io::SeekFrom,
     path::{Path as FsPath, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -1666,7 +1665,9 @@ async fn download_provider_track(
 ) -> ApiResult<()> {
     let transfer = task.transfer.clone();
     let mut progress = |progress| transfer.record(progress);
-    let media = music::download(&track, task.include_cover, &mut progress).await?;
+    // The Telegram upload is shared by every client, so it always carries the
+    // cover whatever this request asked for.
+    let media = music::download(&track, true, &mut progress).await?;
 
     let dir = audio_work_dir(&state, &task.work_id);
     fs::create_dir_all(&dir).await?;
@@ -1883,11 +1884,8 @@ async fn download_provider_track_streaming(
         // expose raw M4A bytes to the packet parser.
     });
     let audio_content_type = content_type(&audio_path);
-    let cover_bytes = if task.include_cover {
-        music::download_cover(&track).await?
-    } else {
-        Vec::new()
-    };
+    // As in `download_provider_track`: the shared upload always has a cover.
+    let cover_bytes = music::download_cover(&track).await?;
     let cover_filename = if cover_bytes.is_empty() {
         None
     } else {
@@ -2131,7 +2129,7 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
         if cover.is_empty() {
             return None;
         }
-        match tokio::task::spawn_blocking(move || prepare_audio_thumbnail(&cover)).await {
+        match tokio::task::spawn_blocking(move || telegram_cache::audio_thumbnail(&cover)).await {
             Ok(thumbnail) => thumbnail,
             Err(err) => {
                 tracing::warn!("failed to prepare telegram audio thumbnail: {err}");
@@ -2937,26 +2935,6 @@ fn cache_upload_chat_id() -> i64 {
     }
 }
 
-fn prepare_audio_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let image = image::load_from_memory(bytes).ok()?;
-    let image = DynamicImage::ImageRgb8(image.resize(320, 320, FilterType::Lanczos3).to_rgb8());
-    for quality in [85, 75, 65, 55, 45, 35] {
-        let mut out = Vec::new();
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
-        if encoder.encode_image(&image).is_ok() && out.len() <= 200 * 1024 {
-            return Some(out);
-        }
-    }
-    let mut out = Vec::new();
-    image
-        .write_to(&mut Cursor::new(&mut out), ImageFormat::Jpeg)
-        .ok()?;
-    (out.len() <= 200 * 1024).then_some(out)
-}
-
 const AUDIO_CACHE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 fn spawn_audio_cache_sweeper(state: AppState) {
@@ -3188,7 +3166,6 @@ mod tests {
             5001
         );
     }
-    use image::{ImageBuffer, Rgb};
 
     fn test_alac_cache() -> MusicCache {
         MusicCache {
@@ -4784,23 +4761,6 @@ mod tests {
             assert_eq!(item.source.id, (index + 1).to_string());
             assert_eq!(item.candidates[0].item.id, item.source.id);
         }
-    }
-
-    #[test]
-    fn cover_is_resized_to_telegram_thumbnail() {
-        let image = ImageBuffer::from_fn(1200, 1200, |x, y| {
-            Rgb([(x % 255) as u8, (y % 255) as u8, ((x + y) % 255) as u8])
-        });
-        let mut bytes = Vec::new();
-        image
-            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
-            .unwrap();
-
-        let thumb = prepare_audio_thumbnail(&bytes).unwrap();
-
-        assert!(thumb.len() <= 200 * 1024);
-        assert_eq!(&thumb[..3], &[0xff, 0xd8, 0xff]);
-        assert!(prepare_audio_thumbnail(&[]).is_none());
     }
 
     #[test]

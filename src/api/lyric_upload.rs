@@ -242,7 +242,7 @@ async fn retag(cache: &MusicCache) -> ApiResult<Outcome> {
         }
     };
 
-    let audio = read_telegram_file(&cache.file_id).await?;
+    let audio = telegram_cache::read_file(&cache.file_id).await?;
     let prepared = if lyric_tags::Container::sniff(&audio).is_none() {
         PreparedAudio::unchanged(audio, LYRICS_TAGGED)
     } else {
@@ -252,7 +252,7 @@ async fn retag(cache: &MusicCache) -> ApiResult<Outcome> {
         // A thumbnail cannot be sent by file_id; upload the old one again.
         let thumbnail = match cache.thumb_file_id.trim() {
             "" => None,
-            thumb => read_telegram_file(thumb).await.ok(),
+            thumb => telegram_cache::read_file(thumb).await.ok(),
         };
         let chat_id = cache_upload_chat_id();
         let audio_len = prepared.audio.len();
@@ -283,22 +283,4 @@ async fn retag(cache: &MusicCache) -> ApiResult<Outcome> {
         return Ok(None);
     }
     Ok(Some(updated))
-}
-
-async fn read_telegram_file(file_id: &str) -> ApiResult<Vec<u8>> {
-    let file = telegram_cache::get_file(file_id).await?;
-    if let Some(path) = telegram_cache::local_file_path(&file.file_path)
-        && let Ok(bytes) = fs::read(&path).await
-    {
-        return Ok(bytes);
-    }
-    let response = telegram_cache::download_file(&file.file_path).await?;
-    let bytes = response.error_for_status()?.bytes().await?;
-    if file
-        .file_size
-        .is_some_and(|size| size != bytes.len() as u64)
-    {
-        return Err(ApiError::Custom("Telegram 文件下载不完整".to_string()));
-    }
-    Ok(bytes.to_vec())
 }
