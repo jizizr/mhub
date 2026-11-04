@@ -1787,14 +1787,14 @@ fn build_alac_stream_header(data: &[u8]) -> Result<Vec<u8>, BotError> {
     let sample_rate = find_box_recursive(data, 0, data.len(), b"mdhd")
         .and_then(|mdhd| parse_mdhd_timescale(&data[mdhd.payload_start()..mdhd.end()]))
         .unwrap_or(0);
-    if sample_rate <= 0 {
+    if sample_rate == 0 {
         return Err(BotError::Custom("ALAC init 缺少有效采样率".to_string()));
     }
     let cookie = find_alac_cookie(data)?;
     let mut out = Vec::with_capacity(52);
     out.extend_from_slice(ALAC_STREAM_MAGIC);
     out.extend_from_slice(&ALAC_STREAM_VERSION.to_be_bytes());
-    out.extend_from_slice(&(sample_rate as u32).to_be_bytes());
+    out.extend_from_slice(&sample_rate.to_be_bytes());
     out.push(params.channels.max(1));
     out.push(params.sample_size);
     // Header v2 appends the complete 24-byte ALAC magic cookie. The decoder
@@ -1939,7 +1939,7 @@ async fn decrypt_wrapper_lite_fragment(
     endpoint: &AppleWrapperLiteEndpoint,
     track_id: &str,
     key_uri: &str,
-    fragment: &mut Vec<u8>,
+    fragment: &mut [u8],
     tenc: &TencBox,
 ) -> Result<(), BotError> {
     let commands =
@@ -6591,9 +6591,13 @@ track.m4a
             .await
             .unwrap();
         let mut legacy_plain = encrypted;
-        let commands =
-            collect_wrapper_decrypt_commands(&legacy_plain, &track_id, &[key.clone()], &tenc)
-                .unwrap();
+        let commands = collect_wrapper_decrypt_commands(
+            &legacy_plain,
+            &track_id,
+            std::slice::from_ref(key),
+            &tenc,
+        )
+        .unwrap();
         run_wrapper_decrypt_session(&legacy.decrypt_addr, commands, &mut legacy_plain)
             .await
             .unwrap();

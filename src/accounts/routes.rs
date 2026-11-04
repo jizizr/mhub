@@ -645,10 +645,10 @@ async fn sync_socket(
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
     // Browsers always send Origin on WebSocket handshakes; refuse other sites.
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        if origin != accounts.settings.origin {
-            return Err(http_error(StatusCode::FORBIDDEN, "来源不受信任"));
-        }
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
+        && origin != accounts.settings.origin
+    {
+        return Err(http_error(StatusCode::FORBIDDEN, "来源不受信任"));
     }
     let auth = accounts.require(&headers).await?;
     let library = accounts.library.open(auth.user.id).await?;
@@ -712,9 +712,8 @@ async fn serve_socket(
                     }
                     _ => None,
                 };
-                if let Some(reply) = reply {
-                    if sender.send(WsMessage::Binary(reply.encode_v1())).await.is_err() { break }
-                }
+                if let Some(reply) = reply
+                    && sender.send(WsMessage::Binary(reply.encode_v1())).await.is_err() { break }
             }
             event = events.recv() => {
                 let outgoing = match event {

@@ -274,12 +274,11 @@ impl LoudnessService {
     async fn request(self: &Arc<Self>, input: MeasurementInput) -> LoudnessResponse {
         let key = input.cache_path.to_string_lossy().into_owned();
         let mut entries = self.entries.lock().await;
-        if let Some(entry) = entries.get(&key) {
-            if entry.result.state != LoudnessState::Unavailable
-                || entry.updated.elapsed() < FAILURE_COOLDOWN
-            {
-                return entry.result.clone();
-            }
+        if let Some(entry) = entries.get(&key)
+            && (entry.result.state != LoudnessState::Unavailable
+                || entry.updated.elapsed() < FAILURE_COOLDOWN)
+        {
+            return entry.result.clone();
         }
         // Bound the queued work as well as active CPU usage. A later poll may
         // retry a busy service; it never spawns an unbounded waiting process.

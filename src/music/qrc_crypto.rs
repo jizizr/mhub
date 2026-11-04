@@ -145,7 +145,7 @@ fn block(bytes: &[u8], keys: &[u64; 16]) -> [u8; 8] {
 }
 
 pub(super) fn decrypt(input: &[u8]) -> Option<Vec<u8>> {
-    if input.is_empty() || input.len() % 8 != 0 {
+    if input.is_empty() || !input.len().is_multiple_of(8) {
         return None;
     }
     let key = b"!@#)(*$%123ZXC!@!@#)(NHL";

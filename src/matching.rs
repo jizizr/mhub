@@ -311,7 +311,7 @@ pub fn rank<T>(
             }
         })
         .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| right.score.cmp(&left.score));
+    ranked.sort_by_key(|candidate| std::cmp::Reverse(candidate.score));
     // Keep the first (best-ranked) release of each recording.
     let mut seen = Vec::<String>::new();
     ranked.retain(|candidate| {

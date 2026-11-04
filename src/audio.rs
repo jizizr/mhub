@@ -384,11 +384,11 @@ mod tests {
         assert!(transcoder.ensure_flac(&input, &output).await.is_err());
         assert!(!output.exists());
         assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
-            !entry
+            entry
                 .unwrap()
                 .path()
                 .extension()
-                .is_some_and(|ext| ext == "tmp")
+                .is_none_or(|ext| ext != "tmp")
         }));
     }
 
@@ -414,10 +414,10 @@ mod tests {
             tokio::spawn(async move { transcoder.ensure_flac(&input, &pending_output).await });
         let pid = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if let Ok(pid) = fs::read_to_string(&pid_path).await {
-                    if pid.parse::<u32>().is_ok() {
-                        break pid;
-                    }
+                if let Ok(pid) = fs::read_to_string(&pid_path).await
+                    && pid.parse::<u32>().is_ok()
+                {
+                    break pid;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -446,11 +446,11 @@ mod tests {
         .expect("cancelled transcoder process must exit");
         assert!(!output.exists());
         assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
-            !entry
+            entry
                 .unwrap()
                 .path()
                 .extension()
-                .is_some_and(|ext| ext == "tmp")
+                .is_none_or(|ext| ext != "tmp")
         }));
     }
 }

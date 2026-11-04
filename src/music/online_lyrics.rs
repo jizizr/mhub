@@ -139,14 +139,13 @@ fn cached(key: &str) -> Option<Option<OnlineLyrics>> {
 fn store(key: String, value: Option<OnlineLyrics>) {
     if let Ok(mut cache) = CACHE.lock() {
         cache.retain(|_, item| item.expires_at > Instant::now());
-        if cache.len() >= 512 {
-            if let Some(oldest) = cache
+        if cache.len() >= 512
+            && let Some(oldest) = cache
                 .iter()
                 .min_by_key(|(_, item)| item.expires_at)
                 .map(|(key, _)| key.clone())
-            {
-                cache.remove(&oldest);
-            }
+        {
+            cache.remove(&oldest);
         }
         cache.insert(
             key,
@@ -691,14 +690,14 @@ fn kuwo_text(value: &str) -> String {
 }
 
 async fn kuwo_lyrics(id: &str) -> ApiResult<Option<OnlineLyrics>> {
-    if let Ok(Some(raw)) = kuwo_lrcx(id).await {
-        if let Some((plain, translation)) = kuwo_lrcx_to_lrc(&raw) {
-            return Ok(Some(OnlineLyrics {
-                plain,
-                translation,
-                words: word_lyrics::parse_kuwo(&raw),
-            }));
-        }
+    if let Ok(Some(raw)) = kuwo_lrcx(id).await
+        && let Some((plain, translation)) = kuwo_lrcx_to_lrc(&raw)
+    {
+        return Ok(Some(OnlineLyrics {
+            plain,
+            translation,
+            words: word_lyrics::parse_kuwo(&raw),
+        }));
     }
     let url =
         format!("https://www.kuwo.cn/openapi/v1/www/lyric/getlyric?musicId={id}&httpsStatus=1");
@@ -999,7 +998,10 @@ fn decrypt_qrc(value: &str) -> String {
         return value.to_string();
     }
     let hex: String = value.chars().filter(|c| !c.is_whitespace()).collect();
-    if hex.is_empty() || hex.len() % 16 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if hex.is_empty()
+        || !hex.len().is_multiple_of(16)
+        || !hex.bytes().all(|b| b.is_ascii_hexdigit())
+    {
         return String::new();
     }
     let bytes = hex
@@ -1078,7 +1080,7 @@ pub(super) fn aes_ecb_encrypt(input: &[u8], key: &[u8; 16]) -> Vec<u8> {
 }
 
 pub(super) fn aes_ecb_decrypt(input: &[u8], key: &[u8; 16]) -> Option<Vec<u8>> {
-    if input.is_empty() || input.len() % 16 != 0 {
+    if input.is_empty() || !input.len().is_multiple_of(16) {
         return None;
     }
     let cipher = Aes128::new(GenericArray::from_slice(key));
