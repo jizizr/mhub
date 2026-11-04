@@ -138,6 +138,12 @@ pub struct MediaRequest {
     /// The cached file is shared, so this has no effect on a cache hit.
     #[serde(default = "default_true")]
     pub include_cover: bool,
+    /// On a lookup, wait (briefly) for lyrics to be written into a cached
+    /// file uploaded before MHub embedded them, so this request already gets
+    /// the file with lyrics. Otherwise that happens in the background and
+    /// only later requests get it.
+    #[serde(default)]
+    pub wait_for_lyrics: bool,
 }
 
 /// The answer to a [`MediaRequest`] sent to `MEDIA_LOOKUP`, which never starts

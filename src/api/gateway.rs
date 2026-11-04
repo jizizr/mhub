@@ -204,23 +204,19 @@ async fn lookup_media(
     };
     let id = playback_id(request.platform.id(), &track_id, quality);
     let live = gateway.state.downloads.read().await.get(&id).cloned();
-    let mut cached = live.filter(|task| {
+    let live = live.filter(|task| {
         task.status == DownloadStatus::Completed
             && task
                 .file_id
                 .as_deref()
                 .is_some_and(|id| !id.trim().is_empty())
     });
+    let mut row = None;
     for key in cache_keys(request.platform, quality) {
-        if cached.is_some() {
-            break;
-        }
         match find_music_cache(request.platform.id(), &track_id, &key).await {
             Ok(Some(cache)) if !cache.file_id.trim().is_empty() => {
-                let mut task =
-                    task_from_cache(&id, request.platform.id(), &track_id, quality, &cache);
-                task.cover_url = resolved.as_ref().map(|track| track.cover.clone());
-                cached = Some(task);
+                row = Some(cache);
+                break;
             }
             Ok(_) => {}
             // Starting the job checks again; a lookup is only an optimization.
@@ -230,6 +226,31 @@ async fn lookup_media(
             }
         }
     }
+    // An upload from before lyrics were embedded gets them, before it is
+    // sent when the client asks to wait and it does not take too long.
+    if let Some(cache) = &row
+        && let Some(updated) = lyric_upload::refresh_stale(cache, request.wait_for_lyrics).await
+    {
+        row = Some(updated);
+    }
+    let from_row = |cache: MusicCache| {
+        let mut task = task_from_cache(&id, request.platform.id(), &track_id, quality, &cache);
+        task.cover_url = resolved.as_ref().map(|track| track.cover.clone());
+        task
+    };
+    // A live generation keeps its own file, unless the row has since moved
+    // on to a copy with lyrics written in.
+    let cached = match (live, row) {
+        (Some(task), Some(cache))
+            if lyric_upload::is_tagged(&cache)
+                && task.file_id.as_deref() != Some(cache.file_id.as_str()) =>
+        {
+            Some(from_row(cache))
+        }
+        (Some(task), _) => Some(task),
+        (None, Some(cache)) => Some(from_row(cache)),
+        (None, None) => None,
+    };
     let media = cached.and_then(|task| {
         let file_id = task.file_id.clone()?;
         task_media(&task, file_id, task.thumb_file_id.clone(), true)
@@ -505,6 +526,7 @@ async fn retry_upload(state: &AppState, task: &DownloadTask, track_id: &str) -> 
         thumb_file_id: String::new(),
         from_user_id: SETTINGS.bot.owner,
         from_chat_id: chat_id,
+        lyrics_tag: 0,
     };
     record_upload_attempt(state, &task.id, &task.work_id).await;
     tracing::info!(playback_id = %task.id, "gateway retrying Telegram cache upload");
@@ -739,6 +761,7 @@ mod tests {
             thumb_file_id: "telegram-thumb".into(),
             from_user_id: 0,
             from_chat_id: 0,
+            lyrics_tag: 0,
         };
         let playback = playback_id("netease", id, "lossless");
         let mut task = task_from_cache(&playback, "netease", id, "lossless", &cache);

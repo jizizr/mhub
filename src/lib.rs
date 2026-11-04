@@ -4,6 +4,7 @@ pub mod audio;
 mod audio_cache;
 pub mod cache;
 mod loudness;
+pub mod lyric_tags;
 pub mod matching;
 pub mod music;
 pub mod settings;

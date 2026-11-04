@@ -443,6 +443,7 @@ pub struct LyricsResponse {
 }
 
 mod gateway;
+mod lyric_upload;
 
 pub fn app() -> Router {
     app_with_state(start_state(), serve_web())
@@ -1707,6 +1708,7 @@ async fn download_provider_track(
         thumb_file_id: String::new(),
         from_user_id: SETTINGS.bot.owner,
         from_chat_id: upload_chat_id,
+        lyrics_tag: 0,
     };
     record_upload_attempt(&state, &id, &task.work_id).await;
     tokio::spawn(upload_audio_to_telegram_cache(TelegramCacheUpload {
@@ -1917,6 +1919,7 @@ async fn download_provider_track_streaming(
         thumb_file_id: String::new(),
         from_user_id: SETTINGS.bot.owner,
         from_chat_id: upload_chat_id,
+        lyrics_tag: 0,
     };
     record_upload_attempt(&state, &id, &task.work_id).await;
     tokio::spawn(upload_audio_to_telegram_cache(TelegramCacheUpload {
@@ -2123,10 +2126,11 @@ struct TelegramCacheUpload {
 }
 
 async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
-    let thumbnail = if job.cover.is_empty() {
-        None
-    } else {
-        let cover = job.cover;
+    let cover = job.cover;
+    let thumbnail = async move {
+        if cover.is_empty() {
+            return None;
+        }
         match tokio::task::spawn_blocking(move || prepare_audio_thumbnail(&cover)).await {
             Ok(thumbnail) => thumbnail,
             Err(err) => {
@@ -2135,11 +2139,14 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
             }
         }
     };
+    let (thumbnail, prepared) =
+        tokio::join!(thumbnail, lyric_upload::prepare(&job.cache, job.audio));
+    let uploaded_len = prepared.audio.len();
     let uploaded = telegram_cache::upload_audio(
         job.chat_id,
         &job.filename,
         &job.content_type,
-        job.audio,
+        prepared.audio,
         thumbnail,
         &job.title,
         &job.performer,
@@ -2164,18 +2171,26 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
     let mut cache = job.cache;
     cache.file_id = uploaded.file_id;
     cache.thumb_file_id = uploaded.thumb_file_id.unwrap_or_default();
+    cache.music_size = uploaded_len.min(i64::MAX as usize) as i64;
+    cache.lyrics_tag = prepared.lyrics_tag;
     if let Err(err) = upsert_music_cache(&cache).await {
         tracing::warn!("failed to save music cache: {err}");
     }
-    // Let this generation fall back to Telegram once its local files are
-    // evicted, keeping its media revision and URLs valid for open clients.
     if let Some(task) = job.state.downloads.write().await.get_mut(&job.task_id)
         && task.work_id == job.work_id
-        && task.file_id.is_none()
     {
-        task.file_id = Some(cache.file_id.clone());
-        task.thumb_file_id = (!cache.thumb_file_id.is_empty()).then(|| cache.thumb_file_id.clone());
         task.upload_error = None;
+        // Let this generation fall back to Telegram once its local files are
+        // evicted, keeping its media revision and URLs valid for open
+        // clients. Only when Telegram holds the same bytes: a copy with
+        // lyrics written in would splice two files under one revision. Such
+        // a task is found ready through its cache row, and is dropped once
+        // its local files are evicted.
+        if !prepared.embedded && task.file_id.is_none() {
+            task.file_id = Some(cache.file_id.clone());
+            task.thumb_file_id =
+                (!cache.thumb_file_id.is_empty()).then(|| cache.thumb_file_id.clone());
+        }
     }
     remove_inflight(&job.state, &job.inflight_key).await;
     notify_task_change(&job.state);
@@ -3192,6 +3207,7 @@ mod tests {
             thumb_file_id: String::new(),
             from_user_id: 0,
             from_chat_id: 0,
+            lyrics_tag: 0,
         }
     }
 

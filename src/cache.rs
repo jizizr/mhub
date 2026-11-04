@@ -23,6 +23,10 @@ pub struct MusicCache {
     pub thumb_file_id: String,
     pub from_user_id: i64,
     pub from_chat_id: i64,
+    /// Nonzero once the upload has been through lyrics tagging
+    /// (`lyric_tags::LYRICS_TAGGED`); 0 for uploads made before lyrics were
+    /// embedded, or whose lyrics could not be fetched yet.
+    pub lyrics_tag: i8,
 }
 
 pub async fn find_music_cache(
@@ -36,7 +40,7 @@ pub async fn find_music_cache(
         r#"
         SELECT platform, track_id, quality, song, singer, album, link, file_ext,
                music_size, bitrate, duration, file_id, thumb_file_id,
-               from_user_id, from_chat_id
+               from_user_id, from_chat_id, lyrics_tag
         FROM music_cache
         WHERE platform = ? AND track_id = ? AND quality = ?
         LIMIT 1
@@ -57,7 +61,7 @@ pub async fn find_music_cache_by_file_id(file_id: &str) -> ApiResult<Option<Musi
         r#"
         SELECT platform, track_id, quality, song, singer, album, link, file_ext,
                music_size, bitrate, duration, file_id, thumb_file_id,
-               from_user_id, from_chat_id
+               from_user_id, from_chat_id, lyrics_tag
         FROM music_cache
         WHERE file_id = ?
         LIMIT 1
@@ -77,9 +81,9 @@ pub async fn upsert_music_cache(cache: &MusicCache) -> ApiResult<()> {
         INSERT INTO music_cache (
             platform, track_id, quality, song, singer, album, link, file_ext,
             music_size, bitrate, duration, file_id, thumb_file_id,
-            from_user_id, from_chat_id
+            from_user_id, from_chat_id, lyrics_tag
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             song = VALUES(song),
             singer = VALUES(singer),
@@ -92,7 +96,8 @@ pub async fn upsert_music_cache(cache: &MusicCache) -> ApiResult<()> {
             file_id = VALUES(file_id),
             thumb_file_id = VALUES(thumb_file_id),
             from_user_id = VALUES(from_user_id),
-            from_chat_id = VALUES(from_chat_id)
+            from_chat_id = VALUES(from_chat_id),
+            lyrics_tag = VALUES(lyrics_tag)
         "#,
     )
     .bind(&cache.platform)
@@ -110,9 +115,36 @@ pub async fn upsert_music_cache(cache: &MusicCache) -> ApiResult<()> {
     .bind(&cache.thumb_file_id)
     .bind(cache.from_user_id)
     .bind(cache.from_chat_id)
+    .bind(cache.lyrics_tag)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Swaps in a re-uploaded file (or only a new `lyrics_tag` when the file is
+/// unchanged) while the row still holds `old_file_id`, so a replacement made
+/// in the meantime wins. Returns whether the row was updated.
+pub async fn replace_music_cache_file(old_file_id: &str, cache: &MusicCache) -> ApiResult<bool> {
+    let pool = pool().await?;
+    ensure_schema(pool).await?;
+    let result = sqlx::query(
+        r#"
+        UPDATE music_cache
+        SET file_id = ?, thumb_file_id = ?, music_size = ?, lyrics_tag = ?
+        WHERE platform = ? AND track_id = ? AND quality = ? AND file_id = ?
+        "#,
+    )
+    .bind(&cache.file_id)
+    .bind(&cache.thumb_file_id)
+    .bind(cache.music_size)
+    .bind(cache.lyrics_tag)
+    .bind(&cache.platform)
+    .bind(&cache.track_id)
+    .bind(&cache.quality)
+    .bind(old_file_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Removes the entry only while it still holds `file_id`, so a replacement
@@ -162,6 +194,7 @@ async fn ensure_schema(pool: &MySqlPool) -> ApiResult<()> {
                     thumb_file_id VARCHAR(512) NOT NULL,
                     from_user_id BIGINT NOT NULL,
                     from_chat_id BIGINT NOT NULL,
+                    lyrics_tag TINYINT NOT NULL DEFAULT 0,
                     UNIQUE KEY uniq_music_cache_track (platform, track_id, quality),
                     KEY idx_music_cache_file_id (file_id),
                     KEY idx_music_cache_platform_quality (platform, quality)
@@ -170,6 +203,24 @@ async fn ensure_schema(pool: &MySqlPool) -> ApiResult<()> {
             )
             .execute(pool)
             .await?;
+            // Tables created before lyrics were embedded lack the column.
+            let has_lyrics_tag: i64 = sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*) FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'music_cache'
+                  AND COLUMN_NAME = 'lyrics_tag'
+                "#,
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_lyrics_tag == 0 {
+                sqlx::query(
+                    "ALTER TABLE music_cache ADD COLUMN lyrics_tag TINYINT NOT NULL DEFAULT 0",
+                )
+                .execute(pool)
+                .await?;
+            }
             Ok::<(), ApiError>(())
         })
         .await?;

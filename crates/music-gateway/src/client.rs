@@ -313,6 +313,7 @@ mod tests {
             selected_id: None,
             quality: Quality::Lossless,
             include_cover: true,
+            wait_for_lyrics: false,
         }
     }
 
