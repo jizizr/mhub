@@ -12,6 +12,12 @@ url = ""
 
 [music]
 inline_upload_chat_id = 0
+# Optional upload bot: a second bot whose Telegram data centre is near the
+# server posts songs into this private channel (both bots admins), and the
+# main bot forwards each post to get its own file id. Much faster uploads
+# when the main bot's data centre is far away. 0 uploads directly.
+upload_channel_id = 0
+# upload_bot_token_file = "/etc/music-gateway/uploader-token"
 
 [music.applemusic]
 enabled = true

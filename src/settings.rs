@@ -160,7 +160,7 @@ pub struct Mysql {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 pub struct Music {
     #[serde(default)]
     pub applemusic: AppleMusic,
@@ -174,6 +174,33 @@ pub struct Music {
     pub netease: NeteaseMusic,
     #[serde(default)]
     pub inline_upload_chat_id: i64,
+    /// Private channel the upload bot posts songs into. With the upload bot's
+    /// token in `upload_bot_token_file`, uploads go through that bot (whose
+    /// Telegram data centre can be nearer than the main bot's) and the main
+    /// bot forwards the post to get its own file id. 0 uploads directly.
+    #[serde(default)]
+    pub upload_channel_id: i64,
+    #[serde(default = "default_upload_bot_token_file")]
+    pub upload_bot_token_file: String,
+}
+
+fn default_upload_bot_token_file() -> String {
+    "/etc/music-gateway/uploader-token".to_string()
+}
+
+impl Default for Music {
+    fn default() -> Self {
+        Self {
+            applemusic: AppleMusic::default(),
+            soda: SodaMusic::default(),
+            vkeys: VkeysMusic::default(),
+            tencent: TencentMusic::default(),
+            netease: NeteaseMusic::default(),
+            inline_upload_chat_id: 0,
+            upload_channel_id: 0,
+            upload_bot_token_file: default_upload_bot_token_file(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

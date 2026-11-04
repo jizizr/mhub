@@ -67,6 +67,7 @@ struct TelegramFileResult {
 
 #[derive(Debug, Deserialize)]
 struct TelegramMessage {
+    message_id: i64,
     audio: Option<TelegramAudio>,
 }
 
@@ -239,6 +240,12 @@ pub fn local_file_path(file_path: &str) -> Option<PathBuf> {
     None
 }
 
+/// Uploads a song for the main bot. With an upload channel configured, the
+/// upload bot posts it there and the main bot forwards that post to get its
+/// own file id: Telegram stores a file in the uploader's data centre, so a
+/// bot whose data centre is near the server uploads many times faster. Any
+/// failure on that route falls back to uploading directly to `chat_id`.
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_audio(
     chat_id: i64,
     filename: &str,
@@ -249,7 +256,140 @@ pub async fn upload_audio(
     performer: &str,
     duration: Option<u32>,
 ) -> ApiResult<UploadedAudio> {
+    if let Some((channel_id, uploader)) = upload_relay() {
+        let relayed = relay_audio(
+            channel_id,
+            &uploader,
+            filename,
+            content_type,
+            audio.clone(),
+            thumbnail.clone(),
+            title,
+            performer,
+            duration,
+        )
+        .await;
+        match relayed {
+            Ok(uploaded) => return Ok(uploaded),
+            Err(err) => tracing::warn!("upload bot route failed, uploading directly: {err}"),
+        }
+    }
+    send_audio(
+        bot_token()?,
+        chat_id,
+        filename,
+        content_type,
+        audio,
+        thumbnail,
+        title,
+        performer,
+        duration,
+    )
+    .await
+    .map(|(_, uploaded)| uploaded)
+}
+
+/// The upload channel and the upload bot's token, when both are configured.
+fn upload_relay() -> Option<(i64, String)> {
+    let channel_id = SETTINGS.music.upload_channel_id;
+    if channel_id == 0 {
+        return None;
+    }
+    let token = std::fs::read_to_string(&SETTINGS.music.upload_bot_token_file).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| (channel_id, token.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn relay_audio(
+    channel_id: i64,
+    uploader: &str,
+    filename: &str,
+    content_type: &str,
+    audio: Vec<u8>,
+    thumbnail: Option<Vec<u8>>,
+    title: &str,
+    performer: &str,
+    duration: Option<u32>,
+) -> ApiResult<UploadedAudio> {
+    let (post_id, _) = send_audio(
+        uploader,
+        channel_id,
+        filename,
+        content_type,
+        audio,
+        thumbnail,
+        title,
+        performer,
+        duration,
+    )
+    .await?;
     let token = bot_token()?;
+    let url = format!("{}/bot{}/forwardMessage", telegram_api_base(), token);
+    let response: TelegramResponse<TelegramMessage> = CLIENT
+        .post(url)
+        .form(&[
+            ("chat_id", channel_id.to_string()),
+            ("from_chat_id", channel_id.to_string()),
+            ("message_id", post_id.to_string()),
+            ("disable_notification", "true".to_string()),
+        ])
+        .send()
+        .await?
+        .json()
+        .await?;
+    let forwarded = telegram_result(response, "forwardMessage")?;
+    // The upload bot's post keeps the file; the forward was only how the main
+    // bot learns its own file id.
+    let delete = format!("{}/bot{}/deleteMessage", telegram_api_base(), token);
+    let _ = CLIENT
+        .post(delete)
+        .form(&[
+            ("chat_id", channel_id.to_string()),
+            ("message_id", forwarded.message_id.to_string()),
+        ])
+        .send()
+        .await;
+    uploaded_audio(forwarded, "forwardMessage")
+}
+
+fn telegram_result<T>(response: TelegramResponse<T>, method: &str) -> ApiResult<T> {
+    if !response.ok {
+        return Err(ApiError::Custom(format!(
+            "Telegram {method} failed: {}",
+            response
+                .description
+                .unwrap_or_else(|| "unknown error".to_string())
+        )));
+    }
+    response
+        .result
+        .ok_or_else(|| ApiError::Custom(format!("Telegram {method} returned no message")))
+}
+
+fn uploaded_audio(message: TelegramMessage, method: &str) -> ApiResult<UploadedAudio> {
+    let audio = message
+        .audio
+        .ok_or_else(|| ApiError::Custom(format!("Telegram {method} returned no audio")))?;
+    Ok(UploadedAudio {
+        file_id: audio.file_id,
+        thumb_file_id: audio.thumbnail.map(|thumbnail| thumbnail.file_id),
+    })
+}
+
+/// Sends a song as `token`'s bot; returns the message id and its file ids.
+#[allow(clippy::too_many_arguments)]
+async fn send_audio(
+    token: &str,
+    chat_id: i64,
+    filename: &str,
+    content_type: &str,
+    audio: Vec<u8>,
+    thumbnail: Option<Vec<u8>>,
+    title: &str,
+    performer: &str,
+    duration: Option<u32>,
+) -> ApiResult<(i64, UploadedAudio)> {
     let url = format!("{}/bot{}/sendAudio", telegram_api_base(), token);
     let part = multipart::Part::bytes(audio)
         .file_name(filename.to_string())
@@ -278,24 +418,9 @@ pub async fn upload_audio(
         .await?
         .json()
         .await?;
-    if !response.ok {
-        return Err(ApiError::Custom(format!(
-            "Telegram sendAudio failed: {}",
-            response
-                .description
-                .unwrap_or_else(|| "unknown error".to_string())
-        )));
-    }
-    let message = response
-        .result
-        .ok_or_else(|| ApiError::Custom("Telegram sendAudio returned no message".to_string()))?;
-    let audio = message
-        .audio
-        .ok_or_else(|| ApiError::Custom("Telegram sendAudio returned no audio".to_string()))?;
-    Ok(UploadedAudio {
-        file_id: audio.file_id,
-        thumb_file_id: audio.thumbnail.map(|thumbnail| thumbnail.file_id),
-    })
+    let message = telegram_result(response, "sendAudio")?;
+    let message_id = message.message_id;
+    Ok((message_id, uploaded_audio(message, "sendAudio")?))
 }
 
 fn telegram_api_base() -> String {
