@@ -16,7 +16,7 @@ client = ["dep:reqwest", "dep:serde_json", "dep:tokio"]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 serde_json = { version = "1", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query"], optional = true }
 tokio = { version = "1", features = ["time"], optional = true }
 
 [dev-dependencies]
