@@ -1,6 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Ban, ChevronLeft, ChevronRight, Disc3, FolderOpen, HardDrive, Heart, ListMusic, ListPlus, ListStart, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, RefreshCw, Search, Trash2, X } from "lucide-vue-next";
+import { Ban, ChevronLeft, ChevronRight, Disc3, FolderOpen, HardDrive, Heart, ListMusic, ListPlus, ListStart, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, RefreshCw, Search, Share, Trash2, X } from "lucide-vue-next";
 import {
   audioUrl,
   createPlayback,
@@ -47,6 +47,8 @@ import { trackIdentity, useQueueStore } from "./stores/queue";
 import { usePlaylistStore } from "./stores/playlists";
 import { useAccountStore } from "./stores/account";
 import HandoffCard from "./components/account/HandoffCard.vue";
+import SharedTrackCard, { takeIncomingShare } from "./components/share/SharedTrackCard.vue";
+import { canShareTrack } from "./utils/share";
 import { useStatusStore } from "./stores/status";
 import { formatSize } from "./utils/format";
 import { createThemeController } from "./utils/theme.js";
@@ -86,10 +88,13 @@ const media = useMediaStore();
 const queue = useQueueStore();
 const playlists = usePlaylistStore();
 const account = useAccountStore();
+// A shared-song link opens on the home page, where its card is shown.
+if (takeIncomingShare()) status.activeView = "discover";
 const AccountDialog = defineAsyncComponent(() => import("./components/account/AccountDialog.vue"));
 let handoffTimer = 0;
 const FullPlayer = defineAsyncComponent(() => import("./components/player/FullPlayer.vue"));
 const ImportDialog = defineAsyncComponent(() => import("./components/import/ImportDialog.vue"));
+const ShareDialog = defineAsyncComponent(() => import("./components/share/ShareDialog.vue"));
 // Keep the instance after its first opening so its own leave transition and
 // per-song controls survive closing. Before that, don't request its chunk.
 const fullPlayerMounted = ref(media.expanded);
@@ -969,7 +974,7 @@ function openSongMenu({ event, track, recommend = false }, playlistId = "") {
   closePlaylistMenu();
   songMenu.value = {
     open: true,
-    ...menuPosition(event, 230, 190 + Math.min(targets, 6) * 38 + (playlistId ? 44 : 0) + (recommend ? 86 : 0)),
+    ...menuPosition(event, 230, 228 + Math.min(targets, 6) * 38 + (playlistId ? 44 : 0) + (recommend ? 86 : 0)),
     track,
     playlistId,
     recommend,
@@ -999,6 +1004,7 @@ function runSongMenu(action, targetId = "") {
   if (action === "play") void playTrack(track);
   if (action === "next") queueTrackNext(track);
   if (action === "queue") queueTrack(track);
+  if (action === "share") status.shareTrack = track;
   if (action === "like") likeRecommendation(track);
   if (action === "less") suggestLessRecommendation(track);
   if (action === "add") {
@@ -1405,6 +1411,7 @@ watch(
       <Transition name="page" mode="out-in" @after-enter="handlePageEntered">
       <section v-if="status.activeView === 'discover'" class="content" key="discover">
         <PageHeader title="主页" />
+        <SharedTrackCard @play="playTrack" @next="queueTrackNext" />
         <HandoffCard />
         <RecommendationFeed
           :tracks="recommendationTracks"
@@ -1632,6 +1639,7 @@ watch(
         <button type="button" role="menuitem" @click="runSongMenu('play')"><Play :size="16" />立即播放</button>
         <button type="button" role="menuitem" @click="runSongMenu('next')"><ListStart :size="16" />下一首播放</button>
         <button type="button" role="menuitem" @click="runSongMenu('queue')"><ListPlus :size="16" />加入播放队列</button>
+        <button v-if="canShareTrack(songMenu.track)" type="button" role="menuitem" @click="runSongMenu('share')"><Share :size="16" />分享…</button>
         <template v-if="songMenu.recommend">
           <div class="context-menu__divider"></div>
           <button type="button" role="menuitem" @click="runSongMenu('like')"><Heart :size="16" />喜欢</button>
@@ -1677,6 +1685,9 @@ watch(
 
     <Transition name="dialog">
       <AccountDialog v-if="account.dialogOpen" />
+    </Transition>
+    <Transition name="dialog">
+      <ShareDialog v-if="status.shareTrack" :track="status.shareTrack" @close="status.shareTrack = null" />
     </Transition>
     <Transition name="dialog">
       <ImportDialog v-if="importOpen" :platforms="platforms" @close="importOpen = false" @imported="finishImport" />

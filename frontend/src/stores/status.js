@@ -71,6 +71,8 @@ export const useStatusStore = defineStore("status", {
     // hidden on phones). `toastId` restarts the animation for repeats.
     toastMessage: "",
     toastId: 0,
+    // The song the share dialog is open for; never persisted.
+    shareTrack: null,
     ...restore(),
   }),
   getters: {

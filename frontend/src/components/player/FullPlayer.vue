@@ -1,11 +1,12 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ChevronDown, Languages } from "lucide-vue-next";
+import { ChevronDown, Languages, Share } from "lucide-vue-next";
 import { coverUrl } from "../../apis/music";
 import * as player from "../../core/player";
 import { useMediaStore } from "../../stores/media";
 import { useStatusStore } from "../../stores/status";
 import { COVER_TONE_FALLBACK, coverTone } from "../../utils/cover-tone";
+import { canShareTrack } from "../../utils/share";
 import PlayerControls from "./PlayerControls.vue";
 import QueuePanel from "./QueuePanel.vue";
 import SeekSlider from "./SeekSlider.vue";
@@ -160,8 +161,18 @@ onBeforeUnmount(() => {
           <img v-if="cover" :src="cover" alt="" @error="media.coverBroken = true" />
         </div>
         <div class="full-player__meta">
-          <h1>{{ media.track.title }}</h1>
-          <p>{{ media.track.artist || "未知艺人" }}</p>
+          <div class="full-player__meta-text">
+            <h1>{{ media.track.title }}</h1>
+            <p>{{ media.track.artist || "未知艺人" }}</p>
+          </div>
+          <button
+            v-if="canShareTrack(media.track)"
+            class="full-player__share"
+            type="button"
+            title="分享"
+            aria-label="分享这首歌"
+            @click="status.shareTrack = media.track"
+          ><Share :size="19" /></button>
         </div>
       </div>
       <div class="full-player__right">
