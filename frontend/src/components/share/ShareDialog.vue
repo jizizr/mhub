@@ -370,7 +370,9 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .share-backdrop { z-index: 130; }
-.share { width: min(460px, 100%); display: grid; gap: 18px; }
+/* minmax(0, …): a long title must truncate, not widen the dialog. */
+.share { width: min(460px, 100%); display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; overflow-x: hidden; }
+.share > * { min-width: 0; }
 .share__head { display: flex; align-items: center; gap: 12px; }
 .share__thumb { flex: none; width: 46px; height: 46px; overflow: hidden; border-radius: 8px; background: var(--surface-muted); }
 .share__thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
