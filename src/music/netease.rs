@@ -471,6 +471,23 @@ async fn get_vkeys_netease_lyrics(id: &str) -> Result<Option<MusicLyrics>, BotEr
     }))
 }
 
+pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
+    if !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(BotError::Custom("网易云歌曲 ID 无效".to_string()));
+    }
+    let song = get_netease_song(id).await?;
+    let singer = netease_artists(&song);
+    let album = song.album.unwrap_or_default();
+    Ok(super::TrackInfo {
+        platform: MusicPlatform::Netease.id(),
+        id: id.to_string(),
+        song: song.name,
+        singer,
+        album: album.name,
+        cover: album.pic_url.unwrap_or_default(),
+    })
+}
+
 async fn get_netease_song(id: &str) -> Result<NeteaseSong, BotError> {
     let url = format!(
         "https://music.163.com/api/song/detail?ids=[{}]",

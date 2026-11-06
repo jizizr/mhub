@@ -686,6 +686,45 @@ async fn search_by_legacy(keyword: &str, limit: usize) -> Result<Vec<QQSearchSon
         .unwrap_or_default())
 }
 
+pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
+    match get_song_detail(id).await {
+        Ok(detail) => {
+            let song_mid = if !detail.mid.trim().is_empty() {
+                detail.mid.clone()
+            } else if detail.id > 0 {
+                detail.id.to_string()
+            } else {
+                id.to_string()
+            };
+            Ok(super::TrackInfo {
+                platform: MusicPlatform::Tencent.id(),
+                id: song_mid,
+                song: detail.title(),
+                singer: singers_to_string(&detail.singer),
+                album: detail.album.name.clone(),
+                cover: build_track_cover_url(&detail.album.mid),
+            })
+        }
+        Err(native_error) if vkeys_enabled() => {
+            let detail = get_vkeys_song_info(id).await.map_err(|_| native_error)?;
+            let singer = first_non_empty([Some(detail.singer.as_str())])
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| vkeys_singers_to_string(&detail.singer_list));
+            Ok(super::TrackInfo {
+                platform: MusicPlatform::Tencent.id(),
+                id: detail.preferred_id(id),
+                song: first_non_empty([Some(detail.title.as_str())])
+                    .unwrap_or("未知歌曲")
+                    .to_string(),
+                singer,
+                album: detail.album.clone(),
+                cover: detail.cover.clone(),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn get_song_detail(id: &str) -> Result<QQSongDetail, BotError> {
     let mut url = Url::parse(SONG_DETAIL_ENDPOINT).unwrap();
     {

@@ -1,5 +1,6 @@
-// Renders a portrait share image for one song: the cover over a blurred
-// backdrop of itself, the title and artist, and a QR code for the link.
+// Renders the share images: a song card (the cover over a blurred backdrop of
+// itself, title, artist and a QR code for the link) and a lyric card (a few
+// chosen lines set large, with the song and QR code below).
 // Loaded on demand from the share dialog, together with the QR encoder.
 import qrcode from "qrcode-generator";
 
@@ -52,15 +53,125 @@ function drawCover(ctx, image, x, y, w, h) {
 
 // Canvas `filter` is missing in some Safari versions; drawing the cover tiny
 // and scaling it back up gives the same soft backdrop everywhere.
-function blurredBackdrop(ctx, image) {
-  const small = document.createElement("canvas");
-  small.width = 18;
-  small.height = 24;
-  const sctx = small.getContext("2d");
-  drawCover(sctx, image, 0, 0, small.width, small.height);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(small, -60, -60, WIDTH + 120, HEIGHT + 120);
+function paintBackdrop(ctx, image, width, height) {
+  if (image) {
+    const small = document.createElement("canvas");
+    small.width = 18;
+    small.height = Math.max(12, Math.round((18 * height) / width));
+    const sctx = small.getContext("2d");
+    drawCover(sctx, image, 0, 0, small.width, small.height);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(small, -60, -60, width + 120, height + 120);
+  } else {
+    const gradient = ctx.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, "#3a2f5c");
+    gradient.addColorStop(1, "#14121c");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+  }
+  const shade = ctx.createLinearGradient(0, 0, 0, height);
+  shade.addColorStop(0, "rgba(10, 10, 14, 0.28)");
+  shade.addColorStop(0.55, "rgba(10, 10, 14, 0.48)");
+  shade.addColorStop(1, "rgba(10, 10, 14, 0.78)");
+  ctx.fillStyle = shade;
+  ctx.fillRect(0, 0, width, height);
+}
+
+function toPng(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("图片生成失败"))), "image/png");
+  });
+}
+
+// A lyric quote card. Its height follows the excerpt so short quotes are not
+// lost in empty space and long ones are not squeezed.
+export async function renderLyricCard({ title, artist, covers = [], lines = [], link, siteName }) {
+  const image = await firstImage(covers);
+  const measure = document.createElement("canvas").getContext("2d");
+  const padX = 110;
+  const textWidth = WIDTH - padX * 2;
+  const count = lines.length;
+  const size = count <= 2 ? 64 : count <= 4 ? 56 : 48;
+  const lineGap = Math.round(size * 1.42);
+  const transSize = Math.round(size * 0.56);
+  const transGap = Math.round(transSize * 1.5);
+
+  // Lay the quote out first to know the canvas height.
+  const blocks = lines.map((line) => {
+    measure.font = `700 ${size}px ${FONT}`;
+    const main = wrapLines(measure, line.text, textWidth, 3);
+    measure.font = `500 ${transSize}px ${FONT}`;
+    const translation = line.translation ? wrapLines(measure, line.translation, textWidth, 2) : [];
+    return { main, translation };
+  });
+  const quoteHeight = blocks.reduce((sum, block, index) =>
+    sum + block.main.length * lineGap + block.translation.length * transGap + (index ? Math.round(size * 0.55) : 0), 0);
+  const top = 150;
+  const quoteMarkHeight = 120;
+  const footer = 380;
+  const height = Math.max(1080, Math.min(2400, top + quoteMarkHeight + quoteHeight + 120 + footer));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = WIDTH;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  paintBackdrop(ctx, image, WIDTH, height);
+
+  // Opening quotation mark.
+  ctx.fillStyle = "rgba(255, 255, 255, 0.34)";
+  ctx.font = `800 180px Georgia, "Times New Roman", serif`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText("\u201C", padX - 12, top + 120);
+
+  // The quote, vertically centred in the space above the footer.
+  const available = height - footer - (top + quoteMarkHeight);
+  let y = top + quoteMarkHeight + Math.max(0, (available - quoteHeight) / 2) + size;
+  blocks.forEach((block, index) => {
+    if (index) y += Math.round(size * 0.55);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `700 ${size}px ${FONT}`;
+    for (const row of block.main) {
+      ctx.fillText(row, padX, y);
+      y += lineGap;
+    }
+    ctx.fillStyle = "rgba(255, 255, 255, 0.66)";
+    ctx.font = `500 ${transSize}px ${FONT}`;
+    for (const row of block.translation) {
+      ctx.fillText(row, padX, y - lineGap + transGap + Math.round(size * 0.2));
+      y += transGap;
+    }
+  });
+
+  // Footer: a hairline, the song with its cover, and the QR code.
+  const footerTop = height - footer + 60;
+  ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+  ctx.fillRect(padX, footerTop, textWidth, 2);
+  const qrSize = 200;
+  const rowTop = footerTop + 60;
+  const thumb = 150;
+  if (image) {
+    ctx.save();
+    roundedRect(ctx, padX, rowTop + (qrSize - thumb) / 2, thumb, thumb, 18);
+    ctx.clip();
+    drawCover(ctx, image, padX, rowTop + (qrSize - thumb) / 2, thumb, thumb);
+    ctx.restore();
+  }
+  const metaX = image ? padX + thumb + 32 : padX;
+  const metaWidth = WIDTH - padX - qrSize - 40 - metaX;
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `700 42px ${FONT}`;
+  ctx.fillText(wrapLines(ctx, title || "未知歌曲", metaWidth, 1)[0] || "", metaX, rowTop + 72);
+  ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+  ctx.font = `500 32px ${FONT}`;
+  ctx.fillText(wrapLines(ctx, artist || "未知艺人", metaWidth, 1)[0] || "", metaX, rowTop + 122);
+  ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+  ctx.font = `500 26px ${FONT}`;
+  ctx.fillText(`${siteName || "MHub"} · 扫码听完整歌曲`, metaX, rowTop + 172);
+  drawQr(ctx, link, WIDTH - padX - qrSize, rowTop, qrSize);
+
+  return toPng(canvas);
 }
 
 // Breaks text into at most `maxLines` lines, character by character so CJK
@@ -108,28 +219,14 @@ function drawQr(ctx, text, x, y, size) {
   }
 }
 
-export async function renderShareCard({ title, artist, album, covers = [], link, qrLink, siteName }) {
+export async function renderShareCard({ title, artist, album, covers = [], link, siteName }) {
   const canvas = document.createElement("canvas");
   canvas.width = WIDTH;
   canvas.height = HEIGHT;
   const ctx = canvas.getContext("2d");
   const image = await firstImage(covers);
 
-  if (image) {
-    blurredBackdrop(ctx, image);
-  } else {
-    const gradient = ctx.createLinearGradient(0, 0, WIDTH, HEIGHT);
-    gradient.addColorStop(0, "#3a2f5c");
-    gradient.addColorStop(1, "#14121c");
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, WIDTH, HEIGHT);
-  }
-  const shade = ctx.createLinearGradient(0, 0, 0, HEIGHT);
-  shade.addColorStop(0, "rgba(10, 10, 14, 0.28)");
-  shade.addColorStop(0.55, "rgba(10, 10, 14, 0.48)");
-  shade.addColorStop(1, "rgba(10, 10, 14, 0.78)");
-  ctx.fillStyle = shade;
-  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  paintBackdrop(ctx, image, WIDTH, HEIGHT);
 
   // Cover art with a soft drop shadow.
   const coverSize = 720;
@@ -177,7 +274,7 @@ export async function renderShareCard({ title, artist, album, covers = [], link,
   // Footer: site name and hint on the left, QR code on the right.
   const qrSize = 200;
   const footerY = HEIGHT - 70 - qrSize;
-  drawQr(ctx, qrLink || link, coverX + coverSize - qrSize, footerY, qrSize);
+  drawQr(ctx, link, coverX + coverSize - qrSize, footerY, qrSize);
   ctx.fillStyle = "#ffffff";
   ctx.font = `700 44px ${FONT}`;
   ctx.fillText(siteName || "MHub", textX, footerY + 88);
@@ -185,7 +282,5 @@ export async function renderShareCard({ title, artist, album, covers = [], link,
   ctx.font = `500 30px ${FONT}`;
   ctx.fillText("扫码收听这首歌", textX, footerY + 142);
 
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("图片生成失败"))), "image/png");
-  });
+  return toPng(canvas);
 }

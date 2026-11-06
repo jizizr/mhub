@@ -8,6 +8,7 @@ import {
   getPlatforms,
   getRecommendationHome,
   getContinuationRecommendations,
+  getTrackInfo,
   resolveCollection,
   searchTracks,
 } from "./apis/music";
@@ -47,8 +48,7 @@ import { trackIdentity, useQueueStore } from "./stores/queue";
 import { usePlaylistStore } from "./stores/playlists";
 import { useAccountStore } from "./stores/account";
 import HandoffCard from "./components/account/HandoffCard.vue";
-import SharedTrackCard, { takeIncomingShare } from "./components/share/SharedTrackCard.vue";
-import { canShareTrack } from "./utils/share";
+import { canShareTrack, parseShareParams, stripShareParams } from "./utils/share";
 import { useStatusStore } from "./stores/status";
 import { formatSize } from "./utils/format";
 import { createThemeController } from "./utils/theme.js";
@@ -88,8 +88,18 @@ const media = useMediaStore();
 const queue = useQueueStore();
 const playlists = usePlaylistStore();
 const account = useAccountStore();
-// A shared-song link opens on the home page, where its card is shown.
-if (takeIncomingShare()) status.activeView = "discover";
+// A shared-song link (`?song=<platform>:<id>`) opens that song in the full
+// player. Only the id is taken from the link; everything shown comes from the
+// platform. The parameters leave the address at once so a reload does not
+// open it again.
+const incomingShare = parseShareParams(window.location.search);
+if (window.location.search.includes("song=")) {
+  try {
+    window.history.replaceState(window.history.state, "", stripShareParams(window.location.href));
+  } catch {
+    // Keeping the parameters is harmless.
+  }
+}
 const AccountDialog = defineAsyncComponent(() => import("./components/account/AccountDialog.vue"));
 let handoffTimer = 0;
 const FullPlayer = defineAsyncComponent(() => import("./components/player/FullPlayer.vue"));
@@ -1387,6 +1397,28 @@ watch(
   { immediate: true },
 );
 
+// Opens a shared song in the full player, ready to play. Browsers refuse
+// audio before the first tap, so the recipient presses play themself.
+async function openIncomingShare() {
+  if (!incomingShare) return;
+  try {
+    const info = await getTrackInfo(incomingShare);
+    if (appUnmounted) return;
+    const track = {
+      ...trackFromSearch({ platform: info.platform, id: info.id, song: info.song, singer: info.singer, cover: info.cover }, status.quality),
+      album: info.album || "",
+    };
+    const prepared = player.prepareNow(track);
+    media.expanded = Boolean(media.track);
+    await prepared;
+  } catch (error) {
+    console.warn("[share] shared song unavailable", error);
+    if (!appUnmounted) status.toast("分享的歌曲无法打开，可能已下架或链接有误");
+  }
+}
+// Registered after the start-up hook above, so the player is ready.
+onMounted(() => void openIncomingShare());
+
 watch(
   () => status.queueOpen,
   syncQueueHistory,
@@ -1411,7 +1443,6 @@ watch(
       <Transition name="page" mode="out-in" @after-enter="handlePageEntered">
       <section v-if="status.activeView === 'discover'" class="content" key="discover">
         <PageHeader title="主页" />
-        <SharedTrackCard @play="playTrack" @next="queueTrackNext" />
         <HandoffCard />
         <RecommendationFeed
           :tracks="recommendationTracks"

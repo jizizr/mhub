@@ -74,6 +74,18 @@ pub struct PlatformInfo {
     pub aliases: &'static [&'static str],
 }
 
+/// What a share link needs to show a song: catalog metadata looked up by
+/// platform and id alone, without resolving any audio.
+#[derive(Clone, Debug, Serialize)]
+pub struct TrackInfo {
+    pub platform: &'static str,
+    pub id: String,
+    pub song: String,
+    pub singer: String,
+    pub album: String,
+    pub cover: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ResolveOptions {
     pub platform: MusicPlatform,
@@ -309,6 +321,27 @@ pub async fn resolve(options: ResolveOptions) -> ApiResult<MusicTrack> {
     }
 }
 
+/// Catalog metadata for one song id. Only platforms with a cheap detail
+/// endpoint are supported; none of them resolves audio here.
+pub async fn track_info(platform: MusicPlatform, id: &str) -> ApiResult<TrackInfo> {
+    let id = id.trim();
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(ApiError::Custom("歌曲 ID 无效".to_string()));
+    }
+    match platform {
+        MusicPlatform::AppleMusic => applemusic::track_info(id).await,
+        MusicPlatform::Netease => netease::track_info(id).await,
+        MusicPlatform::Tencent => tencent::track_info(id).await,
+        MusicPlatform::Soda => soda::track_info(id).await,
+        _ => Err(ApiError::Custom("该平台暂不支持分享链接".to_string())),
+    }
+}
+
 pub async fn download<F>(
     track: &MusicTrack,
     include_cover: bool,
@@ -444,5 +477,34 @@ fn provider_for(platform: MusicPlatform) -> &'static dyn MusicProvider {
         MusicPlatform::Soda => &soda::SODA_PROVIDER,
         MusicPlatform::Tencent => &tencent::TENCENT_PROVIDER,
         MusicPlatform::YouTubeMusic => &youtubemusic::YOUTUBE_MUSIC_PROVIDER,
+    }
+}
+
+#[cfg(test)]
+mod track_info_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn malformed_ids_are_rejected_without_a_request() {
+        for id in ["", "  ", "1/2", "../x", "a b", &"9".repeat(65)] {
+            assert!(
+                track_info(MusicPlatform::Netease, id).await.is_err(),
+                "{id:?}"
+            );
+        }
+        assert!(track_info(MusicPlatform::Netease, "12a").await.is_err());
+        assert!(track_info(MusicPlatform::Bilibili, "123").await.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "live network"]
+    async fn live_track_info() {
+        let netease = track_info(MusicPlatform::Netease, "65766").await.unwrap();
+        println!("{netease:?}");
+        assert!(!netease.song.is_empty() && netease.cover.starts_with("http"));
+        match track_info(MusicPlatform::Tencent, "0039MnYb0qxYhV").await {
+            Ok(info) => println!("{info:?}"),
+            Err(error) => println!("tencent: {error}"),
+        }
     }
 }

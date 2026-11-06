@@ -750,6 +750,20 @@ struct WebPlaybackMetadata {
     duration: i64,
 }
 
+pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
+    ensure_apple_enabled()?;
+    let song = get_apple_song(id).await?;
+    let attrs = song.attributes;
+    Ok(super::TrackInfo {
+        platform: MusicPlatform::AppleMusic.id(),
+        id: song.id,
+        song: attrs.name,
+        singer: attrs.artist_name,
+        album: attrs.album_name,
+        cover: format_artwork_url(attrs.artwork.as_ref(), DEFAULT_ARTWORK_SIZE),
+    })
+}
+
 async fn get_apple_song(id: &str) -> Result<AppleMusicResource, BotError> {
     let url = apple_song_url(id);
     let response: AppleMusicResponse = apple_get_json(&url, true).await?;

@@ -1,12 +1,13 @@
-// A shared song travels as plain query parameters on the site's own address:
-//   /?song=<platform>:<source id>&title=…&artist=…&cover=…
-// The platform and source id identify the song for playback; title, artist
-// and cover only label it before playback resolves, so a link stays usable
-// even if they are missing.
+// A shared song travels as one query parameter on the site's own address:
+//   /?song=<platform>:<source id>
+// Nothing else is trusted from the link: title, artist and cover are looked
+// up from the platform by that id when the link is opened.
 
-const PLATFORM = /^[a-z0-9_-]{1,32}$/;
-const MAX_FIELD = 200;
-const MAX_COVER = 400;
+// Platforms whose catalog the backend can look a song up in by id.
+export const SHAREABLE_PLATFORMS = new Set(["applemusic", "netease", "tencent", "soda"]);
+const ID = /^[A-Za-z0-9._-]{1,64}$/;
+// Older links also carried labels; they are ignored and removed.
+const SHARE_KEYS = ["song", "title", "artist", "cover"];
 
 export function shareSourceId(track) {
   if (!track) return "";
@@ -19,60 +20,43 @@ export function shareSourceId(track) {
   return track.id == null ? "" : String(track.id);
 }
 
-function httpUrl(value) {
-  const text = String(value || "").trim();
-  if (!text || text.length > MAX_COVER) return "";
-  try {
-    const url = new URL(text);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
-  } catch {
-    return "";
-  }
-}
-
 export function canShareTrack(track) {
-  return Boolean(track && PLATFORM.test(String(track.platform || "")) && shareSourceId(track));
+  return Boolean(track && SHAREABLE_PLATFORMS.has(String(track.platform || "")) && ID.test(shareSourceId(track)));
 }
 
 export function buildShareUrl(track, base) {
   if (!canShareTrack(track)) return "";
   const url = new URL("/", base);
   url.searchParams.set("song", `${track.platform}:${shareSourceId(track)}`);
-  if (track.title) url.searchParams.set("title", String(track.title).slice(0, MAX_FIELD));
-  if (track.artist) url.searchParams.set("artist", String(track.artist).slice(0, MAX_FIELD));
-  // Only a public platform cover is worth carrying; this server's own cover
-  // route belongs to a playback task the recipient does not have.
-  const cover = httpUrl(track.cover);
-  if (cover) url.searchParams.set("cover", cover);
   return url.href;
 }
 
 export function parseShareParams(search) {
-  const params = new URLSearchParams(search || "");
-  const song = params.get("song") || "";
+  const song = new URLSearchParams(search || "").get("song") || "";
   const split = song.indexOf(":");
   if (split <= 0) return null;
   const platform = song.slice(0, split);
   const id = song.slice(split + 1).trim();
-  if (!PLATFORM.test(platform) || !id || id.length > MAX_FIELD) return null;
-  return {
-    platform,
-    id,
-    title: (params.get("title") || "").slice(0, MAX_FIELD),
-    artist: (params.get("artist") || "").slice(0, MAX_FIELD),
-    cover: httpUrl(params.get("cover")),
-  };
+  if (!SHAREABLE_PLATFORMS.has(platform) || !ID.test(id)) return null;
+  return { platform, id };
 }
 
 // The address without the share parameters, so a reload or bookmark does not
-// offer the same song again.
+// open the same song again.
 export function stripShareParams(href) {
   const url = new URL(href);
-  for (const key of ["song", "title", "artist", "cover"]) url.searchParams.delete(key);
+  for (const key of SHARE_KEYS) url.searchParams.delete(key);
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
 export function shareText(track) {
   const title = track?.title || "一首歌";
   return track?.artist ? `${title} — ${track.artist}` : title;
+}
+
+// Plain text of one lyric line as the lyric views store it.
+export function lyricLineText(line) {
+  if (!line) return "";
+  const words = Array.isArray(line.words) ? line.words.map((word) => String(word.word || "")).join("") : "";
+  return (words || String(line.text || "")).replace(/\s+/g, " ").trim();
 }

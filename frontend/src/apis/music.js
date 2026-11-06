@@ -64,6 +64,11 @@ export function getContinuationRecommendations({ platform = "applemusic", seedId
   }).then((res) => res.json());
 }
 
+// Catalog metadata for a shared song, looked up by platform and id only.
+export function getTrackInfo({ platform, id, signal }) {
+  return request(`${API}/tracks/${encodeURIComponent(platform)}/${encodeURIComponent(id)}`, { signal }).then((res) => res.json());
+}
+
 export function resolveCollection({ platform, url, limit }) {
   const params = new URLSearchParams({ platform, url });
   // Omitting limit asks the server for the complete collection. Recommendation

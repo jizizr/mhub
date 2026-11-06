@@ -492,6 +492,7 @@ fn app_with_state(state: AppState, serve_web: bool) -> Router {
         .route("/api/v1/collections/resolve", get(resolve_collection))
         .route("/api/v1/collections/match", post(match_collection))
         .route("/api/v1/lyrics", get(lyrics))
+        .route("/api/v1/tracks/:platform/:id", get(track_info))
         .route("/api/v1/playbacks", post(create_download))
         .route("/api/v1/playbacks/:id", get(get_download))
         .route("/api/v1/playbacks/:id/audio", get(download_file))
@@ -635,6 +636,22 @@ async fn search(Query(params): Query<SearchParams>) -> ApiResult<Json<Vec<Search
                 cover: item.cover,
             })
             .collect(),
+    ))
+}
+
+/// Catalog metadata for a shared song, looked up by platform and id only so a
+/// share link cannot carry made-up titles or covers.
+async fn track_info(
+    Path((platform, id)): Path<(String, String)>,
+) -> ApiResult<(
+    [(header::HeaderName, &'static str); 1],
+    Json<music::TrackInfo>,
+)> {
+    let platform = music::parse_platform(&platform)?;
+    let info = music::track_info(platform, &id).await?;
+    Ok((
+        [(header::CACHE_CONTROL, "public, max-age=3600")],
+        Json(info),
     ))
 }
 

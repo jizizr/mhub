@@ -354,6 +354,18 @@ struct SodaTrackDetails {
     lyric: String,
 }
 
+pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
+    let track = get_soda_track_details(id).await?.track;
+    Ok(super::TrackInfo {
+        platform: MusicPlatform::Soda.id(),
+        id: track.id.clone(),
+        song: track.name.clone(),
+        singer: soda_artists(&track),
+        album: track.album.name.clone(),
+        cover: soda_cover_url(&track.album.url_cover),
+    })
+}
+
 async fn get_soda_track_details(id: &str) -> Result<SodaTrackDetails, BotError> {
     let url = soda_track_detail_url(id);
     let response: SodaTrackResponse = get_soda_json(&url, soda_detail_headers()).await?;
