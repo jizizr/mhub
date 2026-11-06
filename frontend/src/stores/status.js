@@ -73,6 +73,8 @@ export const useStatusStore = defineStore("status", {
     toastId: 0,
     // The song the share dialog is open for; never persisted.
     shareTrack: null,
+    // The lyric script the full player showed when sharing began.
+    shareLyricScript: "",
     ...restore(),
   }),
   getters: {

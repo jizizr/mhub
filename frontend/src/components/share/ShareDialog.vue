@@ -1,11 +1,13 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { ChevronLeft, Copy, Download, Image as ImageIcon, Link2, Quote, Share2, X } from "lucide-vue-next";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { ChevronLeft, Copy, Download, Image as ImageIcon, Languages, Link2, Quote, Share2, X } from "lucide-vue-next";
 import { coverUrl } from "../../apis/music";
 import { lyricIdentity, loadTrackLyrics } from "../../services/lyrics";
 import { useMediaStore } from "../../stores/media";
 import { useStatusStore } from "../../stores/status";
 import { buildShareUrl, lyricLineText, shareText } from "../../utils/share";
+import { loadLyricConverter } from "../../utils/opencc-loader.js";
+import { lyricToggleTarget, lyricsAreChinese, lyricsLookTraditional } from "../../utils/lyric-script";
 
 const props = defineProps({ track: { type: Object, required: true } });
 const emit = defineEmits(["close"]);
@@ -20,8 +22,17 @@ const linkInput = ref(null);
 const image = ref({ kind: "", url: "", blob: null, loading: false, error: "" });
 let renderToken = 0;
 
-const lyricLines = ref([]);
+// Lyrics as loaded, and as shown in the chosen script.
+const sourceLines = shallowRef([]);
+const convertedLines = shallowRef(null);
 const lyricState = ref("idle");
+const isPlayingTrack = computed(() => Boolean(media.track) && lyricIdentity(media.track) === lyricIdentity(props.track));
+// Start in the script the full player shows for this song.
+const lyricScript = ref((isPlayingTrack.value && status.shareLyricScript) || status.lyricScript || "original");
+const conversion = ref("original");
+const lyricsChinese = computed(() => lyricsAreChinese(sourceLines.value));
+const toggleTarget = computed(() => lyricToggleTarget(lyricScript.value, lyricsLookTraditional(sourceLines.value)));
+const lyricLines = computed(() => toShareLines(convertedLines.value || sourceLines.value));
 const selection = ref(null);
 const withTranslation = ref(true);
 
@@ -108,18 +119,47 @@ async function chooseLyrics() {
   mode.value = "lyrics";
   if (lyricState.value === "ready" || lyricState.value === "loading") return;
   // The playing song's lyrics are already in memory.
-  if (media.track && lyricIdentity(media.track) === lyricIdentity(props.track) && media.lyricLines.length) {
-    lyricLines.value = toShareLines(media.lyricLines);
-    lyricState.value = lyricLines.value.length ? "ready" : "empty";
+  if (isPlayingTrack.value && media.lyricLines.length) {
+    sourceLines.value = media.lyricLines;
+  } else {
+    lyricState.value = "loading";
+    try {
+      sourceLines.value = await loadTrackLyrics(props.track) || [];
+    } catch {
+      lyricState.value = "error";
+      return;
+    }
+  }
+  lyricState.value = toShareLines(sourceLines.value).length ? "ready" : "empty";
+}
+
+// Converting keeps every line, so a selection stays on the same lines.
+watch([lyricScript, sourceLines], async ([script, lines], _previous, onCleanup) => {
+  let active = true;
+  onCleanup(() => { active = false; });
+  convertedLines.value = null;
+  if (script !== "simplified" && script !== "traditional" || !lines.length || !lyricsAreChinese(lines)) {
+    conversion.value = "original";
     return;
   }
-  lyricState.value = "loading";
+  conversion.value = "loading";
   try {
-    lyricLines.value = toShareLines(await loadTrackLyrics(props.track));
-    lyricState.value = lyricLines.value.length ? "ready" : "empty";
+    const converter = await loadLyricConverter(script);
+    if (!active) return;
+    convertedLines.value = converter ? converter.convertLyricLines(lines) : null;
+    conversion.value = "ready";
   } catch {
-    lyricState.value = "error";
+    if (active) conversion.value = "error";
   }
+});
+
+function toggleLyricScript() {
+  lyricScript.value = toggleTarget.value;
+}
+
+// A failed dictionary load is retried with a fresh module URL by the loader.
+function retryConversion() {
+  sourceLines.value = [...sourceLines.value];
 }
 
 // Tap one line to start, then another to extend: the excerpt is always one
@@ -266,9 +306,22 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-else-if="mode === 'lyrics'" class="share__body">
-        <p v-if="lyricState === 'ready'" class="share__hint">
-          {{ selectedLines.length ? `已选 ${selectedLines.length} 行` : "点一行作为开头，再点一行作为结尾" }}（最多 {{ MAX_LYRIC_LINES }} 行）
-        </p>
+        <div v-if="lyricState === 'ready'" class="share__lyric-bar">
+          <p class="share__hint">
+            {{ selectedLines.length ? `已选 ${selectedLines.length} 行` : "点一行作为开头，再点一行作为结尾" }}（最多 {{ MAX_LYRIC_LINES }} 行）
+          </p>
+          <span v-if="lyricsChinese && conversion === 'loading'" class="share__script" role="status">正在转换…</span>
+          <button
+            v-else-if="lyricsChinese"
+            class="share__script"
+            type="button"
+            :title="conversion === 'error' ? '转换失败，点击重试' : toggleTarget === 'traditional' ? '切换为繁体歌词' : '切换为简体歌词'"
+            @click="conversion === 'error' ? retryConversion() : toggleLyricScript()"
+          >
+            <Languages :size="14" />
+            {{ conversion === "error" ? "转换失败 · 重试" : toggleTarget === "traditional" ? "繁體" : "简体" }}
+          </button>
+        </div>
         <div class="share__lyrics" role="listbox" aria-multiselectable="true" aria-label="选择要分享的歌词">
           <span v-if="lyricState === 'loading'" class="share__status" role="status">正在加载歌词…</span>
           <span v-else-if="lyricState === 'empty'" class="share__status">这首歌暂无歌词</span>
@@ -340,6 +393,9 @@ onBeforeUnmount(() => {
 .share__preview--lyrics img { width: auto; max-width: 100%; height: auto; max-height: 56vh; border-radius: 14px; }
 .share__status { padding: 24px 18px; color: var(--text-muted); font-size: 13px; text-align: center; }
 .share__hint { margin: 0; color: var(--text-muted); font-size: 12px; }
+.share__lyric-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.share__script { flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-muted); color: var(--text); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+span.share__script { cursor: default; color: var(--text-muted); }
 .share__lyrics { display: grid; align-content: start; gap: 2px; max-height: min(46vh, 420px); overflow-y: auto; overscroll-behavior: contain; margin: 0 -6px; padding: 2px 6px; }
 .share__lyric { display: grid; gap: 2px; padding: 8px 12px; border: 0; border-radius: 10px; background: transparent; color: var(--text); font: inherit; font-size: 15px; line-height: 1.4; text-align: left; cursor: pointer; transition: background var(--motion-fast); }
 .share__lyric small { color: var(--text-muted); font-size: 12px; }

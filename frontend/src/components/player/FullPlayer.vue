@@ -7,6 +7,7 @@ import { useMediaStore } from "../../stores/media";
 import { useStatusStore } from "../../stores/status";
 import { COVER_TONE_FALLBACK, coverTone } from "../../utils/cover-tone";
 import { canShareTrack } from "../../utils/share";
+import { lyricToggleTarget, lyricsAreChinese, lyricsLookTraditional } from "../../utils/lyric-script";
 import PlayerControls from "./PlayerControls.vue";
 import QueuePanel from "./QueuePanel.vue";
 import SeekSlider from "./SeekSlider.vue";
@@ -60,20 +61,9 @@ const lyricScript = computed(() => lyricScriptOverride.value || status.lyricScri
 // The toggle is always offered for Chinese lyrics, as Apple Music offers its
 // lyric-script switch. Under the "original" setting it targets the other
 // script; a dictionary loads only once a conversion is actually chosen.
-// Japanese lyrics also use Han characters; kana marks them as not Chinese.
-const HAN = /\p{Script=Han}/u;
-const KANA = /[\p{Script=Hiragana}\p{Script=Katakana}]/u;
-const lyricText = (line) => [...(Array.isArray(line.words) ? line.words.map((word) => String(word.word || "")) : []), String(line.translatedLyric || "")].join("");
-const lyricsHaveHan = computed(() => {
-  const text = media.lyricLines.map(lyricText).join("");
-  return HAN.test(text) && !KANA.test(text);
-});
+const lyricsHaveHan = computed(() => lyricsAreChinese(media.lyricLines));
 const lyricsAreTraditional = ref(false);
-const toggleTarget = computed(() => {
-  if (lyricScript.value === "simplified") return "traditional";
-  if (lyricScript.value === "traditional") return "simplified";
-  return lyricsAreTraditional.value ? "simplified" : "traditional";
-});
+const toggleTarget = computed(() => lyricToggleTarget(lyricScript.value, lyricsAreTraditional.value));
 const canToggleLyricScript = computed(() => media.lyricLines.length > 0 && lyricsHaveHan.value);
 const lyricConversionFailed = computed(() => lyricScript.value !== "original" && (
   lyricScriptCheckFailed.value ||
@@ -82,12 +72,9 @@ const lyricConversionFailed = computed(() => lyricScript.value !== "original" &&
 const lyricConversionLoading = computed(() => lyricScript.value !== "original" &&
   lyricConversionState.value.script === lyricScript.value && lyricConversionState.value.state === "loading");
 
-// Under "original" no dictionary is downloaded just to label the button:
-// frequent Traditional-only characters tell Traditional lyrics apart.
-const TRADITIONAL_ONLY = /[這們個來說會為與對時國學還進過裡體麼後發開關問題經點應當見愛聽讓從誰樣頭邊壞夢歲謝謊輕嘗給濃歡樣溫護擔擁淚憶戀遠離總覺讀寫話語]/u;
 function refreshLyricScriptDifference() {
   lyricScriptCheckFailed.value = false;
-  lyricsAreTraditional.value = media.lyricLines.some((line) => TRADITIONAL_ONLY.test(lyricText(line)));
+  lyricsAreTraditional.value = lyricsLookTraditional(media.lyricLines);
 }
 
 function retryLyricConversion() {
@@ -171,7 +158,7 @@ onBeforeUnmount(() => {
             type="button"
             title="分享"
             aria-label="分享这首歌"
-            @click="status.shareTrack = media.track"
+            @click="status.shareLyricScript = lyricScript; status.shareTrack = media.track"
           ><Share :size="19" /></button>
         </div>
       </div>
