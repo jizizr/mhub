@@ -313,7 +313,12 @@ mod tests {
 
     #[tokio::test]
     async fn bulk_searches_are_spaced_by_the_interval() {
-        let gate = SearchGate::new(tuning());
+        // Keep the interval fixed: with the shared tuning, the second success
+        // would already shorten the last gap to 18ms.
+        let gate = SearchGate::new(Tuning {
+            speed_up_after: u32::MAX,
+            ..tuning()
+        });
         let started = Instant::now();
         for index in 0..4 {
             gate.search(
