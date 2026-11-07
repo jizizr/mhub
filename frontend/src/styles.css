@@ -1425,6 +1425,30 @@ button.artwork-card__play:hover { background: rgba(255, 255, 255, .86); color: v
   transform: scale(0.94);
 }
 
+.full-player__meta .full-player__download {
+  margin-right: -6px;
+}
+
+/* Progress ring while a download is running. */
+.full-player__download.is-busy {
+  cursor: progress;
+  background:
+    radial-gradient(closest-side, rgba(40, 40, 40, 0.35) 84%, transparent 86%),
+    conic-gradient(rgba(255, 255, 255, 0.85) var(--download-progress, 0deg), rgba(255, 255, 255, 0.13) 0);
+}
+
+.full-player__download-spin {
+  animation: full-player-download-spin 900ms linear infinite;
+}
+
+@keyframes full-player-download-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .full-player__download-spin { animation: none; }
+}
+
 .full-player__meta h1 {
   margin: 0;
   font-size: clamp(28px, 3vw, 44px);

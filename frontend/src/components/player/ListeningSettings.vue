@@ -186,7 +186,10 @@ onBeforeUnmount(() => {
           <p role="status" aria-live="polite">{{ balanceMessage }}</p>
           <p class="listening-settings__note">整曲分析后，在后续播放应用。首次播放不等待分析。</p>
         </div>
-        <a class="listening-settings__source" href="/source.tar.gz">MHub 源代码 · AGPL-3.0</a>
+        <p class="listening-settings__links">
+          <a class="listening-settings__source" href="/source.tar.gz">MHub 源代码 · AGPL-3.0</a>
+          <a class="listening-settings__source" href="/docs/api/" target="_blank" rel="noopener">API 文档</a>
+        </p>
       </section>
     </Transition>
   </div>
@@ -208,7 +211,8 @@ onBeforeUnmount(() => {
 .listening-settings__section { padding: 12px 0 2px; border-top: 1px solid var(--line); }
 .listening-settings__section + .listening-settings__section { margin-top: 12px; }
 .listening-settings__row + .listening-settings__row { margin-top: 10px; }
-.listening-settings__source { display: block; margin-top: 14px; color: var(--text-muted); font-size: 12px; text-decoration: none; }
+.listening-settings__links { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 14px 0 0; }
+.listening-settings__source { color: var(--text-muted); font-size: 12px; text-decoration: none; }
 .listening-settings__source:hover { color: var(--accent); }
 .listening-settings__row, .listening-settings__balance { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 650; }
 .listening-settings__row label { flex: 0 0 auto; }

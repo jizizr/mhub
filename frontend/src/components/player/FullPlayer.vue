@@ -1,12 +1,13 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ChevronDown, Languages, Share } from "lucide-vue-next";
+import { ChevronDown, Download, Languages, LoaderCircle, Share } from "lucide-vue-next";
 import { coverUrl } from "../../apis/music";
 import * as player from "../../core/player";
 import { useMediaStore } from "../../stores/media";
 import { useStatusStore } from "../../stores/status";
 import { COVER_TONE_FALLBACK, coverTone } from "../../utils/cover-tone";
 import { canShareTrack } from "../../utils/share";
+import { downloadKey, downloadTrack, downloads } from "../../services/track-download";
 import { lyricToggleTarget, lyricsAreChinese, lyricsLookTraditional } from "../../utils/lyric-script";
 import PlayerControls from "./PlayerControls.vue";
 import QueuePanel from "./QueuePanel.vue";
@@ -49,6 +50,21 @@ watch([open, cover], async ([isOpen, url]) => {
   const tone = await coverTone(url);
   if (token === toneToken) emit("chrome-color", tone);
 }, { immediate: true });
+
+// Saves the decrypted file; a song already cached whole needs no request.
+const download = computed(() => (media.track ? downloads[downloadKey(media.track)] : null));
+const canDownload = computed(() => Boolean(media.track && (media.track.playback_id || media.track.id) && media.track.platform));
+const downloadTitle = computed(() => {
+  const state = download.value;
+  if (!state) return "下载音频文件";
+  if (state.stage === "preparing") return "正在准备音频文件…";
+  if (state.stage === "downloading" && state.progress) return `正在下载 ${Math.round(state.progress * 100)}%`;
+  return "正在下载…";
+});
+function startDownload() {
+  if (!canDownload.value || download.value) return;
+  void downloadTrack(media.track, { notify: (message) => status.toast(message) });
+}
 
 function onLineClick(event) {
   if (Number.isFinite(event)) player.seek(event);
@@ -152,6 +168,20 @@ onBeforeUnmount(() => {
             <h1>{{ media.track.title }}</h1>
             <p>{{ media.track.artist || "未知艺人" }}</p>
           </div>
+          <button
+            v-if="canDownload"
+            class="full-player__share full-player__download"
+            :class="{ 'is-busy': download }"
+            type="button"
+            :title="downloadTitle"
+            :aria-label="downloadTitle"
+            :aria-busy="Boolean(download)"
+            :style="download?.progress ? { '--download-progress': `${download.progress * 360}deg` } : undefined"
+            @click="startDownload"
+          >
+            <LoaderCircle v-if="download" class="full-player__download-spin" :size="19" />
+            <Download v-else :size="19" />
+          </button>
           <button
             v-if="canShareTrack(media.track)"
             class="full-player__share"
