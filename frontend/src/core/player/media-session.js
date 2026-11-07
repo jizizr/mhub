@@ -1,3 +1,41 @@
+// WebKit hands Now Playing artwork to iOS as an uncompressed TIFF of the
+// decoded image. Platform covers reach 1200px (Apple Music) or 4000px (QQ
+// Music, about 64 MB decoded), and such artwork never shows on the lock
+// screen or in the Dynamic Island. Ask the CDN for the 512px rendition WebKit
+// itself treats as ideal; unknown hosts keep their single original URL.
+export function systemArtwork(src) {
+  let url;
+  try { url = new URL(src); } catch { return null; }
+  if (!["http:", "https:"].includes(url.protocol)) return null;
+  const host = url.hostname.toLowerCase();
+  const sized = (size) => ({ src: url.href, sizes: `${size}x${size}` });
+  if (host.endsWith(".mzstatic.com")) {
+    const path = url.pathname.replace(/\/\d+x\d+(\w*)\.(jpe?g|png|webp)$/i, "/512x512$1.$2");
+    if (path === url.pathname) return null;
+    url.pathname = path;
+    return sized(512);
+  }
+  if (host === "y.gtimg.cn" || host === "y.qq.com") {
+    const path = url.pathname.replace(/\/T00(\d)(?:R\d+x\d+)?M000/, "/T00$1R500x500M000");
+    if (path === url.pathname && !/\/T00\dR500x500M000/.test(path)) return null;
+    url.pathname = path;
+    url.protocol = "https:";
+    return sized(500);
+  }
+  if (host.endsWith(".music.126.net")) {
+    url.protocol = "https:";
+    url.searchParams.set("param", "512y512");
+    return sized(512);
+  }
+  if (host.endsWith(".douyinpic.com")) {
+    const path = url.pathname.replace(/-resize:\d+:\d+(\.\w+)$/, "-resize:512:512$1");
+    if (path === url.pathname) return null;
+    url.pathname = path;
+    return sized(512);
+  }
+  return null;
+}
+
 // Media Session supplies the browser's media controls; it does not use the
 // Notification API and does not request notification permission. Each optional
 // browser operation is isolated so system controls can never break playback.
@@ -95,13 +133,16 @@ export function createMediaSessionController({
   function setMetadata(track) {
     if (typeof Metadata !== "function") return;
     const cover = artworkUrl(track.cover) || artworkUrl(track.cover_url);
+    const sized = cover ? systemArtwork(cover) : null;
     const value = {
       title: String(track.title || track.song || "未知歌曲"),
       artist: String(track.artist || track.singer || "未知艺人"),
       album: String(track.album || ""),
       // The URL can be JPEG, WebP, PNG, or a cached Blob of any size. False
-      // PNG/size declarations prevent some mobile browsers showing covers.
-      artwork: cover ? [{ src: cover }] : [],
+      // PNG/size declarations prevent some mobile browsers showing covers, so
+      // only a size the CDN really serves is declared; the original follows
+      // as the fallback should that rendition fail to load.
+      artwork: cover ? (sized ? [sized, { src: cover }] : [{ src: cover }]) : [],
     };
     const key = JSON.stringify(value);
     if (key === metadataKey) return;

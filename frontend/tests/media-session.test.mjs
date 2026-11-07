@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createMediaSessionController } from "../src/core/player/media-session.js";
+import { createMediaSessionController, systemArtwork } from "../src/core/player/media-session.js";
 
 function fixture(options = {}) {
   const values = { metadata: [], playbackState: [], positions: [], actions: [] };
@@ -242,4 +242,30 @@ test("queued progress/pause after Stop cannot resurrect cleared media ownership"
   assert.equal(h.values.metadata.at(-1), null);
   assert.equal(h.values.positions.length, count);
   assert.ok([...h.handlers.values()].every(handler => handler === null));
+});
+
+test("platform covers offer the system a real 512px rendition before the original", () => {
+  const h = fixture();
+  const original = "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a0/dd/fd/a0/26UM1IM21436.rgb.jpg/1200x1200bb.jpg";
+  h.current.track.cover = original;
+  h.controller.update();
+  assert.deepEqual(h.values.metadata.at(-1).artwork, [
+    { src: "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a0/dd/fd/a0/26UM1IM21436.rgb.jpg/512x512bb.jpg", sizes: "512x512" },
+    { src: original },
+  ]);
+});
+
+test("each platform CDN is asked for a rendition it serves; unknown hosts are left alone", () => {
+  assert.deepEqual(systemArtwork("https://y.gtimg.cn/music/photo_new/T002M000003y8dsH2wBHlo.jpg"),
+    { src: "https://y.gtimg.cn/music/photo_new/T002R500x500M000003y8dsH2wBHlo.jpg", sizes: "500x500" });
+  assert.deepEqual(systemArtwork("https://y.gtimg.cn/music/photo_new/T002R300x300M000003y8dsH2wBHlo.jpg"),
+    { src: "https://y.gtimg.cn/music/photo_new/T002R500x500M000003y8dsH2wBHlo.jpg", sizes: "500x500" });
+  assert.deepEqual(systemArtwork("http://p1.music.126.net/ZGffiDQZrGj5s_hnR1CNbg==/109951165566379710.jpg?param=1080y1080"),
+    { src: "https://p1.music.126.net/ZGffiDQZrGj5s_hnR1CNbg==/109951165566379710.jpg?param=512y512", sizes: "512x512" });
+  assert.deepEqual(systemArtwork("https://p3-luna.douyinpic.com/img/tos-cn-v-2774c002/abc~c5_375x375-resize:960:960.png"),
+    { src: "https://p3-luna.douyinpic.com/img/tos-cn-v-2774c002/abc~c5_375x375-resize:512:512.png", sizes: "512x512" });
+  assert.equal(systemArtwork("https://is1-ssl.mzstatic.com/image/thumb/Music/source/cover.jpg"), null);
+  assert.equal(systemArtwork("https://imge.kugou.com/stdmusic/400/20200909/cover.jpg"), null);
+  assert.equal(systemArtwork("https://example.test/art/test.webp"), null);
+  assert.equal(systemArtwork("blob:https://example.test/1234"), null);
 });
