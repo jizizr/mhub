@@ -223,6 +223,10 @@ scripts/                浏览器回归与发布检查
 docs/                   架构与部署说明、README 图片
 ```
 
+## 社区
+
+感谢 [LINUX DO](https://linux.do/) 社区。
+
 ## 许可与版权
 
 MHub 以 **[AGPL-3.0-only](LICENSE)** 发布。可以自由使用、修改，也可以商用，但通过网络向他人提供修改后的版本时，需要向这些用户提供对应源码；Docker 镜像的 `/source.tar.gz` 就是为此准备的。项目没有另行提供商业授权。
