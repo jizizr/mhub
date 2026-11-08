@@ -91,24 +91,35 @@ function resolverFixture() {
   return { resolve, track, requestedStreamingMode, creations, reads, entries, packetEntry, packetKey, packetBlob, polls: () => polls };
 }
 
-test("online Android requests native Hi-Res using current quality and preserves existing WASM cache", async (t) => {
+test("online Android requests WASM Hi-Res and reuses its cached packet Blob", async (t) => {
   environment(t);
   const h = resolverFixture();
-  assert.equal(h.requestedStreamingMode(h.track), "");
+  assert.equal(h.requestedStreamingMode(h.track), "wasm_alac");
+  const resolved = await h.resolve(h.track);
+  t.after(() => URL.revokeObjectURL(resolved.source));
+  assert.match(resolved.source, /^blob:/);
+  assert.equal(h.creations.length, 0, "a complete packet cache needs no provider request");
+  assert.equal(h.polls(), 0);
+  assert.equal(h.reads[0], h.packetKey);
+  assert.equal(resolved.track.quality, "hires", "the current playback setting wins over imported lossless metadata");
+  assert.equal(resolved.track.streaming_mode, "wasm_alac");
+  assert.equal(canUseAlacPlayback(resolved.track), true);
+  assert.equal(h.track.quality, "lossless", "source metadata is never mutated by platform negotiation");
+  assert.equal(h.entries.get(h.packetKey).blob, h.packetBlob);
+});
+
+test("online Android without a cached copy negotiates the streaming WASM transport", async (t) => {
+  environment(t, { audioSession: { type: "playback" } });
+  const h = resolverFixture();
+  h.entries.clear();
   const resolved = await h.resolve(h.track);
   assert.equal(h.creations.length, 1);
-  assert.equal(h.creations[0].quality, "hires", "the current playback setting wins over imported lossless metadata");
-  assert.equal(h.creations[0].streamingMode, null);
+  assert.equal(h.creations[0].quality, "hires");
+  assert.equal(h.creations[0].streamingMode, "wasm_alac");
   assert.equal(h.creations[0].selectedId, "synthetic");
-  assert.equal(h.polls(), 1, "native playback waits for the completed derivative of a shared WASM task");
-  assert.equal(resolved.track.quality, "hires");
-  assert.equal(resolved.track.streaming_mode, "");
-  assert.equal(resolved.track.format, "flac");
-  assert.equal(resolved.source, "/api/v1/playbacks/synthetic/audio?v=applemusic--synthetic--hires");
-  assert.equal(canUseAlacPlayback(resolved.track), false);
-  assert.equal(h.track.quality, "lossless", "source metadata is never mutated by platform negotiation");
-  assert.equal(h.entries.get(h.packetKey), h.packetEntry, "online native negotiation does not delete the offline packet cache");
-  assert.equal(h.reads[0], "applemusic:synthetic:hires");
+  assert.equal(h.polls(), 0, "a streaming WASM task starts without waiting for the completed file");
+  assert.equal(resolved.track.streaming_mode, "wasm_alac");
+  assert.equal(canUseAlacPlayback(resolved.track), true);
 });
 
 test("offline Android reuses its cached Hi-Res packet Blob without provider requests", async (t) => {
@@ -120,22 +131,6 @@ test("offline Android reuses its cached Hi-Res packet Blob without provider requ
   assert.match(resolved.source, /^blob:/);
   assert.equal(h.creations.length, 0);
   assert.equal(h.polls(), 0);
-  assert.equal(h.reads[0], h.packetKey);
-  assert.equal(resolved.track.quality, "hires");
   assert.equal(resolved.track.streaming_mode, "wasm_alac");
-  assert.equal(canUseAlacPlayback(resolved.track), true, "the cached packet representation remains playable by WASM");
-  assert.equal(h.entries.get(h.packetKey).blob, h.packetBlob);
-});
-
-test("Android exposing Audio Session still negotiates native playback online and preserves offline WASM bytes", async (t) => {
-  environment(t, { audioSession: { type: "playback" } });
-  const h = resolverFixture();
-  const resolved = await h.resolve(h.track);
-  assert.match(resolved.source, /\/audio\?/);
-  assert.equal(h.creations.length, 1);
-  assert.equal(h.creations[0].streamingMode, null);
-  assert.equal(h.polls(), 1);
-  assert.equal(resolved.track.quality, "hires");
-  assert.equal(canUseAlacPlayback(resolved.track), false);
   assert.equal(h.entries.get(h.packetKey).blob, h.packetBlob);
 });

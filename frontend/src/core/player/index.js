@@ -39,6 +39,9 @@ let loadWantsPlay = false;
 let lyricGeneration = 0;
 let initialized = false;
 let systemMedia = null;
+// Android only: a silent looping element that keeps the system media session
+// owned while Web Audio (WASM ALAC) produces the sound (media-companion.js).
+let mediaCompanion = null;
 let playbackLifecycle = null;
 let recoveringAudio = false;
 let recoveryReady = true;
@@ -938,14 +941,23 @@ function canPrefetchWithoutStarvingPlayback() {
   );
 }
 
+// Playing, buffering, or loading a song that should start: the span over
+// which the system controls must stay present.
+function wantsSystemPlayback() {
+  const status = useStatusStore();
+  return status.isPlaying || (status.trackLoading && loadWantsPlay);
+}
+
 function updateMediaSession(track = useMediaStore().track, { activate = false } = {}) {
   if (activate && systemMedia?.activate) systemMedia.activate(track);
   else systemMedia?.update(track);
+  mediaCompanion?.sync(wantsSystemPlayback());
   playbackLifecycle?.update();
 }
 
 function syncMediaSessionPosition(force = false) {
   systemMedia?.syncPosition({ force });
+  mediaCompanion?.sync(wantsSystemPlayback());
 }
 
 function activeAudioContext() {
@@ -1000,11 +1012,18 @@ function setupSystemPlayback(options) {
       const { media, status } = stores();
       return { track: media.track, state: status.state, position: status.position,
         duration: status.duration, speed: usingAlacPlayer ? 1 : status.speed,
-        wantsPlay: status.isPlaying || (status.trackLoading && loadWantsPlay) };
+        wantsPlay: wantsSystemPlayback() };
     },
     actions: { play, pause, previous: prevTrack, next: () => nextTrack(true), seek, stop },
   }) || null;
   systemMedia?.register();
+  mediaCompanion = options.mediaCompanionFactory?.({
+    // The browser paused the session's player (audio focus went to a call
+    // or another app): pause the music it was standing in for, and resume
+    // when the browser resumes it.
+    onExternalPause: () => { if (wantsSystemPlayback()) pause(); },
+    onExternalPlay: () => { void play(); },
+  }) || null;
   playbackLifecycle = options.lifecycleFactory?.({
     getSnapshot: () => ({ context: activeAudioContext(), token: trackToken,
       wantsPlay: useStatusStore().isPlaying && !useStatusStore().trackLoading && Boolean(useStatusStore().currentSource) }),
@@ -1913,8 +1932,9 @@ export function destroyPlayer() {
   if (!initialized) return;
   stop();
   systemMedia?.dispose();
+  mediaCompanion?.dispose();
   playbackLifecycle?.dispose();
-  systemMedia = playbackLifecycle = null;
+  systemMedia = mediaCompanion = playbackLifecycle = null;
   void alacPlayer?.destroy?.();
   alacPlayer = null;
   audio = null;

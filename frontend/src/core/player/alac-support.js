@@ -1,5 +1,3 @@
-import { shouldPreferNativeBackgroundPlayback } from "./playback-platform.js";
-
 // Capability checks stay in the first-screen bundle; the decoder, transport
 // and WebAssembly glue in alac-player.js load only when lossless playback
 // actually needs them. Decoded PCM plays through scheduled buffer sources, so
@@ -22,6 +20,5 @@ export function canUseAlacPlayback(track) {
 }
 
 export function canRequestAlacPlayback(track) {
-  return isAlacPlaybackSupported() && track?.platform === "applemusic" && isLosslessTrack(track) &&
-    !shouldPreferNativeBackgroundPlayback();
+  return isAlacPlaybackSupported() && track?.platform === "applemusic" && isLosslessTrack(track);
 }

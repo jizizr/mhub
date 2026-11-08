@@ -4,6 +4,9 @@
  * and page lifecycle events are deterministic simulations, NOT an assertion
  * that a desktop browser emulates a locked physical iOS/Android device.
  *
+ * `android` is the ALAC mode with the silent media companion Android uses
+ * (`MUSIC_BACKGROUND_MODES=native,alac,android`); Chromium runs muted.
+ *
  * PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs BROWSER=both node scripts/verify_background_audio_browser.mjs
  */
 import assert from 'node:assert/strict';
@@ -21,7 +24,7 @@ const require = createRequire(path.join(frontend, 'package.json'));
 const { build } = require('esbuild');
 const pw = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE) : 'playwright');
 const engines = process.env.BROWSER && process.env.BROWSER !== 'both' ? [process.env.BROWSER] : ['chromium', 'webkit'];
-const modes = process.env.MUSIC_BACKGROUND_MODES?.split(',') || ['native', 'alac'];
+const modes = process.env.MUSIC_BACKGROUND_MODES?.split(',') || ['native', 'alac', 'android'];
 const directory = await fs.mkdtemp(path.join(tmpdir(), 'background-audio-'));
 const reports = [];
 let server;
@@ -40,14 +43,16 @@ import * as player from './src/core/player/index.js';
 import { prepareOutput, preparePlaybackSession, createNativeOutput } from './src/core/player/audio-output.js';
 import { createPlaybackLifecycle } from './src/core/player/playback-lifecycle.js';
 import { createMediaSessionController } from './src/core/player/media-session.js';
+import { createMediaCompanion } from './src/core/player/media-companion.js';
 import { AlacPlayer } from './src/core/player/alac-player.js';
 import { useStatusStore } from './src/stores/status.js';
 import { useMediaStore } from './src/stores/media.js';
 setActivePinia(createPinia());
 const mode = new URL(location.href).searchParams.get('mode');
+const alacLike = mode === 'alac' || mode === 'android';
 const status = useStatusStore(), media = useMediaStore();
-status.quality = mode === 'alac' ? 'hires' : 'high'; status.volume = .3; status.repeatMode = 'off';
-const tracks = ['alpha', 'beta', 'gamma'].map(id => ({ id:'applemusic--'+id+'--'+status.quality, playback_id:'applemusic--'+id+'--'+status.quality, source_id:id, selected_id:id, platform:'applemusic', title:'Synthetic '+id, artist:'Test signal', album:'Public fixture', quality:status.quality, duration:60000, status:'completed', format:mode==='alac'?'m4a':'wav', ...(mode==='alac'?{streaming_mode:'wasm_alac',streaming_codec:'alac',streaming_protocol:'splayer-alac-v2'}:{}) }));
+status.quality = alacLike ? 'hires' : 'high'; status.volume = .3; status.repeatMode = 'off';
+const tracks = ['alpha', 'beta', 'gamma'].map(id => ({ id:'applemusic--'+id+'--'+status.quality, playback_id:'applemusic--'+id+'--'+status.quality, source_id:id, selected_id:id, platform:'applemusic', title:'Synthetic '+id, artist:'Test signal', album:'Public fixture', quality:status.quality, duration:60000, status:'completed', format:alacLike?'m4a':'wav', ...(alacLike?{streaming_mode:'wasm_alac',streaming_codec:'alac',streaming_protocol:'splayer-alac-v2'}:{}) }));
 const audio = document.createElement('audio'); audio.id = 'native-audio'; audio.preload = 'auto'; audio.crossOrigin = 'anonymous'; audio.playsInline = true; document.body.append(audio);
 let emptyNativeLoads=0;
 const nativeLoad=audio.load.bind(audio);
@@ -67,9 +72,13 @@ function createAlac() {
   instance.load=async (...args)=>{const result=await load(...args);observeOutput(instance.output);return result;};
   return instance;
 }
-const source = '/media.'+(mode==='alac'?'alacstream':'wav');
+const source = '/media.'+(alacLike?'alacstream':'wav');
 const resolutions = [];
-player.initPlayer({audio,
+// Every 25 ms: did the companion stop while playback was wanted?
+const companionGaps=[];let companionElement=null;
+const companionFactory=mode==='android'?options=>createMediaCompanion({...options,createElement:()=>{companionElement=document.createElement('audio');companionElement.id='media-companion';document.body.append(companionElement);return companionElement;}}):null;
+setInterval(()=>{if(!companionElement)return;const wanted=status.isPlaying||status.trackLoading;if(wanted&&companionElement.paused)companionGaps.push({at:performance.now(),state:status.state,loading:status.trackLoading,current:media.track?.source_id});},25);
+player.initPlayer({audio,mediaCompanionFactory:companionFactory,
   mediaSessionFactory:options=>{const controller=createMediaSessionController(options),activate=controller.activate;controller.activate=track=>{sessionActivations.push(track?.source_id);return activate(track);};return controller;},lifecycleFactory:createPlaybackLifecycle,
   outputFactory:{prepare:prepareOutput,prepareSession:preparePlaybackSession,createNative(element){const output=createNativeOutput(element);observeOutput(output);return output;}},
   alacPlayerFactory:{create:createAlac,canRequest:track=>AlacPlayer.canRequest(track),canHandle:track=>AlacPlayer.canHandle(track)},
@@ -79,6 +88,7 @@ function rms(analyser) {const values=new Float32Array(analyser.fftSize);analyser
 function snapshot(){const session=navigator.mediaSession;return {mode,state:status.state,position:status.position,current:media.track?.source_id,notice:status.notice,metadata:session?.metadata?{title:session.metadata.title,artist:session.metadata.artist,album:session.metadata.album}:null,mediaState:session?.playbackState,actions:Object.keys(window.fixtureActions||{}),audioSession:navigator.audioSession?.type,contexts:contexts.map(c=>({state:c.state,time:c.currentTime,rate:c.sampleRate})),outputs:outputs.map(({output,analyser})=>({disposed:output.disposed,rms:rms(analyser)})),elements:[...document.querySelectorAll('audio')].map(el=>({id:el.id,paused:el.paused,src:el.getAttribute('src'),stream:el.srcObject instanceof MediaStream,tracks:el.srcObject?.getAudioTracks?.().map(t=>({state:t.readyState,enabled:t.enabled}))||[],time:el.currentTime})),worklets:worklets.map(w=>({playing:w.playing,loaded:w.loaded,eof:w.eof,queue:w.queuedFrames,rate:w.outputSampleRate,position:w.consumedFrames}))};}
 window.fixture={player,status,tracks,audio,contexts,worklets,snapshot,resolutions,
   ownership:()=>({emptyNativeLoads,sessionActivations}),
+  companion:()=>({gaps:companionGaps.slice(),present:Boolean(companionElement),paused:companionElement?.paused,loop:companionElement?.loop,muted:companionElement?.muted,time:companionElement?.currentTime,duration:companionElement?.duration}),
   async interrupt(){await Promise.all(contexts.filter(c=>c.state==='running').map(c=>c.suspend()));},
   lifecycle(){window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}));document.dispatchEvent(new Event('visibilitychange'));},
   async action(name,details={}){const handler=window.fixtureActions?.[name];if(!handler)throw new Error('No '+name+' handler');await handler(details);}
@@ -111,7 +121,7 @@ window.fixtureReady=true;
   for(const engine of engines){
     let executablePath=process.env.BROWSER_EXECUTABLE;
     if(!executablePath&&engine==='chromium'&&process.platform==='darwin'){const candidate='/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge';try{await fs.access(candidate);executablePath=candidate;}catch{}}
-    const browser=await pw[engine].launch({headless:true,...(executablePath?{executablePath}:{})});
+    const browser=await pw[engine].launch({headless:true,...(engine==='chromium'?{args:['--mute-audio']}:{}),...(executablePath?{executablePath}:{})});
     const results=[],failures=[],evidence=[];
     const check=(name,condition,details)=>{results.push({name,passed:Boolean(condition),...(!condition?{details}:{})});assert.ok(condition,name);};
     try{
@@ -132,6 +142,11 @@ window.fixtureReady=true;
           check(mode+': lock-screen controls registered',['play','pause','previoustrack','nexttrack','seekto','seekbackward','seekforward'].every(action=>started.actions.includes(action)),started.actions);
           if(started.audioSession!==undefined)check(mode+': audio session uses playback category',started.audioSession==='playback',started.audioSession);
           if(mode==='alac')check('alac: actual WASM renderer runs without a silent media keepalive',started.worklets.some(w=>w.playing&&w.loaded)&&started.elements.every(el=>el.paused),started);
+          if(mode==='android'){
+            const companion=await page.evaluate(()=>fixture.companion());
+            check('android: WASM renders while the silent companion plays',started.worklets.some(w=>w.playing&&w.loaded)&&companion.present&&companion.paused===false&&companion.loop===true&&companion.muted===false&&companion.duration>=5,{started,companion});
+            check('android: the native element stays idle',started.elements.filter(el=>el.id==='native-audio').every(el=>el.paused),started);
+          }
           evidence.push({mode,phase:'playing',snapshot:started});
           const before=started.position;
           await page.evaluate(async()=>{await fixture.interrupt();fixture.lifecycle();});
@@ -145,6 +160,7 @@ window.fixtureReady=true;
           await page.evaluate(async()=>{await fixture.interrupt();fixture.lifecycle();});
           await page.waitForTimeout(500);
           const keptPaused=await snapshot();
+          if(mode==='android')check('android: an explicit pause pauses the companion',(await page.evaluate(()=>fixture.companion())).paused===true,await page.evaluate(()=>fixture.companion()));
           check(mode+': lifecycle does not override explicit system pause',keptPaused.state==='paused'&&keptPaused.mediaState==='paused'&&Math.abs(keptPaused.position-paused.position)<180,keptPaused);
           await page.locator('#resume').click();
           const resumed=await until(v=>v.state==='playing'&&v.position>keptPaused.position+250&&v.mediaState==='playing');
@@ -167,6 +183,10 @@ window.fixtureReady=true;
           const ownership=await page.evaluate(()=>fixture.ownership());
           check(mode+': actual rendering republishes the new system session',ownership.sessionActivations.includes('gamma'),ownership);
           if(mode==='native')check('native: queue handoffs never load an empty source',ownership.emptyNativeLoads===0,ownership);
+          if(mode==='android'){
+            const companion=await page.evaluate(()=>fixture.companion());
+            check('android: the companion never stopped while playback was wanted, across resume, next and the hidden natural EOF',companion.gaps.length===0&&companion.paused===false&&companion.time>0,companion);
+          }
           evidence.push({mode,phase:'hidden-natural-next',snapshot:automatic,resolutions});
           await page.evaluate(()=>fixture.action('pause'));
           await until(v=>v.state==='paused'&&v.mediaState==='paused');
@@ -174,6 +194,7 @@ window.fixtureReady=true;
             await page.evaluate(()=>fixture.action('stop'));
             const stopped=await until(v=>v.state==='stopped'&&v.mediaState==='none');
             check(mode+': stop clears media ownership and metadata',stopped.metadata===null&&!stopped.worklets.some(w=>w.playing),stopped);
+            if(mode==='android')check('android: stop pauses the companion',(await page.evaluate(()=>fixture.companion())).paused===true,await page.evaluate(()=>fixture.companion()));
           }
           check(mode+': isolated fixture has no page errors or outside requests',!errors.length&&!external.length,{errors,external});
         }catch(error){failures.push({mode,error:error.stack||error.message});}finally{await context.close();}

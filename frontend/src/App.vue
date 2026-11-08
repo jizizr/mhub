@@ -24,6 +24,8 @@ import * as player from "./core/player";
 import { prepareOutput, preparePlaybackSession, createNativeOutput, retireOutputContext } from "./core/player/audio-output";
 import { createRenderClockWatch } from "./core/player/render-clock";
 import { createMediaSessionController } from "./core/player/media-session";
+import { createMediaCompanion } from "./core/player/media-companion";
+import { needsMediaCompanion } from "./core/player/playback-platform";
 import { createPlaybackLifecycle } from "./core/player/playback-lifecycle";
 import { getCachedLoudness, warmLoudness } from "./services/loudness";
 import { loadTrackLyrics, lyricIdentity } from "./services/lyrics";
@@ -1319,6 +1321,7 @@ onMounted(() => {
     resolveCachedTrackSource,
     outputFactory: { prepare: prepareOutput, prepareSession: preparePlaybackSession, createNative: createNativeOutput, retire: retireOutputContext, renderClock: createRenderClockWatch() },
     mediaSessionFactory: createMediaSessionController,
+    mediaCompanionFactory: needsMediaCompanion() ? createMediaCompanion : null,
     lifecycleFactory: createPlaybackLifecycle,
     lookupLoudness: getCachedLoudness,
     warmLoudness,
