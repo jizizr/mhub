@@ -98,8 +98,7 @@ async fn capabilities() -> Json<Capabilities> {
         protocol: PROTOCOL_VERSION,
         server: concat!("mhub/", env!("CARGO_PKG_VERSION")).to_string(),
         qualities: Quality::ALL.to_vec(),
-        platforms: Platform::ALL
-            .into_iter()
+        platforms: Platform::online()
             .map(|platform| PlatformCapability {
                 platform,
                 label: platform.label().to_string(),
@@ -137,6 +136,7 @@ async fn search(
     payload: Result<Json<SearchRequest>, JsonRejection>,
 ) -> Result<Json<Vec<SearchItem>>, Failure> {
     let Json(request) = payload?;
+    music::ensure_online(request.platform)?;
     let keyword = required(&request.keyword, "keyword")?;
     let limit = request.limit.clamp(1, SEARCH_LIMIT_MAX);
     Ok(Json(music::search(request.platform, keyword, limit).await?))
@@ -146,6 +146,7 @@ async fn collection(
     payload: Result<Json<CollectionRequest>, JsonRejection>,
 ) -> Result<Json<Option<Collection>>, Failure> {
     let Json(request) = payload?;
+    music::ensure_online(request.platform)?;
     let keyword = required(&request.keyword, "keyword")?;
     let limit = request.limit.clamp(1, music::MAX_COLLECTION_ITEMS);
     Ok(Json(
@@ -157,6 +158,7 @@ async fn lyrics(
     payload: Result<Json<LyricsRequest>, JsonRejection>,
 ) -> Result<Json<Option<Lyrics>>, Failure> {
     let Json(request) = payload?;
+    music::ensure_online(request.platform)?;
     let track_id = required(&request.track_id, "track_id")?;
     let lyrics = music::lyrics(request.platform, track_id).await?;
     Ok(Json(lyrics.map(|lyrics| Lyrics {
@@ -171,6 +173,7 @@ async fn resolve(
     payload: Result<Json<ResolveRequest>, JsonRejection>,
 ) -> Result<Json<Track>, Failure> {
     let Json(request) = payload?;
+    music::ensure_online(request.platform)?;
     let keyword = required(&request.keyword, "keyword")?;
     let track = music::resolve(ResolveOptions {
         platform: request.platform,
@@ -187,6 +190,7 @@ async fn lookup_media(
     payload: Result<Json<MediaRequest>, JsonRejection>,
 ) -> Result<Json<MediaLookup>, Failure> {
     let Json(request) = payload?;
+    music::ensure_online(request.platform)?;
     let keyword = required(&request.keyword, "keyword")?;
     let quality = request.quality.as_str();
     let (track_id, resolved) = match selected_id(request.selected_id) {
@@ -266,6 +270,7 @@ async fn start_media(
     payload: Result<Json<MediaRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<MediaJob>), Failure> {
     let Json(request) = payload?;
+    music::ensure_online(request.platform)?;
     let keyword = required(&request.keyword, "keyword")?;
     let task = start_download(
         &gateway.state,
@@ -801,7 +806,13 @@ mod tests {
         let client = GatewayClient::new(&base, TOKEN).unwrap();
         let capabilities = client.capabilities().await.unwrap();
         assert_eq!(capabilities.protocol, PROTOCOL_VERSION);
-        assert_eq!(capabilities.platforms.len(), Platform::ALL.len());
+        assert_eq!(capabilities.platforms.len(), Platform::online().count());
+        assert!(
+            capabilities
+                .platforms
+                .iter()
+                .all(|platform| platform.platform != Platform::Soda)
+        );
         let kugou = capabilities
             .platforms
             .iter()

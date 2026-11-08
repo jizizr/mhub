@@ -33,6 +33,21 @@ impl Platform {
         Platform::YouTubeMusic,
     ];
 
+    /// Platforms taken offline. They still parse, so stored settings, caches
+    /// and playlists keep deserializing, but MHub no longer lists, searches or
+    /// plays them. Soda: since 2026-11 its full tracks need the official
+    /// client's native request signature, so only previews were reachable.
+    pub fn is_offline(self) -> bool {
+        matches!(self, Platform::Soda)
+    }
+
+    /// `ALL` without the offline platforms: what MHub offers.
+    pub fn online() -> impl Iterator<Item = Platform> {
+        Self::ALL
+            .into_iter()
+            .filter(|platform| !platform.is_offline())
+    }
+
     pub fn id(self) -> &'static str {
         match self {
             Platform::AppleMusic => "applemusic",
@@ -153,6 +168,14 @@ impl FromStr for Platform {
 #[cfg(test)]
 mod tests {
     use super::Platform;
+
+    #[test]
+    fn soda_is_offline_but_still_parses() {
+        assert!(Platform::Soda.is_offline());
+        assert_eq!(Platform::from_alias("汽水"), Some(Platform::Soda));
+        assert!(Platform::online().all(|platform| !platform.is_offline()));
+        assert_eq!(Platform::online().count(), Platform::ALL.len() - 1);
+    }
 
     #[test]
     fn ids_callback_codes_and_serde_round_trip() {

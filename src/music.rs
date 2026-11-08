@@ -133,8 +133,26 @@ pub struct CollectionItem {
     pub cover: String,
 }
 
+/// The order the web app lists platforms in, under the search box.
+const LISTED_ORDER: [MusicPlatform; 6] = [
+    MusicPlatform::AppleMusic,
+    MusicPlatform::Netease,
+    MusicPlatform::YouTubeMusic,
+    MusicPlatform::Bilibili,
+    MusicPlatform::Tencent,
+    MusicPlatform::Kugou,
+];
+
 pub fn platforms() -> Vec<PlatformInfo> {
-    MusicPlatform::ALL
+    let rank = |platform: MusicPlatform| {
+        LISTED_ORDER
+            .iter()
+            .position(|listed| *listed == platform)
+            .unwrap_or(LISTED_ORDER.len())
+    };
+    let mut online: Vec<_> = MusicPlatform::online().collect();
+    online.sort_by_key(|platform| rank(*platform));
+    online
         .into_iter()
         .map(|platform| PlatformInfo {
             id: platform.id(),
@@ -144,9 +162,28 @@ pub fn platforms() -> Vec<PlatformInfo> {
         .collect()
 }
 
+/// A platform MHub still serves; offline ones are refused with a message.
 pub fn parse_platform(value: &str) -> ApiResult<MusicPlatform> {
+    let platform = parse_any_platform(value)?;
+    ensure_online(platform)?;
+    Ok(platform)
+}
+
+/// Any known platform, offline ones included: for data that merely names a
+/// platform, such as the source tracks of a playlist being matched elsewhere.
+pub fn parse_any_platform(value: &str) -> ApiResult<MusicPlatform> {
     MusicPlatform::from_alias(value)
         .ok_or_else(|| ApiError::Custom(format!("暂不支持音乐平台：{value}")))
+}
+
+pub fn ensure_online(platform: MusicPlatform) -> ApiResult<()> {
+    if platform.is_offline() {
+        return Err(ApiError::Http {
+            status: axum::http::StatusCode::GONE,
+            message: format!("{}已下线", platform.label()),
+        });
+    }
+    Ok(())
 }
 
 lazy_static::lazy_static! {
@@ -480,6 +517,36 @@ fn provider_for(platform: MusicPlatform) -> &'static dyn MusicProvider {
         MusicPlatform::Soda => &soda::SODA_PROVIDER,
         MusicPlatform::Tencent => &tencent::TENCENT_PROVIDER,
         MusicPlatform::YouTubeMusic => &youtubemusic::YOUTUBE_MUSIC_PROVIDER,
+    }
+}
+
+#[cfg(test)]
+mod offline_platform_tests {
+    use super::*;
+
+    #[test]
+    fn soda_is_refused_but_still_known_as_a_source() {
+        let ids: Vec<_> = platforms().iter().map(|platform| platform.id).collect();
+        assert_eq!(
+            ids,
+            [
+                "applemusic",
+                "netease",
+                "youtubemusic",
+                "bilibili",
+                "tencent",
+                "kugou"
+            ]
+        );
+        match parse_platform("汽水") {
+            Err(ApiError::Http { status, message }) => {
+                assert_eq!(status, axum::http::StatusCode::GONE);
+                assert_eq!(message, "汽水音乐已下线");
+            }
+            other => panic!("expected 410, got {:?}", other.map(|p| p.id())),
+        }
+        assert_eq!(parse_any_platform("soda").unwrap(), MusicPlatform::Soda);
+        assert_eq!(parse_platform("am").unwrap(), MusicPlatform::AppleMusic);
     }
 }
 

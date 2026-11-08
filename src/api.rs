@@ -801,7 +801,9 @@ const DEFERRED_RETRY: Duration = Duration::from_secs(3);
 async fn match_collection(
     Json(request): Json<MatchCollectionRequest>,
 ) -> ApiResult<Json<MatchCollectionResponse>> {
-    let source_platform = music::parse_platform(&request.source_platform)?;
+    // Matching only reads the source tracks' metadata, so playlists from an
+    // offline platform can still move to one that is online.
+    let source_platform = music::parse_any_platform(&request.source_platform)?;
     let target_platform = music::parse_platform(&request.target_platform)?;
     if request.items.is_empty() {
         return Err(ApiError::Custom("歌单没有可匹配的歌曲".to_string()));
