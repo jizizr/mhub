@@ -37,8 +37,11 @@ impl Platform {
     /// and playlists keep deserializing, but MHub no longer lists, searches or
     /// plays them. Soda: since 2026-11 its full tracks need the official
     /// client's native request signature, so only previews were reachable.
+    /// Kugou: anonymous play info answers 需要付费 for licensed songs (10 of
+    /// 10 hits on 2026-11-08) and its search API mostly returns nothing; an
+    /// account means the Kugou Concept login and device verification flow.
     pub fn is_offline(self) -> bool {
-        matches!(self, Platform::Soda)
+        matches!(self, Platform::Soda | Platform::Kugou)
     }
 
     /// `ALL` without the offline platforms: what MHub offers.
@@ -171,10 +174,11 @@ mod tests {
 
     #[test]
     fn soda_is_offline_but_still_parses() {
-        assert!(Platform::Soda.is_offline());
+        assert!(Platform::Soda.is_offline() && Platform::Kugou.is_offline());
         assert_eq!(Platform::from_alias("汽水"), Some(Platform::Soda));
+        assert_eq!(Platform::from_alias("酷狗"), Some(Platform::Kugou));
         assert!(Platform::online().all(|platform| !platform.is_offline()));
-        assert_eq!(Platform::online().count(), Platform::ALL.len() - 1);
+        assert_eq!(Platform::online().count(), Platform::ALL.len() - 2);
     }
 
     #[test]

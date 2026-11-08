@@ -134,13 +134,12 @@ pub struct CollectionItem {
 }
 
 /// The order the web app lists platforms in, under the search box.
-const LISTED_ORDER: [MusicPlatform; 6] = [
+const LISTED_ORDER: [MusicPlatform; 5] = [
     MusicPlatform::AppleMusic,
     MusicPlatform::Netease,
     MusicPlatform::YouTubeMusic,
     MusicPlatform::Bilibili,
     MusicPlatform::Tencent,
-    MusicPlatform::Kugou,
 ];
 
 pub fn platforms() -> Vec<PlatformInfo> {
@@ -534,9 +533,18 @@ mod offline_platform_tests {
                 "netease",
                 "youtubemusic",
                 "bilibili",
-                "tencent",
-                "kugou"
+                "tencent"
             ]
+        );
+        assert_eq!(
+            parse_platform("kugou").err().map(|error| error.to_string()),
+            Some(
+                ApiError::Http {
+                    status: axum::http::StatusCode::GONE,
+                    message: "酷狗音乐已下线".to_string(),
+                }
+                .to_string()
+            )
         );
         match parse_platform("汽水") {
             Err(ApiError::Http { status, message }) => {

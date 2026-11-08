@@ -811,14 +811,14 @@ mod tests {
             capabilities
                 .platforms
                 .iter()
-                .all(|platform| platform.platform != Platform::Soda)
+                .all(|platform| !platform.platform.is_offline())
         );
-        let kugou = capabilities
+        let bilibili = capabilities
             .platforms
             .iter()
-            .find(|platform| platform.platform == Platform::Kugou)
+            .find(|platform| platform.platform == Platform::Bilibili)
             .unwrap();
-        assert!(!kugou.lyrics && kugou.account_configured.is_none());
+        assert!(!bilibili.lyrics && bilibili.account_configured.is_none());
     }
 
     #[tokio::test]
