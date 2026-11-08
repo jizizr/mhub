@@ -13,11 +13,57 @@ const INNER_TUBE_BASE_MUSIC: &str = "https://music.youtube.com/youtubei/v1";
 const INNER_TUBE_BASE_VIDEO: &str = "https://www.youtube.com/youtubei/v1";
 const WEB_REMIX_CLIENT_NAME: &str = "WEB_REMIX";
 const WEB_REMIX_CLIENT_VERSION: &str = "1.20240101.01.00";
-const ANDROID_VR_CLIENT_NAME: &str = "ANDROID_VR";
-const ANDROID_VR_CLIENT_VERSION: &str = "1.62.27";
-const ANDROID_VR_USER_AGENT: &str = "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const GOOGLE_VIDEO_MAX_CHUNK: u64 = 1024 * 1024;
+
+/// Anonymous InnerTube clients whose `/player` answers carry direct (unciphered)
+/// googlevideo URLs that serve every byte range without a PO Token or the JS
+/// player. Tried in order. ANDROID_VR, used until 2026-11, is gone: since
+/// 2026-08-17 its URLs answer 403 after the first MiB (yt-dlp `_base.py`;
+/// reproduced from the origin and a home network). visionOS needs the
+/// watch-page visitorData, does not take login cookies, and rejects
+/// made-for-kids and age-gated media (MetrolistGroup/innertubex catalog).
+struct PlayerClient {
+    client_name: &'static str,
+    client_version: &'static str,
+    /// `X-Youtube-Client-Name`: the numeric InnerTube client id.
+    client_id: &'static str,
+    user_agent: &'static str,
+    /// API host and the Origin header that goes with it.
+    origin: &'static str,
+    os_name: &'static str,
+    os_version: &'static str,
+    device_model: &'static str,
+    platform: Option<&'static str>,
+}
+
+const PLAYER_CLIENTS: [PlayerClient; 2] = [
+    // visionOS 0.1 through the music.youtube.com player endpoint, as innertubex
+    // does: the fastest and covers non-age-gated explicit songs.
+    PlayerClient {
+        client_name: "VISIONOS",
+        client_version: "0.1",
+        client_id: "101",
+        user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+        origin: "https://music.youtube.com",
+        os_name: "VISION_OS",
+        os_version: "1.3",
+        device_model: "RealityDevice14,1",
+        platform: Some("MOBILE"),
+    },
+    // The profile yt-dlp uses without a JS runtime.
+    PlayerClient {
+        client_name: "VISIONOS",
+        client_version: "1.02",
+        client_id: "101",
+        user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+        origin: "https://www.youtube.com",
+        os_name: "visionOS",
+        os_version: "26.5.23O471",
+        device_model: "RealityDevice17,1",
+        platform: None,
+    },
+];
 
 pub static YOUTUBE_MUSIC_PROVIDER: YouTubeMusicProvider = YouTubeMusicProvider;
 
@@ -130,7 +176,26 @@ async fn resolve_youtube_music(
 }
 
 async fn resolve_youtube_music_by_id(id: &str) -> Result<MusicTrack, BotError> {
-    let player = youtube_player(id).await?;
+    let mut last_error = None;
+    for client in &PLAYER_CLIENTS {
+        match resolve_with_client(client, id).await {
+            Ok(track) => return Ok(track),
+            Err(err) => {
+                tracing::debug!(
+                    client = client.client_name,
+                    version = client.client_version,
+                    %err,
+                    "YouTube Music client could not resolve {id}"
+                );
+                last_error = Some(err);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| BotError::Custom("YouTube Music 曲目不可用".to_string())))
+}
+
+async fn resolve_with_client(client: &PlayerClient, id: &str) -> Result<MusicTrack, BotError> {
+    let player = youtube_player(client, id).await?;
     ensure_playable(&player, id)?;
     let format = select_audio_format(
         player
@@ -167,7 +232,8 @@ async fn resolve_youtube_music_by_id(id: &str) -> Result<MusicTrack, BotError> {
         cover: best_thumbnail(&player.video_details.thumbnail.thumbnails),
         link: format!("https://music.youtube.com/watch?v={id}"),
         url: format.url.clone(),
-        headers: HashMap::from([("User-Agent".to_string(), ANDROID_VR_USER_AGENT.to_string())]),
+        // googlevideo checks the URL against the client that minted it.
+        headers: HashMap::from([("User-Agent".to_string(), client.user_agent.to_string())]),
         max_chunk_size: Some(GOOGLE_VIDEO_MAX_CHUNK),
         replay_gain_centi_db: None,
         duration,
@@ -177,33 +243,29 @@ async fn resolve_youtube_music_by_id(id: &str) -> Result<MusicTrack, BotError> {
     })
 }
 
-async fn youtube_player(video_id: &str) -> Result<PlayerResponse, BotError> {
-    let mut player = youtube_player_once(video_id, &visitor_data(false).await).await?;
-    if is_bot_flagged(&player) {
+async fn youtube_player(client: &PlayerClient, video_id: &str) -> Result<PlayerResponse, BotError> {
+    let visitor = visitor_data(false).await;
+    let player = youtube_player_once(client, video_id, &visitor).await?;
+    // visionOS answers UNPLAYABLE without visitorData and LOGIN_REQUIRED
+    // ("not a bot") once a cached one goes stale: fetch a fresh one once.
+    if is_bot_flagged(&player) || (visitor.is_empty() && !is_playable(&player)) {
         let refreshed = visitor_data(true).await;
-        if !refreshed.is_empty() {
-            player = youtube_player_once(video_id, &refreshed).await?;
+        if !refreshed.is_empty() && refreshed != visitor {
+            return youtube_player_once(client, video_id, &refreshed).await;
         }
     }
     Ok(player)
 }
 
-async fn youtube_player_once(video_id: &str, visitor: &str) -> Result<PlayerResponse, BotError> {
-    let mut context = android_vr_context();
+async fn youtube_player_once(
+    client: &PlayerClient,
+    video_id: &str,
+    visitor: &str,
+) -> Result<PlayerResponse, BotError> {
+    let mut context = player_context(client);
     if !visitor.trim().is_empty() {
         context.client.visitor_data = Some(visitor.to_string());
     }
-    context.third_party = Some(ThirdPartyInfo {
-        embed_url: "https://www.youtube.com".to_string(),
-    });
-    context.user = Some(UserInfo {
-        locked_safety_mode: false,
-    });
-    context.request = Some(RequestInfo {
-        use_ssl: true,
-        internal_experiment_flags: Vec::<String>::new(),
-        consistency_token_jars: Vec::<String>::new(),
-    });
     let payload = PlayerRequest {
         context,
         video_id: video_id.to_string(),
@@ -215,19 +277,26 @@ async fn youtube_player_once(video_id: &str, visitor: &str) -> Result<PlayerResp
             },
         },
     };
-    let mut headers =
-        HashMap::from([("Origin".to_string(), "https://www.youtube.com".to_string())]);
+    let mut headers = HashMap::from([
+        ("Origin".to_string(), client.origin.to_string()),
+        (
+            "X-Youtube-Client-Name".to_string(),
+            client.client_id.to_string(),
+        ),
+        (
+            "X-Youtube-Client-Version".to_string(),
+            client.client_version.to_string(),
+        ),
+    ]);
     if !visitor.trim().is_empty() {
         headers.insert("X-Goog-Visitor-Id".to_string(), visitor.to_string());
     }
-    let value = post_innertube(
-        INNER_TUBE_BASE_VIDEO,
-        "player",
-        &payload,
-        ANDROID_VR_USER_AGENT,
-        Some(&headers),
-    )
-    .await?;
+    let base = if client.origin == "https://music.youtube.com" {
+        INNER_TUBE_BASE_MUSIC
+    } else {
+        INNER_TUBE_BASE_VIDEO
+    };
+    let value = post_innertube(base, "player", &payload, client.user_agent, Some(&headers)).await?;
     Ok(serde_json::from_value(value)?)
 }
 
@@ -364,22 +433,21 @@ fn web_context() -> InnerTubeContext {
     }
 }
 
-fn android_vr_context() -> InnerTubeContext {
+fn player_context(client: &PlayerClient) -> InnerTubeContext {
     InnerTubeContext {
         client: ClientInfo {
-            client_name: ANDROID_VR_CLIENT_NAME.to_string(),
-            client_version: ANDROID_VR_CLIENT_VERSION.to_string(),
+            client_name: client.client_name.to_string(),
+            client_version: client.client_version.to_string(),
             hl: Some("en".to_string()),
             gl: Some("US".to_string()),
-            device_make: Some("Oculus".to_string()),
-            device_model: Some("Quest 3".to_string()),
-            os_name: Some("Android".to_string()),
-            os_version: Some("12L".to_string()),
-            android_sdk_version: Some(32),
-            user_agent: Some(ANDROID_VR_USER_AGENT.to_string()),
+            device_make: Some("Apple".to_string()),
+            device_model: Some(client.device_model.to_string()),
+            os_name: Some(client.os_name.to_string()),
+            os_version: Some(client.os_version.to_string()),
+            platform: client.platform.map(str::to_string),
+            user_agent: Some(client.user_agent.to_string()),
             ..Default::default()
         },
-        ..Default::default()
     }
 }
 
@@ -678,9 +746,13 @@ fn looks_like_duration(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || byte == b':')
 }
 
-fn ensure_playable(player: &PlayerResponse, video_id: &str) -> Result<(), BotError> {
+fn is_playable(player: &PlayerResponse) -> bool {
     let status = player.playability_status.status.trim();
-    if status.is_empty() || status.eq_ignore_ascii_case("OK") {
+    status.is_empty() || status.eq_ignore_ascii_case("OK")
+}
+
+fn ensure_playable(player: &PlayerResponse, video_id: &str) -> Result<(), BotError> {
+    if is_playable(player) {
         return Ok(());
     }
     if player
@@ -822,12 +894,6 @@ struct BrowseRequest {
 #[derive(Default, Serialize)]
 struct InnerTubeContext {
     client: ClientInfo,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "thirdParty")]
-    third_party: Option<ThirdPartyInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    user: Option<UserInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    request: Option<RequestInfo>,
 }
 
 #[derive(Default, Serialize)]
@@ -848,34 +914,12 @@ struct ClientInfo {
     os_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "osVersion")]
     os_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "androidSdkVersion")]
-    android_sdk_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    platform: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "userAgent")]
     user_agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "visitorData")]
     visitor_data: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ThirdPartyInfo {
-    #[serde(rename = "embedUrl")]
-    embed_url: String,
-}
-
-#[derive(Serialize)]
-struct UserInfo {
-    #[serde(rename = "lockedSafetyMode")]
-    locked_safety_mode: bool,
-}
-
-#[derive(Serialize)]
-struct RequestInfo {
-    #[serde(rename = "useSsl")]
-    use_ssl: bool,
-    #[serde(rename = "internalExperimentFlags")]
-    internal_experiment_flags: Vec<String>,
-    #[serde(rename = "consistencyTokenJars")]
-    consistency_token_jars: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1091,6 +1135,47 @@ mod tests {
         assert!(select_audio_format(unusable.iter()).is_none());
     }
 
+    #[test]
+    fn player_clients_send_visionos_context_without_android_fields() {
+        let first = &PLAYER_CLIENTS[0];
+        assert_eq!(first.origin, "https://music.youtube.com");
+        let mut context = player_context(first);
+        context.client.visitor_data = Some("visitor".to_string());
+        let json = serde_json::to_value(&context).unwrap();
+        let client = &json["client"];
+        assert_eq!(client["clientName"], "VISIONOS");
+        assert_eq!(client["clientVersion"], "0.1");
+        assert_eq!(client["platform"], "MOBILE");
+        assert_eq!(client["deviceMake"], "Apple");
+        assert_eq!(client["visitorData"], "visitor");
+        assert_eq!(client["userAgent"], first.user_agent);
+        assert!(client.get("androidSdkVersion").is_none());
+        assert!(json.get("thirdParty").is_none());
+
+        let second = serde_json::to_value(player_context(&PLAYER_CLIENTS[1])).unwrap();
+        assert_eq!(second["client"]["clientVersion"], "1.02");
+        assert!(second["client"].get("platform").is_none());
+    }
+
+    #[test]
+    fn unplayable_and_bot_checks_read_playability_status() {
+        let player = |status: &str, reason: &str| PlayerResponse {
+            playability_status: PlayabilityStatus {
+                status: status.to_string(),
+                reason: reason.to_string(),
+            },
+            streaming_data: StreamingData::default(),
+            video_details: VideoDetails::default(),
+        };
+        assert!(is_playable(&player("OK", "")));
+        assert!(!is_playable(&player("UNPLAYABLE", "")));
+        assert!(is_bot_flagged(&player(
+            "LOGIN_REQUIRED",
+            "Sign in to confirm you’re not a bot"
+        )));
+        assert!(!is_bot_flagged(&player("UNPLAYABLE", "Video unavailable")));
+    }
+
     #[tokio::test]
     #[ignore = "requires live YouTube Music access"]
     async fn live_search_resolve_and_download_without_telegram() {
@@ -1104,5 +1189,18 @@ mod tests {
 
         let media = download_track_media(&track).await.unwrap();
         assert!(!media.audio.is_empty());
+
+        // Each fallback client on its own must serve the whole file: dead
+        // clients resolve fine and only fail with 403 past the first MiB.
+        for client in &PLAYER_CLIENTS {
+            let track = resolve_with_client(client, &first.id).await.unwrap();
+            let media = download_track_media(&track).await.unwrap();
+            assert!(
+                media.audio.len() as u64 > 2 * GOOGLE_VIDEO_MAX_CHUNK,
+                "{} {} stopped early",
+                client.client_name,
+                client.client_version
+            );
+        }
     }
 }
