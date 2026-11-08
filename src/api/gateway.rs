@@ -6,7 +6,7 @@
 //! `music_cache`.
 
 use super::*;
-use crate::cache::{delete_music_cache, find_music_cache_by_file_id};
+use crate::cache::{delete_music_cache_file, find_music_cache_by_file_id};
 use axum::extract::rejection::JsonRejection;
 use music_gateway::{
     CacheInvalidateRequest, CacheLookupRequest, CachedTrack, Capabilities, Collection,
@@ -369,10 +369,9 @@ async fn invalidate_cache(
     let file_id = required(&request.file_id, "file_id")?;
     let platform = request.platform.id();
     let quality = request.quality.as_str();
-    let mut deleted = false;
-    for key in cache_keys(request.platform, quality) {
-        deleted |= delete_music_cache(platform, track_id, &key, file_id).await?;
-    }
+    // Every quality and track ID sharing the upload loses it, or a new
+    // download of the same audio would be matched back to the dead file.
+    let deleted = delete_music_cache_file(platform, file_id).await?;
     let id = playback_id(platform, track_id, quality);
     if let Some(task) = gateway.state.downloads.write().await.get_mut(&id)
         && task.file_id.as_deref() == Some(file_id)

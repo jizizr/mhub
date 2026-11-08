@@ -5,7 +5,7 @@ use crate::{
         needs_browser_lossless_derivative, repair_mislabeled_aac, valid_audio_file,
     },
     audio_cache,
-    cache::{MusicCache, find_music_cache, upsert_music_cache},
+    cache::{MusicCache, find_music_cache, find_music_cache_by_source, upsert_music_cache},
     loudness::{self, LoudnessResponse},
     matching,
     music::{self, ResolveOptions},
@@ -2147,8 +2147,86 @@ struct TelegramCacheUpload {
     cache: MusicCache,
 }
 
-async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
-    let cover = job.cover;
+lazy_static::lazy_static! {
+    /// One upload at a time per downloaded file, so two qualities that got
+    /// the same bytes concurrently upload them once.
+    static ref UPLOADS_BY_SOURCE: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> =
+        std::sync::Mutex::new(HashMap::new());
+}
+
+fn audio_sha256(audio: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(audio))
+}
+
+/// `cache` pointed at `existing`'s upload, keeping its own key and metadata.
+fn reuse_upload(mut cache: MusicCache, existing: &MusicCache) -> MusicCache {
+    cache.file_id = existing.file_id.clone();
+    cache.thumb_file_id = existing.thumb_file_id.clone();
+    cache.music_size = existing.music_size;
+    cache.lyrics_tag = existing.lyrics_tag;
+    cache.from_chat_id = existing.from_chat_id;
+    cache
+}
+
+async fn upload_audio_to_telegram_cache(mut job: TelegramCacheUpload) {
+    let audio = std::mem::take(&mut job.audio);
+    let (source, audio) =
+        match tokio::task::spawn_blocking(move || (audio_sha256(&audio), audio)).await {
+            Ok(hashed) => hashed,
+            Err(err) => {
+                tracing::warn!("failed to hash audio for the telegram cache: {err}");
+                return finish_telegram_upload(job, Err(ApiError::Custom(err.to_string()))).await;
+            }
+        };
+    job.audio = audio;
+    let gate = UPLOADS_BY_SOURCE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .entry(source.clone())
+        .or_default()
+        .clone();
+    let guard = gate.lock().await;
+    let result = upload_or_reuse(&mut job, &source).await;
+    drop(guard);
+    {
+        let mut gates = UPLOADS_BY_SOURCE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        // Ours and the map's: nobody else is waiting on it.
+        if Arc::strong_count(&gate) == 2 {
+            gates.remove(&source);
+        }
+    }
+    finish_telegram_upload(job, result).await;
+}
+
+/// The row to save and whether its file holds exactly the local bytes.
+async fn upload_or_reuse(
+    job: &mut TelegramCacheUpload,
+    source: &str,
+) -> ApiResult<(MusicCache, bool)> {
+    match find_music_cache_by_source(&job.cache.platform, source).await {
+        Ok(Some(existing)) => {
+            tracing::info!(
+                platform = %job.cache.platform,
+                track_id = %job.cache.track_id,
+                quality = %job.cache.quality,
+                reused_track_id = %existing.track_id,
+                reused_quality = %existing.quality,
+                "reused a telegram upload of the same audio"
+            );
+            let cache = reuse_upload(job.cache.clone(), &existing);
+            upsert_music_cache(&cache, Some(source)).await?;
+            // The reused file may carry lyrics the local copy lacks.
+            return Ok((cache, false));
+        }
+        Ok(None) => {}
+        // Uploading again only costs a duplicate.
+        Err(err) => tracing::warn!("telegram cache lookup by audio failed: {err}"),
+    }
+
+    let cover = std::mem::take(&mut job.cover);
     let thumbnail = async move {
         if cover.is_empty() {
             return None;
@@ -2161,8 +2239,8 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
             }
         }
     };
-    let (thumbnail, prepared) =
-        tokio::join!(thumbnail, lyric_upload::prepare(&job.cache, job.audio));
+    let audio = std::mem::take(&mut job.audio);
+    let (thumbnail, prepared) = tokio::join!(thumbnail, lyric_upload::prepare(&job.cache, audio));
     let uploaded_len = prepared.audio.len();
     let uploaded = telegram_cache::upload_audio(
         job.chat_id,
@@ -2174,9 +2252,23 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
         &job.performer,
         job.duration,
     )
-    .await;
-    let uploaded = match uploaded {
-        Ok(uploaded) => uploaded,
+    .await?;
+
+    let mut cache = job.cache.clone();
+    cache.file_id = uploaded.file_id;
+    cache.thumb_file_id = uploaded.thumb_file_id.unwrap_or_default();
+    cache.music_size = uploaded_len.min(i64::MAX as usize) as i64;
+    cache.lyrics_tag = prepared.lyrics_tag;
+    // The upload exists either way; the next lookup by audio just misses.
+    if let Err(err) = upsert_music_cache(&cache, Some(source)).await {
+        tracing::warn!("failed to save music cache: {err}");
+    }
+    Ok((cache, !prepared.embedded))
+}
+
+async fn finish_telegram_upload(job: TelegramCacheUpload, result: ApiResult<(MusicCache, bool)>) {
+    let (cache, same_bytes) = match result {
+        Ok(saved) => saved,
         Err(err) => {
             tracing::warn!("failed to upload audio to telegram cache: {err}");
             if let Some(task) = job.state.downloads.write().await.get_mut(&job.task_id)
@@ -2189,15 +2281,6 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
             return;
         }
     };
-
-    let mut cache = job.cache;
-    cache.file_id = uploaded.file_id;
-    cache.thumb_file_id = uploaded.thumb_file_id.unwrap_or_default();
-    cache.music_size = uploaded_len.min(i64::MAX as usize) as i64;
-    cache.lyrics_tag = prepared.lyrics_tag;
-    if let Err(err) = upsert_music_cache(&cache).await {
-        tracing::warn!("failed to save music cache: {err}");
-    }
     if let Some(task) = job.state.downloads.write().await.get_mut(&job.task_id)
         && task.work_id == job.work_id
     {
@@ -2208,7 +2291,7 @@ async fn upload_audio_to_telegram_cache(job: TelegramCacheUpload) {
         // lyrics written in would splice two files under one revision. Such
         // a task is found ready through its cache row, and is dropped once
         // its local files are evicted.
-        if !prepared.embedded && task.file_id.is_none() {
+        if same_bytes && task.file_id.is_none() {
             task.file_id = Some(cache.file_id.clone());
             task.thumb_file_id =
                 (!cache.thumb_file_id.is_empty()).then(|| cache.thumb_file_id.clone());
@@ -3257,6 +3340,45 @@ mod tests {
             from_chat_id: 0,
             lyrics_tag: 0,
         }
+    }
+
+    #[test]
+    fn audio_hash_is_hex_sha256() {
+        assert_eq!(
+            audio_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn reused_upload_keeps_its_own_key() {
+        let existing = MusicCache {
+            quality: "lossless".into(),
+            file_id: "shared-file".into(),
+            thumb_file_id: "shared-thumb".into(),
+            music_size: 99,
+            lyrics_tag: 1,
+            from_chat_id: -100,
+            ..test_alac_cache()
+        };
+        let request = MusicCache {
+            track_id: "200000".into(),
+            file_id: String::new(),
+            ..test_alac_cache()
+        };
+        let reused = reuse_upload(request, &existing);
+        assert_eq!(
+            (reused.track_id.as_str(), reused.quality.as_str()),
+            ("200000", "hires")
+        );
+        assert_eq!(
+            (reused.file_id.as_str(), reused.thumb_file_id.as_str()),
+            ("shared-file", "shared-thumb")
+        );
+        assert_eq!(
+            (reused.music_size, reused.lyrics_tag, reused.from_chat_id),
+            (99, 1, -100)
+        );
     }
 
     fn test_cache_state(directory: &FsPath) -> (AppState, DownloadTask) {

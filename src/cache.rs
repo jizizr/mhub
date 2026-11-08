@@ -73,7 +73,37 @@ pub async fn find_music_cache_by_file_id(file_id: &str) -> ApiResult<Option<Musi
     Ok(row)
 }
 
-pub async fn upsert_music_cache(cache: &MusicCache) -> ApiResult<()> {
+/// An upload on `platform` made from the same downloaded bytes, under any
+/// track ID or quality. Platforms hand one file to several quality tiers (a
+/// Hi-Res request falls back to the lossless file) and to several IDs (one
+/// recording on several albums), and each would otherwise upload it again.
+pub async fn find_music_cache_by_source(
+    platform: &str,
+    source_sha256: &str,
+) -> ApiResult<Option<MusicCache>> {
+    let pool = pool().await?;
+    ensure_schema(pool).await?;
+    let row = sqlx::query_as::<_, MusicCache>(
+        r#"
+        SELECT platform, track_id, quality, song, singer, album, link, file_ext,
+               music_size, bitrate, duration, file_id, thumb_file_id,
+               from_user_id, from_chat_id, lyrics_tag
+        FROM music_cache
+        WHERE platform = ? AND source_sha256 = ? AND file_id <> ''
+        ORDER BY lyrics_tag DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(platform)
+    .bind(source_sha256)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// Saves the row; `source_sha256` is the SHA-256 of the downloaded audio
+/// before lyrics were written in, which `find_music_cache_by_source` matches.
+pub async fn upsert_music_cache(cache: &MusicCache, source_sha256: Option<&str>) -> ApiResult<()> {
     let pool = pool().await?;
     ensure_schema(pool).await?;
     sqlx::query(
@@ -81,9 +111,9 @@ pub async fn upsert_music_cache(cache: &MusicCache) -> ApiResult<()> {
         INSERT INTO music_cache (
             platform, track_id, quality, song, singer, album, link, file_ext,
             music_size, bitrate, duration, file_id, thumb_file_id,
-            from_user_id, from_chat_id, lyrics_tag
+            from_user_id, from_chat_id, lyrics_tag, source_sha256
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             song = VALUES(song),
             singer = VALUES(singer),
@@ -97,7 +127,8 @@ pub async fn upsert_music_cache(cache: &MusicCache) -> ApiResult<()> {
             thumb_file_id = VALUES(thumb_file_id),
             from_user_id = VALUES(from_user_id),
             from_chat_id = VALUES(from_chat_id),
-            lyrics_tag = VALUES(lyrics_tag)
+            lyrics_tag = VALUES(lyrics_tag),
+            source_sha256 = VALUES(source_sha256)
         "#,
     )
     .bind(&cache.platform)
@@ -116,56 +147,51 @@ pub async fn upsert_music_cache(cache: &MusicCache) -> ApiResult<()> {
     .bind(cache.from_user_id)
     .bind(cache.from_chat_id)
     .bind(cache.lyrics_tag)
+    .bind(source_sha256)
     .execute(pool)
     .await?;
     Ok(())
 }
 
 /// Swaps in a re-uploaded file (or only a new `lyrics_tag` when the file is
-/// unchanged) while the row still holds `old_file_id`, so a replacement made
-/// in the meantime wins. Returns whether the row was updated.
+/// unchanged) on every row still holding `old_file_id` (the qualities and
+/// track IDs sharing one upload), so a replacement made in the meantime
+/// wins. Returns whether any row was updated.
 pub async fn replace_music_cache_file(old_file_id: &str, cache: &MusicCache) -> ApiResult<bool> {
     let pool = pool().await?;
     ensure_schema(pool).await?;
     let result = sqlx::query(
         r#"
         UPDATE music_cache
-        SET file_id = ?, thumb_file_id = ?, music_size = ?, lyrics_tag = ?
-        WHERE platform = ? AND track_id = ? AND quality = ? AND file_id = ?
+        SET file_id = ?, thumb_file_id = ?, music_size = ?, lyrics_tag = ?,
+            from_chat_id = ?
+        WHERE file_id = ?
         "#,
     )
     .bind(&cache.file_id)
     .bind(&cache.thumb_file_id)
     .bind(cache.music_size)
     .bind(cache.lyrics_tag)
-    .bind(&cache.platform)
-    .bind(&cache.track_id)
-    .bind(&cache.quality)
+    .bind(cache.from_chat_id)
     .bind(old_file_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
 }
 
-/// Removes the entry only while it still holds `file_id`, so a replacement
+/// Removes every row on `platform` holding `file_id`: the qualities and
+/// track IDs that share the upload lose it together, and a replacement
 /// uploaded in the meantime survives. Returns whether a row was deleted.
-pub async fn delete_music_cache(
-    platform: &str,
-    track_id: &str,
-    quality: &str,
-    file_id: &str,
-) -> ApiResult<bool> {
+pub async fn delete_music_cache_file(platform: &str, file_id: &str) -> ApiResult<bool> {
     let pool = pool().await?;
     ensure_schema(pool).await?;
     let result = sqlx::query(
         r#"
         DELETE FROM music_cache
-        WHERE platform = ? AND track_id = ? AND quality = ? AND file_id = ?
+        WHERE platform = ? AND file_id = ?
         "#,
     )
     .bind(platform)
-    .bind(track_id)
-    .bind(quality)
     .bind(file_id)
     .execute(pool)
     .await?;
@@ -195,28 +221,29 @@ async fn ensure_schema(pool: &MySqlPool) -> ApiResult<()> {
                     from_user_id BIGINT NOT NULL,
                     from_chat_id BIGINT NOT NULL,
                     lyrics_tag TINYINT NOT NULL DEFAULT 0,
+                    source_sha256 CHAR(64) NULL,
                     UNIQUE KEY uniq_music_cache_track (platform, track_id, quality),
                     KEY idx_music_cache_file_id (file_id),
-                    KEY idx_music_cache_platform_quality (platform, quality)
+                    KEY idx_music_cache_platform_quality (platform, quality),
+                    KEY idx_music_cache_source (platform, source_sha256)
                 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                 "#,
             )
             .execute(pool)
             .await?;
-            // Tables created before lyrics were embedded lack the column.
-            let has_lyrics_tag: i64 = sqlx::query_scalar(
-                r#"
-                SELECT COUNT(*) FROM information_schema.COLUMNS
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME = 'music_cache'
-                  AND COLUMN_NAME = 'lyrics_tag'
-                "#,
-            )
-            .fetch_one(pool)
-            .await?;
-            if has_lyrics_tag == 0 {
+            // Tables created before lyrics were embedded, or before uploads
+            // were matched by content, lack these columns.
+            if !has_column(pool, "lyrics_tag").await? {
                 sqlx::query(
                     "ALTER TABLE music_cache ADD COLUMN lyrics_tag TINYINT NOT NULL DEFAULT 0",
+                )
+                .execute(pool)
+                .await?;
+            }
+            if !has_column(pool, "source_sha256").await? {
+                sqlx::query(
+                    "ALTER TABLE music_cache ADD COLUMN source_sha256 CHAR(64) NULL, \
+                     ADD KEY idx_music_cache_source (platform, source_sha256)",
                 )
                 .execute(pool)
                 .await?;
@@ -225,6 +252,21 @@ async fn ensure_schema(pool: &MySqlPool) -> ApiResult<()> {
         })
         .await?;
     Ok(())
+}
+
+async fn has_column(pool: &MySqlPool, column: &str) -> ApiResult<bool> {
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'music_cache'
+          AND COLUMN_NAME = ?
+        "#,
+    )
+    .bind(column)
+    .fetch_one(pool)
+    .await?;
+    Ok(count > 0)
 }
 
 async fn pool() -> ApiResult<&'static MySqlPool> {

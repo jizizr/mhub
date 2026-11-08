@@ -38,7 +38,7 @@ enum Retag {
 }
 
 lazy_static! {
-    /// One re-tag in flight per song, joined by every request for it, and
+    /// One re-tag in flight per upload, joined by every request for it, and
     /// when the last one failed.
     static ref RETAGS: Mutex<HashMap<String, Retag>> = Mutex::new(HashMap::new());
 }
@@ -168,7 +168,9 @@ pub(super) async fn refresh_stale(cache: &MusicCache, wait: bool) -> Option<Musi
     if is_tagged(cache) || cache.file_id.trim().is_empty() {
         return None;
     }
-    let key = format!("{}\0{}\0{}", cache.platform, cache.track_id, cache.quality);
+    // Keyed by the upload: the qualities and track IDs sharing it are
+    // re-tagged once, and all move to the new file together.
+    let key = cache.file_id.clone();
     let mut finished = {
         let mut retags = RETAGS.lock().unwrap_or_else(|poison| poison.into_inner());
         match retags.get(&key) {
