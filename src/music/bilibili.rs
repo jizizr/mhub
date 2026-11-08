@@ -387,12 +387,37 @@ fn strip_html_tags(text: &str) -> String {
     BILIBILI_TAG_RE.replace_all(text, "").into_owned()
 }
 
+/// Square JPEG at 960 px: covers are shown cropped square, and a JPEG can be
+/// embedded in the M4A (MP4 `covr` takes JPEG or PNG, not WebP).
+const COVER_TRANSFORM: &str = "@960w_960h_1c.jpg";
+
+/// Points cover art at `s1.hdslb.com`. The `i0`–`i2.hdslb.com` image hosts
+/// enforce hotlink protection on some edge nodes (seen from mainland China:
+/// HTTP 403 for any foreign Referer, while `no-referrer` loads), whereas the
+/// static host serves the same `/bfs/` paths without a Referer check, and its
+/// resize suffix also replaces multi-megabyte originals in result lists.
 fn normalize_bilibili_image(url: &str) -> String {
-    if url.starts_with("//") {
+    let url = url.trim();
+    let absolute = if url.starts_with("//") {
         format!("https:{url}")
     } else {
         url.to_string()
+    };
+    let Ok(mut parsed) = url::Url::parse(&absolute) else {
+        return absolute;
+    };
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let is_image_host = host.ends_with(".hdslb.com") || host.ends_with(".biliimg.com");
+    if !is_image_host || !parsed.path().starts_with("/bfs/") || parsed.path().contains('@') {
+        return absolute;
     }
+    let path = format!("{}{COVER_TRANSFORM}", parsed.path());
+    parsed.set_path(&path);
+    if parsed.set_host(Some("s1.hdslb.com")).is_err() || parsed.set_scheme("https").is_err() {
+        return absolute;
+    }
+    parsed.set_query(None);
+    parsed.to_string()
 }
 
 #[cfg(test)]
@@ -432,6 +457,28 @@ mod tests {
     }
 
     #[test]
+    fn serves_covers_from_the_static_host_as_square_jpeg() {
+        assert_eq!(
+            normalize_bilibili_image("//i0.hdslb.com/bfs/archive/abc.jpg"),
+            "https://s1.hdslb.com/bfs/archive/abc.jpg@960w_960h_1c.jpg"
+        );
+        assert_eq!(
+            normalize_bilibili_image("http://i2.hdslb.com/bfs/archive/abc.png"),
+            "https://s1.hdslb.com/bfs/archive/abc.png@960w_960h_1c.jpg"
+        );
+        assert_eq!(
+            normalize_bilibili_image("https://archive.biliimg.com/bfs/archive/abc.jpg"),
+            "https://s1.hdslb.com/bfs/archive/abc.jpg@960w_960h_1c.jpg"
+        );
+        // Already transformed, or not a Bilibili image path: left alone.
+        let resized = "https://i0.hdslb.com/bfs/archive/abc.jpg@100w.webp";
+        assert_eq!(normalize_bilibili_image(resized), resized);
+        let other = "https://example.com/bfs/a.jpg";
+        assert_eq!(normalize_bilibili_image(other), other);
+        assert_eq!(normalize_bilibili_image(""), "");
+    }
+
+    #[test]
     fn api_requests_send_a_full_browser_identity() {
         let headers = browser_headers();
         assert!(headers["User-Agent"].contains("Chrome/"));
@@ -443,7 +490,7 @@ mod tests {
     async fn live_search_resolve_and_download() {
         let items = BILIBILI_PROVIDER.search("晴天 周杰伦", 3).await.unwrap();
         let first = items.first().expect("search result");
-        assert!(!first.cover.is_empty());
+        assert!(first.cover.starts_with("https://s1.hdslb.com/bfs/"));
         let track = BILIBILI_PROVIDER
             .resolve(&first.song, Some(&first.id))
             .await
