@@ -187,45 +187,54 @@ impl MusicProvider for BilibiliProvider {
         keyword: &str,
         selected_id: Option<&str>,
     ) -> Result<MusicTrack, BotError> {
-        let bvid = match selected_id {
-            Some(id) => id.to_string(),
-            None => match parse_bilibili_id(keyword) {
-                Some(id) => id,
-                None => {
-                    self.search(keyword, 1)
-                        .await?
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| BotError::Custom("没有找到可下载的音乐".to_string()))?
-                        .id
-                }
-            },
-        };
-        let view = get_video_view(&bvid).await?;
-        let audio = get_video_audio(&view.bvid, view.cid).await?;
-        Ok(MusicTrack {
-            id: view.bvid.clone(),
-            platform: MusicPlatform::Bilibili,
-            song: view.title,
-            singer: view
-                .owner
-                .map(|owner| owner.name)
-                .unwrap_or_else(|| "未知 UP".to_string()),
-            album: String::new(),
-            cover: normalize_bilibili_image(&view.pic),
-            link: format!("https://www.bilibili.com/video/{}", view.bvid),
-            url: audio.url,
-            headers: browser_headers(),
-            max_chunk_size: Some(CDN_MAX_CHUNK),
-            replay_gain_centi_db: None,
-            duration: view
-                .duration
-                .filter(|duration| *duration > 0)
-                .map(|duration| duration as u32),
-            bitrate: audio.bandwidth,
-            format: Some("m4a".to_string()),
-        })
+        resolve_with_quality(keyword, selected_id, "high").await
     }
+}
+
+pub(super) async fn resolve_with_quality(
+    keyword: &str,
+    selected_id: Option<&str>,
+    quality: &str,
+) -> Result<MusicTrack, BotError> {
+    let bvid = match selected_id {
+        Some(id) => id.to_string(),
+        None => match parse_bilibili_id(keyword) {
+            Some(id) => id,
+            None => {
+                BILIBILI_PROVIDER
+                    .search(keyword, 1)
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| BotError::Custom("没有找到可下载的音乐".to_string()))?
+                    .id
+            }
+        },
+    };
+    let view = get_video_view(&bvid).await?;
+    let audio = get_video_audio(&view.bvid, view.cid, quality).await?;
+    Ok(MusicTrack {
+        id: view.bvid.clone(),
+        platform: MusicPlatform::Bilibili,
+        song: view.title,
+        singer: view
+            .owner
+            .map(|owner| owner.name)
+            .unwrap_or_else(|| "未知 UP".to_string()),
+        album: String::new(),
+        cover: normalize_bilibili_image(&view.pic),
+        link: format!("https://www.bilibili.com/video/{}", view.bvid),
+        url: audio.url,
+        headers: browser_headers(),
+        max_chunk_size: Some(CDN_MAX_CHUNK),
+        replay_gain_centi_db: None,
+        duration: view
+            .duration
+            .filter(|duration| *duration > 0)
+            .map(|duration| duration as u32),
+        bitrate: audio.bandwidth,
+        format: Some("m4a".to_string()),
+    })
 }
 
 #[derive(Deserialize)]
@@ -318,7 +327,10 @@ struct VideoAudio {
     bandwidth: Option<u32>,
 }
 
-async fn get_video_audio(bvid: &str, cid: i64) -> Result<VideoAudio, BotError> {
+/// The bitrate the Standard tier aims for, as on the other platforms.
+const STANDARD_TARGET_BPS: i64 = 128_000;
+
+async fn get_video_audio(bvid: &str, cid: i64, quality: &str) -> Result<VideoAudio, BotError> {
     let url = format!(
         "https://api.bilibili.com/x/player/playurl?bvid={}&cid={cid}&qn=16&fnval=16",
         urlencoding::encode(bvid)
@@ -331,9 +343,7 @@ async fn get_video_audio(bvid: &str, cid: i64) -> Result<VideoAudio, BotError> {
         .and_then(|dash| {
             // AAC only: the Dolby (E-AC-3) and member FLAC tracks are not in
             // `dash.audio` and most browsers cannot play E-AC-3.
-            dash.audio
-                .into_iter()
-                .max_by_key(|audio| audio.bandwidth.unwrap_or_default())
+            select_audio(dash.audio, quality)
         })
         .and_then(|audio| {
             let bandwidth = audio
@@ -344,6 +354,27 @@ async fn get_video_audio(bvid: &str, cid: i64) -> Result<VideoAudio, BotError> {
                 .map(|url| VideoAudio { url, bandwidth })
         })
         .ok_or_else(|| BotError::Custom("没有拿到 Bilibili 音频链接".to_string()))
+}
+
+/// Standard takes the AAC track nearest 128 kbps (id 30232, ~132k); every
+/// other tier takes the best AAC (30280, ~192k). Without a member login the
+/// API offers no FLAC, so Lossless and Hi-Res get that best AAC too.
+fn select_audio(audio: Vec<BilibiliDashAudio>, quality: &str) -> Option<BilibiliDashAudio> {
+    let standard = matches!(
+        quality.trim().to_ascii_lowercase().as_str(),
+        "standard" | "std" | "128"
+    );
+    let bandwidth = |audio: &BilibiliDashAudio| audio.bandwidth.unwrap_or_default();
+    if standard {
+        audio.into_iter().min_by_key(|audio| {
+            (
+                (bandwidth(audio) - STANDARD_TARGET_BPS).abs(),
+                std::cmp::Reverse(bandwidth(audio)),
+            )
+        })
+    } else {
+        audio.into_iter().max_by_key(bandwidth)
+    }
 }
 
 /// Prefers Bilibili's own upos mirrors over Akamai, which MusicBot-Go blocks
@@ -476,6 +507,25 @@ mod tests {
         let other = "https://example.com/bfs/a.jpg";
         assert_eq!(normalize_bilibili_image(other), other);
         assert_eq!(normalize_bilibili_image(""), "");
+    }
+
+    #[test]
+    fn standard_takes_the_track_nearest_128k_and_others_the_best() {
+        let tracks = || {
+            [(30216, 46_565), (30232, 102_031), (30280, 184_052)]
+                .into_iter()
+                .map(|(id, bandwidth)| BilibiliDashAudio {
+                    base_url: Some(format!("https://upos-sz-mirrorcos.bilivideo.com/{id}.m4s")),
+                    backup_url: Vec::new(),
+                    bandwidth: Some(bandwidth),
+                })
+                .collect::<Vec<_>>()
+        };
+        let pick = |quality| select_audio(tracks(), quality).unwrap().bandwidth;
+        assert_eq!(pick("standard"), Some(102_031));
+        for quality in ["high", "lossless", "hires"] {
+            assert_eq!(pick(quality), Some(184_052), "{quality}");
+        }
     }
 
     #[test]

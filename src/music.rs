@@ -313,6 +313,9 @@ pub async fn resolve(options: ResolveOptions) -> ApiResult<MusicTrack> {
         MusicPlatform::Tencent => {
             tencent::resolve_with_quality(&options.query, selected_id, quality).await
         }
+        MusicPlatform::Bilibili => {
+            bilibili::resolve_with_quality(&options.query, selected_id, quality).await
+        }
         platform => {
             provider_for(platform)
                 .resolve(&options.query, selected_id)

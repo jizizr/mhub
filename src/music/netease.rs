@@ -842,10 +842,12 @@ async fn get_vkeys_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, 
     get_json_with_headers(url, &HashMap::new()).await
 }
 
+/// vkeys levels: 2 standard 128k, 4 极高 320k, 5 SQ lossless, 6 Hi-Res.
 fn netease_vkeys_quality(quality: &str) -> i64 {
     match quality.trim().to_ascii_lowercase().as_str() {
         "standard" | "std" | "128" => 2,
         "lossless" | "flac" | "无损" => 5,
+        "hires" | "hi-res" | "master" => 6,
         _ => 4,
     }
 }
@@ -1167,6 +1169,7 @@ mod tests {
         assert_eq!(netease_vkeys_quality("standard"), 2);
         assert_eq!(netease_vkeys_quality("high"), 4);
         assert_eq!(netease_vkeys_quality("lossless"), 5);
+        assert_eq!(netease_vkeys_quality("hires"), 6);
         assert_eq!(netease_native_bitrate("standard"), 128_000);
         assert_eq!(netease_native_bitrate("high"), 320_000);
         assert_eq!(netease_native_bitrate("lossless"), 999_000);

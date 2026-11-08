@@ -1022,10 +1022,18 @@ impl VkeysTencentSong {
     }
 }
 
+/// vkeys `type`: 6 M500 128k MP3, 8 M800 320k MP3, 10 SQ FLAC (16-bit),
+/// 11 Hi-Res FLAC, 14 臻品母带 (24-bit master). 12/13 are Dolby/臻品全景声
+/// multichannel renditions and 15+ AI stems: no listening tier maps onto them.
+/// Each tier starts at its own format and only then falls back downwards,
+/// matching the native path (`fallback_quality_profiles`).
 fn select_vkeys_quality_candidates(detail: &VkeysTencentSong, quality: &str) -> Vec<i64> {
     let preferred = match quality.trim().to_ascii_lowercase().as_str() {
         "standard" | "std" | "128" => &[6, 4, 5, 7, 3, 2, 1, 0][..],
-        "lossless" | "flac" | "无损" => &[14, 13, 12, 11, 10, 9, 8, 7, 6, 4, 3, 2, 0][..],
+        "lossless" | "flac" | "无损" => &[10, 8, 9, 7, 6, 4, 3, 2, 0][..],
+        "hires" | "hi-res" | "hi_res" | "master" | "高解析" => {
+            &[11, 14, 10, 8, 9, 7, 6, 4, 3, 2, 0][..]
+        }
         _ => &[8, 9, 7, 6, 4, 3, 2, 0][..],
     };
     let available = detail
@@ -1043,7 +1051,10 @@ fn select_vkeys_quality_candidates(detail: &VkeysTencentSong, quality: &str) -> 
         }
     }
     for quality in &detail.quality_info {
-        if quality.size > 0 && !selected.contains(&quality.quality_type) {
+        // Never fall back to a multichannel rendition (12, 13), an AI stem
+        // (15-17) or NAC (18): stereo listening formats only.
+        let stereo = matches!(quality.quality_type, 0..=11 | 14);
+        if stereo && quality.size > 0 && !selected.contains(&quality.quality_type) {
             selected.push(quality.quality_type);
         }
     }
@@ -1450,6 +1461,26 @@ mod tests {
             select_vkeys_quality_candidates(&detail, "high"),
             vec![8, 10]
         );
+
+        let full = VkeysTencentSong {
+            quality_info: [4, 6, 8, 10, 11, 12, 13, 14, 15, 18]
+                .into_iter()
+                .map(|quality_type| VkeysQualityInfo {
+                    quality_type,
+                    size: 1,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            select_vkeys_quality_candidates(&full, "lossless"),
+            vec![10, 8, 6, 4, 11, 14]
+        );
+        assert_eq!(
+            select_vkeys_quality_candidates(&full, "hires"),
+            vec![11, 14, 10, 8, 6, 4]
+        );
+        assert_eq!(select_vkeys_quality_candidates(&full, "standard")[0], 6);
     }
 
     #[test]
