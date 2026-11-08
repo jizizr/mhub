@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { FakeContext } from "./helpers/fake-audio.mjs";
+import { m4aFixture } from "./helpers/m4a-fixture.mjs";
 
 // Exercise the real transport and the real PCM scheduler on a fake audio
 // graph. Only the codec is stubbed; the separate ALAC fixture test validates
@@ -30,6 +31,7 @@ const source = (await readFile(new URL("../src/core/player/alac-player.js", impo
   .replace('from "./audio-output.js";', `from ${JSON.stringify(new URL("../src/core/player/audio-output.js", import.meta.url).href)};`)
   .replace('from "./alac-support.js";', `from ${JSON.stringify(new URL("../src/core/player/alac-support.js", import.meta.url).href)};`)
   .replace('from "./pcm-scheduler.js";', `from ${JSON.stringify(new URL("../src/core/player/pcm-scheduler.js", import.meta.url).href)};`)
+  .replace('from "./mp4-alac.js";', `from ${JSON.stringify(new URL("../src/core/player/mp4-alac.js", import.meta.url).href)};`)
   .replace('import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.js";', 'const initAlacWasm = async () => {}; const AlacDecoder = globalThis.__alacTestDecoder;');
 const { AlacPlayer, createStreamResampler } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 // Stop every player after its test so no scheduler pump keeps Node alive.
@@ -1047,4 +1049,107 @@ test("decoding after EOF reads the cached Blob in windows, not once per packet",
   assert.ok(decoded > 4, `decoded ${decoded} packets`);
   assert.ok(slices.length <= Math.ceil(blob.size / (2 * 1024 * 1024)), `${slices.length} Blob reads for ${decoded} packets`);
   await player.stop();
+});
+
+test("a completed song's stored ALAC M4A plays, seeks and caches like the packet stream", async () => {
+  const { file } = m4aFixture({ packets: 40, perChunk: 7, lastFrames: 4096 });
+  mockFetch(file);
+  let completed = null;
+  const player = new AlacPlayer({ onStreamComplete: (value) => { completed = value; } });
+  await player.load("test:m4a", { completed: true });
+  await until(() => player.eof);
+  assert.equal(player.packets.length, 40);
+  assert.equal(player.totalSourceFrames, 40 * 4096);
+  assert.equal(player.readBytes, file.length);
+  // The cached Blob is the packet transport, whatever the server sent.
+  const header = new Uint8Array(await completed.blob.slice(0, 8).arrayBuffer());
+  assert.equal(new TextDecoder().decode(header), "SPLALAC1");
+  await player.seek(30 * 4096 / 48);
+  assert.equal(player.decodeIndex > 30, true);
+  await player.play();
+  startAudio(player);
+  assert.ok(Math.abs(firstSample(player) - 0.31) < 1e-6, "playback resumes at packet 31");
+});
+
+async function waitFor(predicate, ms = 5000) {
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, "condition timed out");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+
+// Serves `file` like the media origin: whole-file GET trickles slowly, Range
+// requests answer at once. Records every Range header.
+function rangeServer(file, { trickle = 64, rangeable = true } = {}) {
+  const ranges = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const range = options.headers?.Range;
+    if (range) {
+      ranges.push(range);
+      const [, start, end] = /bytes=(\d+)-(\d*)/.exec(range);
+      const to = end ? Number(end) + 1 : file.length;
+      return new Response(file.slice(Number(start), to), { status: 206, headers: {
+        "content-range": `bytes ${start}-${to - 1}/${file.length}`, "content-length": String(to - Number(start)), "accept-ranges": "bytes" } });
+    }
+    let at = 0;
+    return new Response(new ReadableStream({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        if (at >= file.length) { controller.close(); return; }
+        controller.enqueue(file.slice(at, at + trickle)); at += trickle;
+      },
+    }), { headers: { "content-length": String(file.length), ...(rangeable ? { "accept-ranges": "bytes" } : {}) } });
+  };
+  return ranges;
+}
+
+test("seeking a stored M4A far ahead fetches that part with Range and still caches the whole song", async () => {
+  const { file } = m4aFixture({ packets: 120, perChunk: 9, lastFrames: 4096 });
+  const ranges = rangeServer(file, { trickle: 24 });
+  let completed = null;
+  const player = new AlacPlayer({ onStreamComplete: (value) => { completed = value; } });
+  player.seekWaitBytes = 64; // the fixture is tiny; real songs wait up to 2 MiB
+  await player.load("https://media.example.test/api/v1/playbacks/x/audio/source?rev=s", { completed: true });
+  assert.equal(player.duration, 120 * 4096 / 48, "the duration is known from the index alone");
+  assert.ok(!player.eof && player.packets.filter((packet) => packet.bytes).length < 60);
+  await player.seek(100 * 4096 / 48);
+  await player.play();
+  await waitFor(() => player.queuedFrames > 0);
+  startAudio(player);
+  assert.ok(Math.abs(firstSample(player) - 1.01) < 1e-6, "playback starts at packet 101 without waiting for the rest");
+  assert.ok(ranges.length >= 1, "the far seek used a Range request");
+  assert.equal(ranges[0].split("=")[1].split("-")[0], String(player.parser.inner.table.offsets[100]));
+  await waitFor(() => player.eof);
+  await waitFor(() => completed);
+  // The cached Blob holds every packet in order, gaps filled afterwards.
+  const blob = new Uint8Array(await completed.blob.arrayBuffer());
+  let at = 24 + 24; let count = 0;
+  const view = new DataView(blob.buffer);
+  while (at < blob.length) { const length = view.getUint32(at); assert.equal(blob[at + 12], count + 1); at += 8 + length; count += 1; }
+  assert.equal(count, 120);
+});
+
+test("a close seek waits for the download instead of restarting it", async () => {
+  const { file } = m4aFixture({ packets: 120 });
+  const ranges = rangeServer(file, { trickle: 400 });
+  const player = new AlacPlayer();
+  await player.load("https://media.example.test/a.m4a", { completed: true });
+  const ahead = Math.min(player.parser.inner.next + 3, 119);
+  await player.seek(ahead * 4096 / 48);
+  await waitFor(() => player.eof);
+  assert.deepEqual(ranges, []);
+});
+
+test("without byte ranges a stored M4A plays sequentially", async () => {
+  const { file } = m4aFixture({ packets: 60 });
+  const ranges = rangeServer(file, { trickle: 30, rangeable: false });
+  const player = new AlacPlayer();
+  await player.load("https://media.example.test/b.m4a", { completed: true });
+  await player.seek(55 * 4096 / 48);
+  await waitFor(() => player.eof);
+  assert.deepEqual(ranges, []);
+  await player.play();
+  startAudio(player);
+  assert.ok(Math.abs(firstSample(player) - 0.56) < 1e-6);
 });

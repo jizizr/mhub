@@ -29,6 +29,7 @@
 - 切歌直接替换原生音源，避免空 `load()` 释放系统媒体归属；新音源实际 `playing` 时重新发布媒体信息和控制。页面 Media Session 属性正确不代表手机通知仍存在；Android 的 Audio Session API 可用也不代表 WASM 获得系统媒体归属，真机验收单独记录。
 - Android 播放器到达 EOS 即被移出系统媒体会话，锁屏时通知立即消失且后台无法重建。自动续播须在当前曲 EOS 前让下一首播放器已在播（可静音），元素静音不影响会话归属。
 - Android 的 Apple Music 无损也走 WASM：Web Audio 不算媒体播放器，系统会话由 `media-companion.js` 的静音循环元素持有，只要「想播放」（含加载下一首的间隙）就一直在播，用户暂停、停止才停。改动播放状态时保持这一点；锁屏后台解码是否被冻结只能真机验收。
+- Telegram 是歌曲的持久层，`data/downloads` 只是工作区。已缓存的 Apple Music 无损走 `/audio/source`：直接转发 Telegram 上的 M4A，浏览器 `mp4-alac.js` 拆包后用 WASM 解码，不在服务端转换数据包或复制到本地；`.alacstream` 只服务边下边播和旧客户端。
 - 平台账号、实现、下载与 `music_cache` 写入只在 MHub；Telegram bot 经回环网关取歌，自身不配平台凭据。改动 `crates/music-gateway` 的线上协议时提升 `PROTOCOL_VERSION`，并同步升级 bot 所钉的 `rev`。
 - 只运行与变更相关的检查；设备实测与模拟测试分开记录。体积合格、页面主题正确，不等于手机重启或系统栏行为已验证。
 

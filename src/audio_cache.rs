@@ -97,14 +97,46 @@ pub(crate) async fn scan(root: &Path) -> std::io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// Pick the directories to remove: every idle one, then the least recently
-/// used until the rest fits in 90% of the limit, so a full cache does not
-/// evict one song per sweep. Protected and recently used ones always stay.
+/// Remove a finished download's growing-stream leftovers (`*.streaming`,
+/// `*.assembled`). The worker deletes them 30 minutes after completion, but
+/// that timer does not survive a restart; the sweep catches what it missed.
+/// Returns the bytes freed.
+pub(crate) async fn remove_stream_leftovers(dir: &Path, now: SystemTime) -> u64 {
+    let mut freed = 0;
+    let Ok(mut files) = fs::read_dir(dir).await else {
+        return 0;
+    };
+    while let Ok(Some(file)) = files.next_entry().await {
+        let name = file.file_name();
+        let name = name.to_string_lossy();
+        if !(name.ends_with(".streaming") || name.ends_with(".assembled")) {
+            continue;
+        }
+        let Ok(meta) = file.metadata().await else {
+            continue;
+        };
+        let idle = meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .unwrap_or_default();
+        if meta.is_file() && idle >= ACTIVE_GRACE && fs::remove_file(file.path()).await.is_ok() {
+            freed += meta.len();
+        }
+    }
+    freed
+}
+
+/// Pick the directories to remove: every idle one (a song already uploaded
+/// to Telegram is idle once out of use), then the least recently used until
+/// the rest fits in 90% of the limit, so a full cache does not evict one
+/// song per sweep. Protected and recently used ones always stay.
 pub(crate) fn select(
     mut entries: Vec<Entry>,
     now: SystemTime,
     policy: Policy,
     protected: &HashSet<String>,
+    uploaded: &HashSet<String>,
 ) -> Vec<String> {
     let age = |entry: &Entry| now.duration_since(entry.last_used).unwrap_or_default();
     // The limit counts everything on disk, including what has to stay.
@@ -113,7 +145,7 @@ pub(crate) fn select(
     entries.sort_by_key(|entry| entry.last_used);
     let (idle, mut rest): (Vec<_>, Vec<_>) = entries
         .into_iter()
-        .partition(|entry| age(entry) >= policy.idle);
+        .partition(|entry| uploaded.contains(&entry.name) || age(entry) >= policy.idle);
     total -= idle.iter().map(|entry| entry.bytes).sum::<u64>();
     let mut evicted: Vec<String> = idle.into_iter().map(|entry| entry.name).collect();
     if total > policy.max_bytes {
@@ -151,6 +183,23 @@ mod tests {
     }
 
     #[test]
+    fn uploaded_songs_leave_once_out_of_use() {
+        let now = SystemTime::now();
+        let entries = vec![
+            entry("uploaded-idle", 1, 1, now),
+            entry("local-only", 1, 1, now),
+            entry("uploaded-playing", 1, 0, now),
+        ];
+        let uploaded: HashSet<String> = ["uploaded-idle", "uploaded-playing"]
+            .map(String::from)
+            .into();
+        assert_eq!(
+            select(entries, now, policy(20), &HashSet::new(), &uploaded),
+            ["uploaded-idle"]
+        );
+    }
+
+    #[test]
     fn idle_directories_are_removed_and_recent_ones_kept() {
         let now = SystemTime::now();
         let entries = vec![
@@ -158,7 +207,10 @@ mod tests {
             entry("yesterday", 1, 24, now),
             entry("playing", 1, 0, now),
         ];
-        assert_eq!(select(entries, now, policy(20), &HashSet::new()), ["old"]);
+        assert_eq!(
+            select(entries, now, policy(20), &HashSet::new(), &HashSet::new()),
+            ["old"]
+        );
     }
 
     #[test]
@@ -168,7 +220,7 @@ mod tests {
         let entries = (1..=12)
             .map(|hours| entry(&format!("s{hours}"), 1, hours, now))
             .collect();
-        let mut evicted = select(entries, now, policy(10), &HashSet::new());
+        let mut evicted = select(entries, now, policy(10), &HashSet::new(), &HashSet::new());
         evicted.sort();
         assert_eq!(evicted, ["s10", "s11", "s12"]);
     }
@@ -182,14 +234,17 @@ mod tests {
             entry("old", 1, 200, now),
         ];
         let protected = HashSet::from(["busy".to_string()]);
-        assert_eq!(select(entries, now, policy(10), &protected), ["old"]);
+        assert_eq!(
+            select(entries, now, policy(10), &protected, &HashSet::new()),
+            ["old"]
+        );
     }
 
     #[test]
     fn under_limit_nothing_recent_is_removed() {
         let now = SystemTime::now();
         let entries = vec![entry("a", 2, 5, now), entry("b", 2, 10, now)];
-        assert!(select(entries, now, policy(10), &HashSet::new()).is_empty());
+        assert!(select(entries, now, policy(10), &HashSet::new(), &HashSet::new()).is_empty());
     }
 
     #[tokio::test]

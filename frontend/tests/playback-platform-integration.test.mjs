@@ -10,6 +10,7 @@ import { cacheKey, cacheEntryMatches, reusableNativeFlacCache, hasCachedAudio, c
 // current-quality selection, cache key and readiness negotiation run unchanged.
 const playerSource = (await readFile(new URL("../src/core/player/alac-player.js", import.meta.url), "utf8"))
   .replace('from "./pcm-scheduler.js";', `from ${JSON.stringify(new URL("../src/core/player/pcm-scheduler.js", import.meta.url).href)};`)
+  .replace('from "./mp4-alac.js";', `from ${JSON.stringify(new URL("../src/core/player/mp4-alac.js", import.meta.url).href)};`)
   .replace('from "./audio-output.js";', `from ${JSON.stringify(new URL("../src/core/player/audio-output.js", import.meta.url).href)};`)
   .replace('from "./alac-support.js";', `from ${JSON.stringify(new URL("../src/core/player/alac-support.js", import.meta.url).href)};`)
   .replace('import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.js";', "const initAlacWasm = async () => {}; class AlacDecoder {}");

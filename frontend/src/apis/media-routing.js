@@ -31,9 +31,16 @@ export function withTaskVersion(endpoint, id) {
   } catch { return ""; }
 }
 
-export function playbackAudioUrl(task, { mediaBaseUrl = buildMediaBase, legacyMediaBaseUrl = buildLegacyMediaBase } = {}) {
-  const endpoint = task?.streaming_mode === "wasm_alac" && task?.streaming_url
-    ? task.streaming_url : task?.audio_url;
+export function playbackAudioUrl(task, { mediaBaseUrl = buildMediaBase, legacyMediaBaseUrl = buildLegacyMediaBase, packets = false, original = false } = {}) {
+  // A completed lossless song is read as its stored M4A, exactly as
+  // Telegram keeps it: the WASM player demuxes it, and `original` (a
+  // download) saves it as is. `packets` keeps the SPLALAC1 endpoint for the
+  // growing-stream handoff, whose byte offsets belong to that transport.
+  const wasm = task?.streaming_mode === "wasm_alac";
+  const source = task?.status === "completed" && task?.alac_source_url;
+  const endpoint = source && (original || (wasm && !packets))
+    ? task.alac_source_url
+    : wasm && task?.streaming_url ? task.streaming_url : task?.audio_url;
   if (!endpoint) return "";
   const versioned = withTaskVersion(endpoint, task.id);
   if (!versioned) return "";
@@ -41,7 +48,7 @@ export function playbackAudioUrl(task, { mediaBaseUrl = buildMediaBase, legacyMe
   const expected = `/api/v1/playbacks/${encodeURIComponent(task.id)}/audio`;
   // Only these two audio representations may use a configured media origin. API, artwork,
   // lyrics, modules and unknown paths must never be rewritten here.
-  if (url.pathname !== expected && url.pathname !== `${expected}/stream`) return versioned;
+  if (url.pathname !== expected && url.pathname !== `${expected}/stream` && url.pathname !== `${expected}/source`) return versioned;
   // A growing stream also uses the media origin, so audio never competes with
   // the API origin's page bandwidth. The server marks it `no-store,
   // no-transform` and the CDN bypasses it; once completed, the same URL serves

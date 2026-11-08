@@ -151,7 +151,9 @@ export async function resolveTrackDownload(track, {
 
   onStage?.("preparing");
   const task = await completedTask(track, { signal, api });
-  const url = audioUrl(nativeRequest(task));
+  // Lossless Apple Music downloads the M4A Telegram keeps (the file the bot
+  // sends), never a server-side FLAC transcode.
+  const url = audioUrl(nativeRequest(task), { original: true });
   if (!url) throw new Error("服务器没有返回音频地址");
   onStage?.("downloading");
   const response = await fetchImpl(url, { credentials: "omit", cache: "default", signal });
@@ -165,7 +167,9 @@ export async function resolveTrackDownload(track, {
   // replay (or another download) needs no request. Packet-transport tracks
   // keep their own cache entry and are not duplicated.
   const readyTrack = trackFromPlayback(nativeRequest(task), track);
-  if (track.streaming_mode !== "wasm_alac" && cacheKey(readyTrack) === cacheKey(nativeRequest(track))) {
+  // The original ALAC M4A is not the native player's representation.
+  const original = new URL(url, "http://same-origin.invalid").pathname.endsWith("/audio/source");
+  if (!original && track.streaming_mode !== "wasm_alac" && cacheKey(readyTrack) === cacheKey(nativeRequest(track))) {
     void Promise.resolve(store(cacheKey(readyTrack), null, nativeRequest(task), readyTrack, { blob })).catch(() => {});
   }
   return { blob, filename: downloadFilename(track, ext), fromCache: false };

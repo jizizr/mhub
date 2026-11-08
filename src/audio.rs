@@ -297,21 +297,11 @@ pub fn mislabeled_aac_entry_offset(header: &[u8]) -> Option<usize> {
 /// Rewrites a mislabelled AAC sample entry in place (four bytes, same size).
 /// Only the leading boxes are read, up to the end of a `moov` within the
 /// first 4 MiB; a file is checked once per process.
-pub async fn repair_mislabeled_aac(path: &Path) -> std::io::Result<bool> {
-    use std::collections::HashSet;
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-    static CHECKED: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+/// Read a file's leading boxes up to and including `moov` (at most 4 MiB).
+async fn read_movie_header(file: &mut fs::File) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
     const LIMIT: usize = 4 * 1024 * 1024;
-    if CHECKED.lock().unwrap().contains(path) {
-        return Ok(false);
-    }
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .await?;
     let mut header = Vec::new();
-    // Walk top-level boxes until `moov` is fully read.
     let mut pos = 0usize;
     loop {
         if header.len() < pos + 16 {
@@ -319,7 +309,7 @@ pub async fn repair_mislabeled_aac(path: &Path) -> std::io::Result<bool> {
             if want <= header.len() {
                 break;
             }
-            let read = (&mut file)
+            let read = (&mut *file)
                 .take((want - header.len()) as u64)
                 .read_to_end(&mut header)
                 .await?;
@@ -341,7 +331,7 @@ pub async fn repair_mislabeled_aac(path: &Path) -> std::io::Result<bool> {
                 break;
             }
             if header.len() < end {
-                (&mut file)
+                (&mut *file)
                     .take((end - header.len()) as u64)
                     .read_to_end(&mut header)
                     .await?;
@@ -350,6 +340,43 @@ pub async fn repair_mislabeled_aac(path: &Path) -> std::io::Result<bool> {
         }
         pos += size;
     }
+    Ok(header)
+}
+
+/// File offset of a mislabelled AAC sample-entry fourcc, without changing
+/// the file. Telegram copies are never rewritten: they are patched while
+/// streaming instead (see `stream_local_file_patched`). Results are cached
+/// per path, since a file is checked on every Range request.
+pub async fn find_mislabeled_aac(path: &Path) -> std::io::Result<Option<u64>> {
+    static FOUND: LazyLock<Mutex<HashMap<PathBuf, Option<u64>>>> = LazyLock::new(Default::default);
+    if let Some(found) = FOUND.lock().unwrap().get(path) {
+        return Ok(*found);
+    }
+    let mut file = fs::File::open(path).await?;
+    let found = mislabeled_aac_entry_offset(&read_movie_header(&mut file).await?)
+        .map(|offset| offset as u64);
+    let mut cache = FOUND.lock().unwrap();
+    // The process serves a bounded working set; never grow without limit.
+    if cache.len() > 4096 {
+        cache.clear();
+    }
+    cache.insert(path.to_path_buf(), found);
+    Ok(found)
+}
+
+pub async fn repair_mislabeled_aac(path: &Path) -> std::io::Result<bool> {
+    use std::collections::HashSet;
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+    static CHECKED: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+    if CHECKED.lock().unwrap().contains(path) {
+        return Ok(false);
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .await?;
+    let header = read_movie_header(&mut file).await?;
     let offset = mislabeled_aac_entry_offset(&header);
     if let Some(offset) = offset {
         file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
@@ -388,6 +415,22 @@ mod tests {
             test_box(b"mdat", &[1, 2, 3]),
         ]
         .concat()
+    }
+
+    #[tokio::test]
+    async fn mislabeled_aac_is_found_without_touching_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telegram.m4a");
+        let original = movie_with_entry(b"alac", b"esds");
+        fs::write(&path, &original).await.unwrap();
+        let offset = find_mislabeled_aac(&path).await.unwrap().unwrap() as usize;
+        assert_eq!(&original[offset..offset + 4], b"alac");
+        assert_eq!(fs::read(&path).await.unwrap(), original);
+        let good = dir.path().join("good.m4a");
+        fs::write(&good, movie_with_entry(b"mp4a", b"esds"))
+            .await
+            .unwrap();
+        assert_eq!(find_mislabeled_aac(&good).await.unwrap(), None);
     }
 
     #[tokio::test]

@@ -276,11 +276,14 @@ export async function cacheAudioBlob(key, url, task, track, { signal, blob: comp
     contentType ||= track?.content_type || "";
     if ((task?.streaming_mode || track?.streaming_mode) === "wasm_alac") {
       const header = new Uint8Array(await blob.slice(0, 24).arrayBuffer());
-      if (header.length !== 24 || new TextDecoder().decode(header.subarray(0, 8)) !== "SPLALAC1" ||
-          new DataView(header.buffer).getUint32(8) !== 2) {
+      // A completed song is the stored ALAC M4A (`ftyp` first), which the
+      // WASM player demuxes itself; a growing one is the SPLALAC1 transport.
+      const mp4 = header.length === 24 && new TextDecoder().decode(header.subarray(4, 8)) === "ftyp";
+      if (!mp4 && (header.length !== 24 || new TextDecoder().decode(header.subarray(0, 8)) !== "SPLALAC1" ||
+          new DataView(header.buffer).getUint32(8) !== 2)) {
         throw new Error("音频本地缓存失败：无损流格式不匹配");
       }
-      contentType = "application/x-splayer-alac";
+      contentType = mp4 ? "audio/mp4" : "application/x-splayer-alac";
     }
     if (signal?.aborted) throw new DOMException("音频缓存已取消", "AbortError");
     const readyTrack = {

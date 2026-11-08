@@ -71,6 +71,7 @@ export function trackFromPlayback(task, fallback = {}) {
     streaming_url: transport.streaming_url || "",
     streaming_codec: transport.streaming_codec || "",
     streaming_protocol: transport.streaming_protocol || "",
+    alac_source_url: transport.alac_source_url || "",
     audio_url: task?.audio_url || fallback.audio_url || "",
     cover_url: task?.cover_url || fallback.cover_url || "",
     lyrics_url: task?.lyrics_url || fallback.lyrics_url || "",

@@ -363,7 +363,7 @@ async function waitForCompletedSource(track, { signal } = {}) {
       const task = await getPlayback(id, { signal, since: "streaming", waitMs: 15000 });
       if (signal?.aborted) return null;
       if (task.status === "completed") {
-        if (track.streaming_mode === "wasm_alac") return task.streaming_mode === "wasm_alac" ? audioUrl(task) : null;
+        if (track.streaming_mode === "wasm_alac") return task.streaming_mode === "wasm_alac" ? audioUrl(task, { packets: true }) : null;
         return audioUrl({ ...task, streaming_mode: null, streaming_url: null });
       }
       if (task.status === "failed") return null;

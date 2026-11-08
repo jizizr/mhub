@@ -2,6 +2,7 @@ import initAlacWasm, { AlacDecoder } from "../../wasm/alac-decoder/alac_decoder.
 import { acquireOutputContext, createAlacOutput, getOutputContext, prepareOutput, suspendIdleOutputs } from "./audio-output.js";
 import { canRequestAlacPlayback, canUseAlacPlayback, isAlacPlaybackSupported, isLosslessTrack } from "./alac-support.js";
 import { PcmScheduler } from "./pcm-scheduler.js";
+import { Mp4AlacStreamParser, looksLikeMp4 } from "./mp4-alac.js";
 
 const PCM_QUEUE_SECONDS = 2;
 const BACKGROUND_PCM_QUEUE_SECONDS = 15;
@@ -19,6 +20,9 @@ const STARTUP_QUEUE_SECONDS = 0.5;
 const RESUME_TIMEOUT_MS = 1500;
 const RANGE_HANDOFF_TIMEOUT_MS = 8000;
 const HEADER_BYTES = 24;
+// A seek this close ahead of a stored M4A's download point waits for it;
+// anything further (or behind it) restarts the download there with Range.
+const SEEK_WAIT_BYTES = 2 * 1024 * 1024;
 const STREAM_MAGIC = "SPLALAC1";
 const STREAM_VERSION = 2;
 let wasmReady = null;
@@ -331,6 +335,34 @@ class AlacPacketStreamParser {
   }
 }
 
+// Growing songs arrive as the SPLALAC1 packet transport; completed songs are
+// the stored ALAC M4A itself. Both yield the same packets and header, so the
+// player and its cached Blob do not depend on which one the server sent.
+class AlacSourceParser {
+  constructor() {
+    this.prefix = new Uint8Array(0);
+    this.inner = null;
+  }
+
+  get header() { return this.inner?.header ?? null; }
+  get headerBytes() { return this.inner?.headerBytes ?? null; }
+
+  push(chunk) {
+    if (this.inner) return this.inner.push(chunk);
+    this.prefix = concatBytes(this.prefix, chunk || new Uint8Array(0));
+    if (this.prefix.byteLength < 8) return [];
+    this.inner = looksLikeMp4(this.prefix) ? new Mp4AlacStreamParser() : new AlacPacketStreamParser();
+    const bytes = this.prefix;
+    this.prefix = null;
+    return this.inner.push(bytes);
+  }
+
+  finish() {
+    if (!this.inner) throw new Error("ALAC 流在完整 packet 边界前结束");
+    this.inner.finish();
+  }
+}
+
 async function ensureWasm() {
   if (!wasmReady) wasmReady = initAlacWasm().catch((error) => { wasmReady = null; throw error; });
   await wasmReady;
@@ -358,6 +390,9 @@ export class AlacPlayer {
       streamIdentity: null, removeRangeAbortListener: null,
       rangeCandidate: null, transportWaiter: null,
       removeVisibilityListener: null,
+      // Stored M4A source: the full sample table is known up front, so any
+      // packet can be fetched with Range (`{ url, rangeable, missing }`).
+      mp4: null, seekWaitBytes: SEEK_WAIT_BYTES,
     });
   }
 
@@ -477,7 +512,11 @@ export class AlacPlayer {
       this.handoffPolicy = packetHandoffPolicy(url, trustedMediaOrigins, this.streamIdentity);
       if (response.url && !trustedCompletedPacketSource(response.url, this.handoffPolicy)) this.handoffPolicy = null;
       this.reader = response.body.getReader();
-      this.parser = new AlacPacketStreamParser();
+      this.parser = new AlacSourceParser();
+      // Only an identity response with byte ranges can be read out of order.
+      const rangeable = identityEncoding && response.headers.get("accept-ranges")?.trim().toLowerCase() === "bytes" &&
+        /^https?:/.test(new URL(url, globalThis.location?.href || "http://local.invalid").protocol);
+      this.mp4Candidate = { url: response.url || url, rangeable, missing: 0 };
       const firstPacket = {};
       firstPacket.promise = new Promise((resolve, reject) => { firstPacket.resolve = resolve; firstPacket.reject = reject; });
       this.firstPacket = firstPacket;
@@ -510,7 +549,7 @@ export class AlacPlayer {
       if (!this.totalSourceFrames) {
         this.firstPacket.reject(new Error("ALAC 流没有音频 packet"));
       } else {
-        this.firstPacket.resolve({ duration: this.eof ? this.duration : 0, sampleRate: this.track.sampleRate, channels: this.track.channels, bits: this.track.bits });
+        this.firstPacket.resolve({ duration: this.eof || this.mp4 ? this.duration : 0, sampleRate: this.track.sampleRate, channels: this.track.channels, bits: this.track.bits });
       }
     }
   }
@@ -523,39 +562,14 @@ export class AlacPlayer {
         const { done, value } = await this.readStreamChunk(generation);
         if (generation !== this.generation) return;
         if (done) {
-          if (this.expectedTotalBytes && this.readBytes !== this.expectedTotalBytes) throw new Error("ALAC 完整流字节数不符，已停止缓存");
-          this.parser.finish();
+          // A stored M4A may have been read in pieces after seeks; fetch
+          // whatever is still missing before it counts as complete.
+          if (this.mp4 && await this.nextMp4Segment(generation)) continue;
+          if (generation !== this.generation) return;
+          if (!this.mp4 && this.expectedTotalBytes && this.readBytes !== this.expectedTotalBytes) throw new Error("ALAC 完整流字节数不符，已停止缓存");
+          if (!this.mp4) this.parser.finish();
           if (!this.packets.length) throw new Error("ALAC 流没有音频 packet");
-          this.eof = true;
-          this.completionController?.abort();
-          this.completionController = null;
-          this.discardRangeCandidate(this.rangeCandidate);
-          this.removeRangeAbortListener?.();
-          this.removeRangeAbortListener = null;
-          this.rangeController = null;
-          const parts = [this.parser.headerBytes];
-          let offset = this.parser.headerBytes.byteLength;
-          for (const packet of this.packets) {
-            const framing = new Uint8Array(8);
-            const view = new DataView(framing.buffer);
-            view.setUint32(0, packet.bytes.byteLength);
-            view.setUint32(4, packet.duration);
-            packet.offset = offset + 8;
-            packet.length = packet.bytes.byteLength;
-            parts.push(framing, packet.bytes);
-            offset += 8 + packet.length;
-          }
-          this.completeBlob = new Blob(parts, { type: "application/x-splayer-alac" });
-          // Keep a single immutable compressed Blob plus small packet offsets.
-          // PCM is decoded on demand, never retained for the entire song.
-          for (const packet of this.packets) packet.bytes = null;
-          this.reader = null;
-          if (!this.streamCompleteNotified) {
-            this.streamCompleteNotified = true;
-            this.onStreamComplete({ blob: this.completeBlob, bytes: this.readBytes, duration: this.duration });
-          }
-          void this.drainPackets(generation);
-          this.resolveStartup();
+          this.completeStream(generation);
           return;
         }
         if (!value?.byteLength) continue;
@@ -570,9 +584,16 @@ export class AlacPlayer {
           this.decoder = new AlacDecoder(header.cookie);
           this.track = header;
           this.configureRenderer(0);
+          this.prepareMp4Source();
         }
         for (const packet of packets) {
           if (!packet.duration || packet.duration > this.track.maxSamples) throw new Error("ALAC packet 时长无效");
+          if (this.mp4) {
+            const slot = this.packets[packet.index];
+            if (!slot.bytes) this.mp4.missing -= 1;
+            slot.bytes = packet.bytes;
+            continue;
+          }
           this.packets.push({ ...packet, startFrame: this.totalSourceFrames });
           this.totalSourceFrames += packet.duration;
         }
@@ -581,6 +602,103 @@ export class AlacPlayer {
     } catch (error) {
       if (generation === this.generation) this.fail(error);
     }
+  }
+
+  completeStream(generation) {
+    this.eof = true;
+    this.completionController?.abort();
+    this.completionController = null;
+    this.discardRangeCandidate(this.rangeCandidate);
+    this.removeRangeAbortListener?.();
+    this.removeRangeAbortListener = null;
+    this.rangeController = null;
+    const parts = [this.parser.headerBytes];
+    let offset = this.parser.headerBytes.byteLength;
+    for (const packet of this.packets) {
+      const framing = new Uint8Array(8);
+      const view = new DataView(framing.buffer);
+      view.setUint32(0, packet.bytes.byteLength);
+      view.setUint32(4, packet.duration);
+      packet.offset = offset + 8;
+      packet.length = packet.bytes.byteLength;
+      parts.push(framing, packet.bytes);
+      offset += 8 + packet.length;
+    }
+    this.completeBlob = new Blob(parts, { type: "application/x-splayer-alac" });
+    // Keep a single immutable compressed Blob plus small packet offsets.
+    // PCM is decoded on demand, never retained for the entire song.
+    for (const packet of this.packets) packet.bytes = null;
+    this.reader = null;
+    if (!this.streamCompleteNotified) {
+      this.streamCompleteNotified = true;
+      this.onStreamComplete({ blob: this.completeBlob, bytes: this.readBytes, duration: this.duration });
+    }
+    void this.drainPackets(generation);
+    this.resolveStartup();
+  }
+
+  // A stored M4A carries its whole sample table, so every packet slot (and
+  // the duration) is known before any audio arrives.
+  prepareMp4Source() {
+    if (!(this.parser.inner instanceof Mp4AlacStreamParser)) return;
+    const table = this.parser.inner.table;
+    this.mp4 = this.mp4Candidate;
+    this.packets = [];
+    let startFrame = 0;
+    for (let index = 0; index < table.durations.length; index += 1) {
+      this.packets.push({ duration: table.durations[index], startFrame, bytes: null });
+      startFrame += table.durations[index];
+    }
+    this.totalSourceFrames = startFrame;
+    this.mp4.missing = this.packets.length;
+  }
+
+  /**
+   * Start fetching the next missing run of packets, preferring the playback
+   * position. Returns false when every packet is present.
+   */
+  async nextMp4Segment(generation) {
+    const mp4 = this.mp4;
+    if (!mp4.missing || !this.track) return false;
+    const count = this.packets.length;
+    const from = Math.min(this.decodeIndex, count - 1);
+    let first = -1;
+    for (let index = from; index < count && first < 0; index += 1) if (!this.packets[index].bytes) first = index;
+    for (let index = 0; index < from && first < 0; index += 1) if (!this.packets[index].bytes) first = index;
+    if (first < 0) return false;
+    if (!mp4.rangeable) throw new Error("音频源不支持分段读取，无法补齐缺失部分");
+    let last = first + 1;
+    while (last < count && !this.packets[last].bytes) last += 1;
+    const { start, end } = this.parser.inner.byteRange(first, last);
+    const response = await fetch(mp4.url, {
+      cache: "default", credentials: "omit", redirect: "error",
+      signal: this.abortController?.signal, headers: { Range: `bytes=${start}-${end - 1}` },
+    });
+    if (generation !== this.generation) return false;
+    const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("content-range") || "");
+    const encoding = response.headers.get("content-encoding")?.trim().toLowerCase();
+    if (response.status !== 206 || !range || Number(range[1]) !== start || !response.body?.getReader ||
+        (encoding && encoding !== "identity")) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error(`音频分段读取失败：HTTP ${response.status}`);
+    }
+    this.parser.inner.seekTo(first);
+    this.reader = response.body.getReader();
+    mp4.segmentFirst = first;
+    return true;
+  }
+
+  /** After a seek into a missing part, move the download there at once. */
+  followMp4Seek() {
+    const mp4 = this.mp4;
+    const packet = this.packets[this.decodeIndex];
+    if (!mp4?.rangeable || this.eof || !packet || packet.bytes || !this.reader) return;
+    const next = this.parser.inner.next;
+    const { offsets } = this.parser.inner.table;
+    // Already on its way: the current download reaches it shortly.
+    if (next <= this.decodeIndex && offsets[this.decodeIndex] - offsets[next] <= this.seekWaitBytes) return;
+    // Ending this read makes the transport pick the run at the playhead.
+    void this.reader.cancel().catch(() => {});
   }
 
   async readStreamChunk(generation) {
@@ -746,6 +864,8 @@ export class AlacPlayer {
       let slicePackets = 0;
       while (generation === this.generation && epoch === this.epoch && this.decodeIndex < this.packets.length && this.queuedFrames < this.pcmQueueTargetFrames) {
         const packet = this.packets[this.decodeIndex];
+        // A stored M4A's packet not downloaded yet: its bytes wake us.
+        if (!packet.bytes && !this.completeBlob) break;
         const bytes = packet.bytes || await this.readCompletedPacket(packet);
         if (generation !== this.generation || epoch !== this.epoch) return;
         // Reused: the resampler below always returns a new array.
@@ -877,12 +997,13 @@ export class AlacPlayer {
     const generation = this.generation;
     const position = Number(positionMs);
     const desired = Math.max(0, Math.floor((Number.isFinite(position) ? position : 0) * this.track.sampleRate / 1000));
-    const requested = this.eof ? Math.min(this.totalSourceFrames, desired) : desired;
+    const requested = this.eof || this.mp4 ? Math.min(this.totalSourceFrames, desired) : desired;
     const wasPlaying = this.playing;
     this.decoder.free?.();
     this.decoder = new AlacDecoder(this.track.cookie);
     this.selectPacketAtFrame(requested);
     this.pendingSeekFrame = !this.eof && requested >= this.totalSourceFrames ? requested : null;
+    this.followMp4Seek();
     this.ended = false;
     this.renderEofSent = false;
     this.configureRenderer(Math.round(requested / this.track.sampleRate * this.outputSampleRate));
@@ -966,6 +1087,8 @@ export class AlacPlayer {
     this.track = null;
     this.parser = null;
     this.packets = [];
+    this.mp4 = null;
+    this.mp4Candidate = null;
     this.completeBlob = null;
     this.blobWindow = null;
     this.resampler = null;

@@ -1,8 +1,9 @@
 use crate::{
     ApiError, ApiResult,
     audio::{
-        BrowserAudioService, PendingAudioFile, ensure_audio_file, lock_audio_path,
-        needs_browser_lossless_derivative, repair_mislabeled_aac, valid_audio_file,
+        BrowserAudioService, PendingAudioFile, ensure_audio_file, find_mislabeled_aac,
+        lock_audio_path, needs_browser_lossless_derivative, repair_mislabeled_aac,
+        valid_audio_file,
     },
     audio_cache,
     cache::{MusicCache, find_music_cache, find_music_cache_by_source, upsert_music_cache},
@@ -200,6 +201,11 @@ pub struct PlaybackTask {
     pub streaming_protocol: Option<String>,
     pub audio_url: String,
     pub streaming_url: Option<String>,
+    /// The stored ALAC M4A of a completed Apple Music lossless task, exactly
+    /// as Telegram keeps it: the WASM player demuxes it directly and
+    /// downloads save it as is. Older clients keep using `streaming_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alac_source_url: Option<String>,
     pub cover_url: String,
     pub lyrics_url: String,
     /// Loudness derived from the provider's own measurement, available before
@@ -497,6 +503,7 @@ fn app_with_state(state: AppState, serve_web: bool) -> Router {
         .route("/api/v1/playbacks/:id", get(get_download))
         .route("/api/v1/playbacks/:id/audio", get(download_file))
         .route("/api/v1/playbacks/:id/audio/stream", get(download_stream))
+        .route("/api/v1/playbacks/:id/audio/source", get(download_source))
         .route("/api/v1/playbacks/:id/cover", get(download_cover))
         .route("/api/v1/playbacks/:id/lyrics", get(download_lyrics))
         .route("/api/v1/playbacks/:id/loudness", get(playback_loudness))
@@ -1318,6 +1325,53 @@ async fn download_file(
     serve_audio_file(state, id, &headers, version.rev.as_deref()).await
 }
 
+/// Serve a completed song's stored ALAC M4A as is, for the WASM player to
+/// demux. It is read straight from the Telegram cache (or the finished local
+/// download), so replays need neither packet conversion nor a local copy.
+async fn download_source(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(version): Query<MediaVersionQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let task = load_task(&state, &id).await?;
+    if version
+        .rev
+        .as_deref()
+        .is_some_and(|rev| rev != source_media_revision(&task))
+    {
+        return Err(ApiError::Http {
+            status: StatusCode::CONFLICT,
+            message: "音频版本已更新，请重新获取播放任务地址".to_string(),
+        });
+    }
+    if !serves_alac_source(&task) {
+        return Err(ApiError::Http {
+            status: StatusCode::CONFLICT,
+            message: "该播放任务没有可直接读取的 ALAC 原文件".to_string(),
+        });
+    }
+    let filename = task.filename.as_deref().unwrap_or("audio.m4a");
+    let local = state
+        .data_dir
+        .join("downloads")
+        .join(&task.work_id)
+        .join(filename);
+    if fs::metadata(&local)
+        .await
+        .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+    {
+        return stream_local_file(&local, filename, "audio/mp4", &headers).await;
+    }
+    let Some(file_id) = task.file_id.as_deref().filter(|id| !id.trim().is_empty()) else {
+        return Err(ApiError::Http {
+            status: StatusCode::NOT_FOUND,
+            message: "音频文件不存在".to_string(),
+        });
+    };
+    stream_telegram_file(file_id, filename, Some("audio/mp4".to_string()), &headers).await
+}
+
 /// Serve SPLALAC1 packets to a capable WebAssembly decoder. The regular
 /// `/audio` endpoint keeps its browser-compatible Lossless/Hi-Res derivative.
 async fn download_stream(
@@ -1446,11 +1500,40 @@ fn media_revision(task: &DownloadTask, packets: bool) -> String {
 
 fn media_url(state: &AppState, task: &DownloadTask, packets: bool) -> String {
     let suffix = if packets { "/audio/stream" } else { "/audio" };
-    let path = format!(
-        "/api/v1/playbacks/{}{suffix}?rev={}",
-        task.id,
-        media_revision(task, packets)
-    );
+    public_media_url(state, task, suffix, &media_revision(task, packets))
+}
+
+/// Revision of the stored ALAC M4A served by `/audio/source`.
+fn source_media_revision(task: &DownloadTask) -> String {
+    format!(
+        "{:x}",
+        md5::compute(format!("{}\0alac-source-v1", task.media_revision))
+    )
+}
+
+fn source_media_url(state: &AppState, task: &DownloadTask) -> String {
+    public_media_url(state, task, "/audio/source", &source_media_revision(task))
+}
+
+/// Completed Apple Music ALAC kept as a progressive M4A: the file Telegram
+/// stores, which the WASM player reads and demuxes without conversion.
+fn serves_alac_source(task: &DownloadTask) -> bool {
+    task.status == DownloadStatus::Completed
+        && task.platform == "applemusic"
+        && task.filename.as_deref().is_some_and(|name| {
+            let name = name.to_ascii_lowercase();
+            name.ends_with(".m4a") || name.ends_with(".mp4")
+        })
+        && needs_browser_lossless_derivative(
+            &task.quality,
+            task.format.as_deref(),
+            task.content_type.as_deref(),
+            task.filename.as_deref(),
+        )
+}
+
+fn public_media_url(state: &AppState, task: &DownloadTask, suffix: &str, revision: &str) -> String {
+    let path = format!("/api/v1/playbacks/{}{suffix}?rev={revision}", task.id);
     if task.status == DownloadStatus::Completed
         && let Some(base) = &state.media_base_url
     {
@@ -1539,6 +1622,7 @@ fn public_task(state: &AppState, task: &DownloadTask) -> PlaybackTask {
             .streaming_mode
             .as_deref()
             .map(|_| media_url(state, task, true)),
+        alac_source_url: serves_alac_source(task).then(|| source_media_url(state, task)),
         cover_url: format!("/api/v1/playbacks/{}/cover", task.id),
         lyrics_url: format!("/api/v1/playbacks/{}/lyrics", task.id),
         loudness_estimate: task
@@ -2372,8 +2456,32 @@ async fn serve_task_file(
             return stream_local_file(&path, filename, &content_type, headers).await;
         }
         // Apple Music AAC cached on Telegram before the sample-entry fix is
-        // mislabelled `alac`, which Safari refuses. Restore it locally so it
-        // can be repaired, instead of streaming the old bytes through.
+        // mislabelled `alac`, which Safari refuses. Patch those 4 bytes while
+        // streaming the local Bot API file, so the Telegram copy (sent as is
+        // by the bot) stays unchanged and nothing is copied to disk.
+        if mp4_audio
+            && task.platform == "applemusic"
+            && let Some(file_id) = task.file_id.as_deref().filter(|id| !id.trim().is_empty())
+        {
+            let file = telegram_cache::get_file(file_id)
+                .await
+                .map_err(|err| ApiError::Http {
+                    status: StatusCode::BAD_GATEWAY,
+                    message: format!("Telegram 文件信息获取失败：{err}"),
+                })?;
+            if let Some(local) = telegram_cache::local_file_path(&file.file_path) {
+                let patch = find_mislabeled_aac(&local).await.unwrap_or_else(|err| {
+                    tracing::warn!(
+                        "failed to check AAC sample entry in {}: {err}",
+                        local.display()
+                    );
+                    None
+                });
+                return stream_local_file_patched(&local, filename, "audio/mp4", headers, patch)
+                    .await;
+            }
+        }
+        // A remote Bot API cannot be patched in flight: restore locally.
         if mp4_audio && task.platform == "applemusic" {
             let path = ensure_local_audio_file(&state, &task).await?;
             repair_cached_aac(&path).await;
@@ -2748,6 +2856,41 @@ async fn stream_local_file(
     content_type: &str,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
+    stream_local_file_patched(path, filename, content_type, headers, None).await
+}
+
+/// Overwrite the 4 bytes at `fourcc_at` with `mp4a` in a streamed range,
+/// leaving the file itself untouched.
+fn patch_fourcc(
+    stream: ReaderStream<impl tokio::io::AsyncRead>,
+    start: u64,
+    fourcc_at: u64,
+) -> impl futures::Stream<Item = std::io::Result<axum::body::Bytes>> {
+    use futures::StreamExt;
+    let mut position = start;
+    stream.map(move |chunk| {
+        let chunk = chunk?;
+        let chunk_start = position;
+        position += chunk.len() as u64;
+        let (from, to) = (fourcc_at.max(chunk_start), (fourcc_at + 4).min(position));
+        if from >= to {
+            return Ok(chunk);
+        }
+        let mut patched = chunk.to_vec();
+        for at in from..to {
+            patched[(at - chunk_start) as usize] = b"mp4a"[(at - fourcc_at) as usize];
+        }
+        Ok(axum::body::Bytes::from(patched))
+    })
+}
+
+async fn stream_local_file_patched(
+    path: &FsPath,
+    filename: &str,
+    content_type: &str,
+    headers: &HeaderMap,
+    fourcc_patch: Option<u64>,
+) -> ApiResult<Response> {
     let mut file = fs::File::open(path).await.map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             ApiError::Http {
@@ -2774,10 +2917,11 @@ async fn stream_local_file(
     if let Some((start, end)) = parse_range(headers, size)? {
         file.seek(SeekFrom::Start(start)).await?;
         let chunk_size = end - start + 1;
-        let body = Body::from_stream(ReaderStream::with_capacity(
-            file.take(chunk_size),
-            AUDIO_STREAM_CHUNK_SIZE,
-        ));
+        let reader = ReaderStream::with_capacity(file.take(chunk_size), AUDIO_STREAM_CHUNK_SIZE);
+        let body = match fourcc_patch {
+            Some(at) => Body::from_stream(patch_fourcc(reader, start, at)),
+            None => Body::from_stream(reader),
+        };
         return response
             .status(StatusCode::PARTIAL_CONTENT)
             .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
@@ -2786,7 +2930,11 @@ async fn stream_local_file(
             .map_err(|err| ApiError::Custom(format!("failed to build response: {err}")));
     }
 
-    let body = Body::from_stream(ReaderStream::with_capacity(file, AUDIO_STREAM_CHUNK_SIZE));
+    let reader = ReaderStream::with_capacity(file, AUDIO_STREAM_CHUNK_SIZE);
+    let body = match fourcc_patch {
+        Some(at) => Body::from_stream(patch_fourcc(reader, 0, at)),
+        None => Body::from_stream(reader),
+    };
     response
         .status(StatusCode::OK)
         .header(header::CONTENT_LENGTH, size.to_string())
@@ -3125,11 +3273,27 @@ async fn sweep_audio_cache(
             entry.last_used = entry.last_used.max(accessed);
         }
     }
+    // Telegram keeps these songs and serves every replay straight from the
+    // Bot API, so their local files only matter while they are in use.
+    let uploaded: std::collections::HashSet<String> = state
+        .downloads
+        .read()
+        .await
+        .values()
+        .filter(|task| {
+            task.status == DownloadStatus::Completed
+                && task
+                    .file_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+        })
+        .map(|task| task.work_id.clone())
+        .collect();
     let scanned = entries.len();
     let bytes: u64 = entries.iter().map(|entry| entry.bytes).sum();
     let mut freed = 0;
     let mut evicted = std::collections::HashSet::new();
-    for name in audio_cache::select(entries.clone(), now, policy, &protected) {
+    for name in audio_cache::select(entries.clone(), now, policy, &protected, &uploaded) {
         match fs::remove_dir_all(root.join(&name)).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -3143,6 +3307,11 @@ async fn sweep_audio_cache(
             .find(|entry| entry.name == name)
             .map_or(0, |entry| entry.bytes);
         evicted.insert(name);
+    }
+    for entry in &entries {
+        if !evicted.contains(&entry.name) && !protected.contains(&entry.name) {
+            freed += audio_cache::remove_stream_leftovers(&root.join(&entry.name), now).await;
+        }
     }
 
     let idle = |work_id: &str| {
@@ -3340,6 +3509,142 @@ mod tests {
             from_chat_id: 0,
             lyrics_tag: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn completed_alac_source_is_the_stored_m4a_without_conversion() {
+        let directory = tempfile::tempdir().unwrap();
+        let (state, mut task) = test_cache_state(directory.path());
+        task.id = "alac-source-test".into();
+        task.work_id = "alac-source-test--1".into();
+        task.streaming_mode = Some("wasm_alac".into());
+        state
+            .downloads
+            .write()
+            .await
+            .insert(task.id.clone(), task.clone());
+
+        let public = public_task(&state, &task);
+        let source = public
+            .alac_source_url
+            .clone()
+            .expect("completed ALAC source");
+        assert!(source.starts_with(&format!("/api/v1/playbacks/{}/audio/source?rev=", task.id)));
+        assert_ne!(Some(source.clone()), public.streaming_url);
+        // Native clients may download the original file as well.
+        let mut native = task.clone();
+        native.streaming_mode = None;
+        assert_eq!(
+            public_task(&state, &native).alac_source_url,
+            Some(source.clone())
+        );
+        // While the song is still growing, only the packet stream exists.
+        let mut growing = task.clone();
+        growing.status = DownloadStatus::Streaming;
+        assert_eq!(public_task(&state, &growing).alac_source_url, None);
+
+        let folder = audio_work_dir(&state, &task.work_id);
+        fs::create_dir_all(&folder).await.unwrap();
+        let m4a = b"\0\0\0\x10ftypM4A \0\0\0\0stored";
+        fs::write(folder.join(task.filename.as_deref().unwrap()), m4a)
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=4-7".parse().unwrap());
+        let rev = source.split("rev=").nth(1).unwrap().to_string();
+        let response = download_source(
+            State(state.clone()),
+            Path(task.id.clone()),
+            Query(MediaVersionQuery { rev: Some(rev) }),
+            headers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "audio/mp4");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap(),
+            "ftyp"
+        );
+        // Serving the source never writes a packet sidecar.
+        let packet_path =
+            music::wasm_alac_stream_path(&folder.join(task.filename.as_deref().unwrap()));
+        assert!(fs::metadata(packet_path).await.is_err());
+
+        let stale = download_source(
+            State(state.clone()),
+            Path(task.id.clone()),
+            Query(MediaVersionQuery {
+                rev: Some("0".repeat(32)),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+        assert!(matches!(
+            stale,
+            Err(ApiError::Http {
+                status: StatusCode::CONFLICT,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn fourcc_patch_applies_to_any_range_without_changing_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("telegram.m4a");
+        let original = b"0123456789alacABCDEF".to_vec();
+        fs::write(&path, &original).await.unwrap();
+        for (range, expected) in [
+            (None, "0123456789mp4aABCDEF"),
+            (Some("bytes=11-15"), "p4aAB"),
+            (Some("bytes=0-11"), "0123456789mp"),
+            (Some("bytes=15-"), "BCDEF"),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some(range) = range {
+                headers.insert(header::RANGE, range.parse().unwrap());
+            }
+            let response =
+                stream_local_file_patched(&path, "a.m4a", "audio/mp4", &headers, Some(10))
+                    .await
+                    .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(body, expected, "{range:?}");
+        }
+        assert_eq!(fs::read(&path).await.unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_stream_leftovers_of_finished_downloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path().join("song--1");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "a.m4a",
+            "a.m4a.streaming",
+            "a.m4a.streaming.assembled",
+            "a.m4a.streaming.alacstream",
+        ] {
+            std::fs::write(dir.join(name), vec![0; 10]).unwrap();
+        }
+        let fresh = audio_cache::remove_stream_leftovers(&dir, SystemTime::now()).await;
+        assert_eq!(
+            fresh, 0,
+            "a download that just finished keeps its stream files"
+        );
+        let later = SystemTime::now() + Duration::from_secs(3600);
+        assert_eq!(audio_cache::remove_stream_leftovers(&dir, later).await, 20);
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["a.m4a", "a.m4a.streaming.alacstream"]);
     }
 
     #[test]

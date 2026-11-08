@@ -87,3 +87,14 @@ test("IndexedDB keeps song/quality/representation identity independent of CDN or
   assert.notEqual(cacheKey(task), cacheKey({ ...task, streaming_mode: null }));
   assert.notEqual(cacheKey(task), cacheKey({ ...task, quality: "lossless" }));
 });
+
+test("completed WASM songs read the stored ALAC M4A; the packet handoff keeps its endpoint", () => {
+  const withSource = { ...task, alac_source_url: "/api/v1/playbacks/applemusic--123--hires/audio/source?rev=source-a" };
+  assert.equal(playbackAudioUrl(withSource, config),
+    "https://media.example.test/api/v1/playbacks/applemusic--123--hires/audio/source?rev=source-a&v=applemusic--123--hires");
+  assert.equal(playbackAudioUrl(withSource, { ...config, packets: true }),
+    "https://media.example.test/api/v1/playbacks/applemusic--123--hires/audio/stream?rev=packet-a&v=applemusic--123--hires");
+  // A growing song has no stored file yet, and native clients never use it.
+  assert.match(playbackAudioUrl({ ...withSource, status: "streaming" }, config), /\/audio\/stream\?/);
+  assert.match(playbackAudioUrl({ ...withSource, streaming_mode: null }, config), /\/audio\?rev=native-a/);
+});

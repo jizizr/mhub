@@ -255,11 +255,10 @@ export function getTrackLyrics(track, options = {}) {
   return request(`${API}/lyrics?${params}`, options).then((res) => res.json());
 }
 
-export function audioUrl(task) {
-  // wasm_alac tasks use the dedicated stream endpoint. It serves the
-  // same self-describing ALAC packet transport while growing and after
-  // completion; ordinary tasks keep the existing compatible /audio path.
-  return playbackAudioUrl(task);
+export function audioUrl(task, options) {
+  // wasm_alac tasks stream SPLALAC1 packets while growing and read the
+  // stored ALAC M4A once completed; ordinary tasks keep /audio.
+  return playbackAudioUrl(task, options);
 }
 
 export function coverUrl(task) {

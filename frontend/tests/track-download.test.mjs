@@ -97,3 +97,21 @@ test("a non-audio response is rejected", async () => {
     store: () => assert.fail("must not cache"),
   }), /不是可播放的音频/);
 });
+
+test("a lossless Apple Music download saves the M4A Telegram keeps, not a FLAC transcode", async () => {
+  const source = "/api/v1/playbacks/applemusic--1--lossless/audio/source?rev=s";
+  const requested = [];
+  const stored = [];
+  const plain = { ...alac, streaming_mode: "" };
+  const result = await resolveTrackDownload(plain, {
+    lookup: async () => null,
+    api: { getPlayback: async () => ({ ...plain, status: "completed", audio_url: "/api/v1/playbacks/applemusic--1--lossless/audio", alac_source_url: source }),
+      createPlayback: () => assert.fail("task exists") },
+    fetchImpl: async (url) => { requested.push(url); return new Response(m4a, { headers: { "content-type": "audio/mp4" } }); },
+    store: (...args) => stored.push(args),
+  });
+  assert.equal(requested.length, 1);
+  assert.match(requested[0], /\/audio\/source\?rev=s/);
+  assert.equal(result.filename, "歌 名 - 歌手.m4a");
+  assert.equal(stored.length, 0, "ALAC is not the native player's cache entry");
+});
