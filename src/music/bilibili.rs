@@ -1,4 +1,4 @@
-use super::provider::{MusicPlatform, MusicProvider, MusicSearchItem, MusicTrack, get_json};
+use super::provider::{CLIENT, MusicPlatform, MusicProvider, MusicSearchItem, MusicTrack};
 use crate::BotError;
 use async_trait::async_trait;
 use lazy_static::lazy_static;
@@ -9,6 +9,141 @@ use std::collections::HashMap;
 lazy_static! {
     static ref BILIBILI_BV_RE: Regex = Regex::new(r"(?i)(BV[a-zA-Z0-9]{10})").unwrap();
     static ref BILIBILI_TAG_RE: Regex = Regex::new(r"<[^>]+>").unwrap();
+    /// Anonymous device cookie (`buvid3`/`buvid4`), fetched once and reused.
+    static ref BUVID_COOKIE: tokio::sync::Mutex<String> = tokio::sync::Mutex::new(String::new());
+}
+
+/// A full desktop browser User-Agent. Bilibili's risk control answers 412 to
+/// a bare `Mozilla/5.0`; without the buvid device cookie it still rejects
+/// search some of the time and, from the origin, every view request.
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const REFERER: &str = "https://www.bilibili.com/";
+/// The upos CDN answers plain GET and HEAD with HTTP 567 and serves only
+/// bounded Range requests (MusicBot-Go `05df3b4` uses the same 4 MiB cap).
+const CDN_MAX_CHUNK: u64 = 4 * 1024 * 1024;
+
+fn browser_headers() -> HashMap<String, String> {
+    HashMap::from([
+        ("User-Agent".to_string(), BROWSER_USER_AGENT.to_string()),
+        ("Referer".to_string(), REFERER.to_string()),
+    ])
+}
+
+async fn get_bilibili_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, BotError> {
+    let cookie = buvid_cookie(false).await;
+    match get_with_cookie(url, &cookie).await {
+        // A device cookie the risk control has started rejecting: mint a
+        // fresh one once.
+        Err(BilibiliError::PreconditionFailed) => {
+            let fresh = buvid_cookie(true).await;
+            match get_with_cookie(url, &fresh).await {
+                Err(BilibiliError::PreconditionFailed) => Err(BotError::Custom(
+                    "Bilibili 风控拒绝了请求（HTTP 412）".to_string(),
+                )),
+                result => result.map_err(BilibiliError::into_bot),
+            }
+        }
+        result => result.map_err(BilibiliError::into_bot),
+    }
+}
+
+enum BilibiliError {
+    PreconditionFailed,
+    Other(BotError),
+}
+
+impl BilibiliError {
+    fn into_bot(self) -> BotError {
+        match self {
+            Self::PreconditionFailed => {
+                BotError::Custom("Bilibili 风控拒绝了请求（HTTP 412）".to_string())
+            }
+            Self::Other(err) => err,
+        }
+    }
+}
+
+async fn get_with_cookie<T: serde::de::DeserializeOwned>(
+    url: &str,
+    cookie: &str,
+) -> Result<T, BilibiliError> {
+    let mut request = CLIENT
+        .get(url)
+        .header("User-Agent", BROWSER_USER_AGENT)
+        .header("Referer", REFERER);
+    if !cookie.is_empty() {
+        request = request.header("Cookie", cookie);
+    }
+    let resp = request
+        .send()
+        .await
+        .map_err(|err| BilibiliError::Other(err.into()))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::PRECONDITION_FAILED {
+        return Err(BilibiliError::PreconditionFailed);
+    }
+    if !status.is_success() {
+        return Err(BilibiliError::Other(BotError::Custom(format!(
+            "Bilibili 接口请求失败：HTTP {status}"
+        ))));
+    }
+    resp.json()
+        .await
+        .map_err(|err| BilibiliError::Other(err.into()))
+}
+
+/// The cached buvid cookie, minting one from the fingerprint endpoint when
+/// empty or when `refresh` is set. An empty string means minting failed and
+/// the request goes out without it.
+async fn buvid_cookie(refresh: bool) -> String {
+    let mut cached = BUVID_COOKIE.lock().await;
+    if refresh || cached.is_empty() {
+        match fetch_buvid_cookie().await {
+            Some(cookie) => *cached = cookie,
+            None => tracing::warn!("Bilibili buvid cookie could not be fetched"),
+        }
+    }
+    cached.clone()
+}
+
+async fn fetch_buvid_cookie() -> Option<String> {
+    let resp = CLIENT
+        .get("https://api.bilibili.com/x/frontend/finger/spi")
+        .header("User-Agent", BROWSER_USER_AGENT)
+        .header("Referer", REFERER)
+        .send()
+        .await
+        .ok()?;
+    let spi: BilibiliSpiResponse = resp.json().await.ok()?;
+    let data = spi.data.filter(|_| spi.code == 0)?;
+    buvid_cookie_value(&data.b_3, &data.b_4)
+}
+
+fn buvid_cookie_value(buvid3: &str, buvid4: &str) -> Option<String> {
+    let buvid3 = buvid3.trim();
+    if buvid3.is_empty() {
+        return None;
+    }
+    let buvid4 = buvid4.trim();
+    Some(if buvid4.is_empty() {
+        format!("buvid3={buvid3}")
+    } else {
+        format!("buvid3={buvid3}; buvid4={}", urlencoding::encode(buvid4))
+    })
+}
+
+#[derive(Deserialize)]
+struct BilibiliSpiResponse {
+    code: i64,
+    data: Option<BilibiliSpiData>,
+}
+
+#[derive(Deserialize)]
+struct BilibiliSpiData {
+    #[serde(default)]
+    b_3: String,
+    #[serde(default)]
+    b_4: String,
 }
 
 pub static BILIBILI_PROVIDER: BilibiliProvider = BilibiliProvider;
@@ -22,7 +157,7 @@ impl MusicProvider for BilibiliProvider {
             "https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword={}&page=1",
             urlencoding::encode(keyword)
         );
-        let response: BilibiliSearchResponse = get_json(&url).await?;
+        let response: BilibiliSearchResponse = get_bilibili_json(&url).await?;
         ensure_bilibili_ok(response.code, &response.message)?;
         Ok(response
             .data
@@ -37,7 +172,11 @@ impl MusicProvider for BilibiliProvider {
                     id: bvid,
                     song: strip_html_tags(&item.title),
                     singer: item.author.unwrap_or_else(|| "未知 UP".to_string()),
-                    cover: String::new(),
+                    cover: item
+                        .pic
+                        .as_deref()
+                        .map(normalize_bilibili_image)
+                        .unwrap_or_default(),
                 })
             })
             .collect())
@@ -64,12 +203,6 @@ impl MusicProvider for BilibiliProvider {
         };
         let view = get_video_view(&bvid).await?;
         let audio = get_video_audio(&view.bvid, view.cid).await?;
-        let mut headers = HashMap::new();
-        headers.insert(
-            "Referer".to_string(),
-            "https://www.bilibili.com/".to_string(),
-        );
-        headers.insert("User-Agent".to_string(), "Mozilla/5.0".to_string());
         Ok(MusicTrack {
             id: view.bvid.clone(),
             platform: MusicPlatform::Bilibili,
@@ -81,15 +214,15 @@ impl MusicProvider for BilibiliProvider {
             album: String::new(),
             cover: normalize_bilibili_image(&view.pic),
             link: format!("https://www.bilibili.com/video/{}", view.bvid),
-            url: audio,
-            headers,
-            max_chunk_size: None,
+            url: audio.url,
+            headers: browser_headers(),
+            max_chunk_size: Some(CDN_MAX_CHUNK),
             replay_gain_centi_db: None,
             duration: view
                 .duration
                 .filter(|duration| *duration > 0)
                 .map(|duration| duration as u32),
-            bitrate: None,
+            bitrate: audio.bandwidth,
             format: Some("m4a".to_string()),
         })
     }
@@ -114,6 +247,7 @@ struct BilibiliSearchItem {
     bvid: Option<String>,
     title: String,
     author: Option<String>,
+    pic: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -172,34 +306,64 @@ async fn get_video_view(bvid: &str) -> Result<BilibiliViewData, BotError> {
         "https://api.bilibili.com/x/web-interface/view?bvid={}",
         urlencoding::encode(bvid)
     );
-    let response: BilibiliViewResponse = get_json(&url).await?;
+    let response: BilibiliViewResponse = get_bilibili_json(&url).await?;
     ensure_bilibili_ok(response.code, &response.message)?;
     response
         .data
         .ok_or_else(|| BotError::Custom("没有找到 Bilibili 视频信息".to_string()))
 }
 
-async fn get_video_audio(bvid: &str, cid: i64) -> Result<String, BotError> {
+struct VideoAudio {
+    url: String,
+    bandwidth: Option<u32>,
+}
+
+async fn get_video_audio(bvid: &str, cid: i64) -> Result<VideoAudio, BotError> {
     let url = format!(
         "https://api.bilibili.com/x/player/playurl?bvid={}&cid={cid}&qn=16&fnval=16",
         urlencoding::encode(bvid)
     );
-    let response: BilibiliPlayResponse = get_json(&url).await?;
+    let response: BilibiliPlayResponse = get_bilibili_json(&url).await?;
     ensure_bilibili_ok(response.code, &response.message)?;
     response
         .data
         .and_then(|data| data.dash)
         .and_then(|dash| {
+            // AAC only: the Dolby (E-AC-3) and member FLAC tracks are not in
+            // `dash.audio` and most browsers cannot play E-AC-3.
             dash.audio
                 .into_iter()
                 .max_by_key(|audio| audio.bandwidth.unwrap_or_default())
-                .and_then(|audio| {
-                    audio
-                        .base_url
-                        .or_else(|| audio.backup_url.into_iter().next())
-                })
+        })
+        .and_then(|audio| {
+            let bandwidth = audio
+                .bandwidth
+                .and_then(|bandwidth| u32::try_from(bandwidth).ok())
+                .filter(|bandwidth| *bandwidth > 0);
+            pick_cdn_url(audio.base_url.into_iter().chain(audio.backup_url))
+                .map(|url| VideoAudio { url, bandwidth })
         })
         .ok_or_else(|| BotError::Custom("没有拿到 Bilibili 音频链接".to_string()))
+}
+
+/// Prefers Bilibili's own upos mirrors over Akamai, which MusicBot-Go blocks
+/// for unreliable transfers; Akamai is still used when it is the only choice.
+fn pick_cdn_url(urls: impl Iterator<Item = String>) -> Option<String> {
+    let urls: Vec<String> = urls
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .collect();
+    urls.iter()
+        .find(|url| !is_akamai(url))
+        .or_else(|| urls.first())
+        .cloned()
+}
+
+fn is_akamai(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host.contains("akamai"))
 }
 
 fn ensure_bilibili_ok(code: i64, message: &str) -> Result<(), BotError> {
@@ -228,5 +392,66 @@ fn normalize_bilibili_image(url: &str) -> String {
         format!("https:{url}")
     } else {
         url.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_upos_mirrors_over_akamai() {
+        let urls = [
+            "https://upos-hz-mirrorakam.akamaized.net/a.m4s".to_string(),
+            " ".to_string(),
+            "https://upos-sz-mirrorcosov.bilivideo.com/a.m4s".to_string(),
+        ];
+        assert_eq!(
+            pick_cdn_url(urls.into_iter()).as_deref(),
+            Some("https://upos-sz-mirrorcosov.bilivideo.com/a.m4s")
+        );
+        let only_akamai = ["https://upos-hz-mirrorakam.akamaized.net/a.m4s".to_string()];
+        assert_eq!(
+            pick_cdn_url(only_akamai.into_iter()).as_deref(),
+            Some("https://upos-hz-mirrorakam.akamaized.net/a.m4s")
+        );
+        assert_eq!(pick_cdn_url(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn builds_buvid_cookie_with_encoded_buvid4() {
+        assert_eq!(
+            buvid_cookie_value("ABC-123infoc", "x/y=z").as_deref(),
+            Some("buvid3=ABC-123infoc; buvid4=x%2Fy%3Dz")
+        );
+        assert_eq!(
+            buvid_cookie_value("ABC", " ").as_deref(),
+            Some("buvid3=ABC")
+        );
+        assert_eq!(buvid_cookie_value(" ", "x"), None);
+    }
+
+    #[test]
+    fn api_requests_send_a_full_browser_identity() {
+        let headers = browser_headers();
+        assert!(headers["User-Agent"].contains("Chrome/"));
+        assert_eq!(headers["Referer"], "https://www.bilibili.com/");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili access"]
+    async fn live_search_resolve_and_download() {
+        let items = BILIBILI_PROVIDER.search("晴天 周杰伦", 3).await.unwrap();
+        let first = items.first().expect("search result");
+        assert!(!first.cover.is_empty());
+        let track = BILIBILI_PROVIDER
+            .resolve(&first.song, Some(&first.id))
+            .await
+            .unwrap();
+        assert_eq!(track.max_chunk_size, Some(CDN_MAX_CHUNK));
+        let media = super::super::provider::download_track_media(&track)
+            .await
+            .unwrap();
+        assert!(media.audio.len() > 1024 * 1024);
     }
 }
