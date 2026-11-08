@@ -233,9 +233,186 @@ pub fn needs_browser_lossless_derivative(
     matches!(format.as_str(), "m4a" | "mp4" | "alac") || content_type.contains("mp4")
 }
 
+/// Older Apple Music downloads labelled decrypted AAC as `alac` in the MP4
+/// sample entry. Chromium decodes from `esds` regardless; Safari/CoreAudio
+/// trust the fourcc and reject the file. Returns the byte offset of such a
+/// mislabelled fourcc inside `header` (which must start at the file's first
+/// byte and contain the whole `moov`), or `None` when the file is fine.
+pub fn mislabeled_aac_entry_offset(header: &[u8]) -> Option<usize> {
+    fn boxes(
+        data: &[u8],
+        start: usize,
+        end: usize,
+    ) -> impl Iterator<Item = (usize, [u8; 4], usize)> + '_ {
+        let mut pos = start;
+        std::iter::from_fn(move || {
+            if pos + 8 > end {
+                return None;
+            }
+            let size = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+            let typ: [u8; 4] = data[pos + 4..pos + 8].try_into().ok()?;
+            let (header_len, size) = match size {
+                1 => {
+                    let large = u64::from_be_bytes(data.get(pos + 8..pos + 16)?.try_into().ok()?);
+                    (16, usize::try_from(large).ok()?)
+                }
+                0 => (8, end - pos),
+                size => (8, size),
+            };
+            if size < header_len || pos + size > end {
+                return None;
+            }
+            let item = (pos, typ, pos + size);
+            pos += size;
+            Some(item)
+        })
+    }
+    fn child(data: &[u8], start: usize, end: usize, want: &[u8; 4]) -> Option<(usize, usize)> {
+        boxes(data, start, end)
+            .find(|(_, typ, _)| typ == want)
+            .map(|(pos, _, end)| (pos, end))
+    }
+    let (moov, moov_end) = child(header, 0, header.len(), b"moov")?;
+    for (trak, typ, trak_end) in boxes(header, moov + 8, moov_end) {
+        if &typ != b"trak" {
+            continue;
+        }
+        let Some(stsd) = child(header, trak + 8, trak_end, b"mdia")
+            .and_then(|(mdia, end)| child(header, mdia + 8, end, b"minf"))
+            .and_then(|(minf, end)| child(header, minf + 8, end, b"stbl"))
+            .and_then(|(stbl, end)| child(header, stbl + 8, end, b"stsd"))
+        else {
+            continue;
+        };
+        for (entry, typ, entry_end) in boxes(header, stsd.0 + 16, stsd.1) {
+            // Audio sample entries carry 28 bytes of fixed fields.
+            if &typ == b"alac" && child(header, entry + 36, entry_end, b"esds").is_some() {
+                return Some(entry + 4);
+            }
+        }
+    }
+    None
+}
+
+/// Rewrites a mislabelled AAC sample entry in place (four bytes, same size).
+/// Only the leading boxes are read, up to the end of a `moov` within the
+/// first 4 MiB; a file is checked once per process.
+pub async fn repair_mislabeled_aac(path: &Path) -> std::io::Result<bool> {
+    use std::collections::HashSet;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+    static CHECKED: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+    const LIMIT: usize = 4 * 1024 * 1024;
+    if CHECKED.lock().unwrap().contains(path) {
+        return Ok(false);
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .await?;
+    let mut header = Vec::new();
+    // Walk top-level boxes until `moov` is fully read.
+    let mut pos = 0usize;
+    loop {
+        if header.len() < pos + 16 {
+            let want = (pos + 16).max(header.len() + 64 * 1024).min(LIMIT);
+            if want <= header.len() {
+                break;
+            }
+            let read = (&mut file)
+                .take((want - header.len()) as u64)
+                .read_to_end(&mut header)
+                .await?;
+            if read == 0 && header.len() < pos + 8 {
+                break;
+            }
+        }
+        if header.len() < pos + 8 {
+            break;
+        }
+        let size = u32::from_be_bytes(header[pos..pos + 4].try_into().unwrap()) as usize;
+        let typ = &header[pos + 4..pos + 8];
+        if size < 8 || typ == b"mdat" {
+            break;
+        }
+        if typ == b"moov" {
+            let end = pos + size;
+            if end > LIMIT {
+                break;
+            }
+            if header.len() < end {
+                (&mut file)
+                    .take((end - header.len()) as u64)
+                    .read_to_end(&mut header)
+                    .await?;
+            }
+            break;
+        }
+        pos += size;
+    }
+    let offset = mislabeled_aac_entry_offset(&header);
+    if let Some(offset) = offset {
+        file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
+        file.write_all(b"mp4a").await?;
+        file.sync_data().await?;
+    }
+    CHECKED.lock().unwrap().insert(path.to_path_buf());
+    Ok(offset.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_box(typ: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(typ);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn movie_with_entry(entry_type: &[u8; 4], config: &[u8; 4]) -> Vec<u8> {
+        let entry = test_box(
+            entry_type,
+            &[vec![0u8; 28], test_box(config, &[0u8; 12])].concat(),
+        );
+        let stsd = test_box(b"stsd", &[vec![0, 0, 0, 0, 0, 0, 0, 1], entry].concat());
+        let stbl = test_box(b"stbl", &stsd);
+        let minf = test_box(b"minf", &[test_box(b"smhd", &[0u8; 8]), stbl].concat());
+        let mdia = test_box(b"mdia", &[test_box(b"mdhd", &[0u8; 24]), minf].concat());
+        let trak = test_box(b"trak", &[test_box(b"tkhd", &[0u8; 84]), mdia].concat());
+        let moov = test_box(b"moov", &[test_box(b"mvhd", &[0u8; 100]), trak].concat());
+        [
+            test_box(b"ftyp", b"iso5\0\0\0\x01"),
+            moov,
+            test_box(b"mdat", &[1, 2, 3]),
+        ]
+        .concat()
+    }
+
+    #[tokio::test]
+    async fn mislabeled_aac_entry_is_repaired_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("track.m4a");
+        let original = movie_with_entry(b"alac", b"esds");
+        fs::write(&path, &original).await.unwrap();
+
+        assert!(repair_mislabeled_aac(&path).await.unwrap());
+        let repaired = fs::read(&path).await.unwrap();
+        assert_eq!(repaired.len(), original.len());
+        assert_eq!(repaired, movie_with_entry(b"mp4a", b"esds"));
+        assert!(!repair_mislabeled_aac(&path).await.unwrap());
+
+        // Real ALAC and correct AAC entries stay untouched.
+        assert_eq!(
+            mislabeled_aac_entry_offset(&movie_with_entry(b"alac", b"alac")),
+            None
+        );
+        assert_eq!(
+            mislabeled_aac_entry_offset(&movie_with_entry(b"mp4a", b"esds")),
+            None
+        );
+    }
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,

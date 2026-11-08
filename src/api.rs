@@ -2,7 +2,7 @@ use crate::{
     ApiError, ApiResult,
     audio::{
         BrowserAudioService, PendingAudioFile, ensure_audio_file, lock_audio_path,
-        needs_browser_lossless_derivative, valid_audio_file,
+        needs_browser_lossless_derivative, repair_mislabeled_aac, valid_audio_file,
     },
     audio_cache,
     cache::{MusicCache, find_music_cache, upsert_music_cache},
@@ -1430,6 +1430,10 @@ fn media_revision(task: &DownloadTask, packets: bool) -> String {
     // files and SPLALAC packet files must never share a CDN cache entry.
     let representation = if packets {
         "splayer-alac-v2"
+    } else if task.platform == "applemusic" {
+        // v2: AAC sample entries are relabelled from `alac` to `mp4a`, which
+        // Safari needs; cached v1 bytes must not be served from the CDN.
+        "native-v2"
     } else {
         "native-v1"
     };
@@ -2228,6 +2232,17 @@ enum FileKind {
     Cover,
 }
 
+async fn repair_cached_aac(path: &FsPath) {
+    match repair_mislabeled_aac(path).await {
+        Ok(true) => tracing::info!("relabelled AAC sample entry in {}", path.display()),
+        Ok(false) => {}
+        Err(err) => tracing::warn!(
+            "failed to check AAC sample entry in {}: {err}",
+            path.display()
+        ),
+    }
+}
+
 async fn serve_task_file(
     state: AppState,
     id: String,
@@ -2243,9 +2258,14 @@ async fn serve_task_file(
     }
 
     let filename = match kind {
-        FileKind::Audio => task.filename,
-        FileKind::Cover => task.cover_filename,
+        FileKind::Audio => task.filename.clone(),
+        FileKind::Cover => task.cover_filename.clone(),
     };
+    let mp4_audio = matches!(kind, FileKind::Audio)
+        && filename.as_deref().is_some_and(|name| {
+            let name = name.to_ascii_lowercase();
+            name.ends_with(".m4a") || name.ends_with(".mp4")
+        });
 
     if let Some(filename) = filename.as_deref() {
         let path = state
@@ -2261,6 +2281,18 @@ async fn serve_task_file(
             .await
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
         {
+            if mp4_audio {
+                repair_cached_aac(&path).await;
+            }
+            let content_type = content_type(&path);
+            return stream_local_file(&path, filename, &content_type, headers).await;
+        }
+        // Apple Music AAC cached on Telegram before the sample-entry fix is
+        // mislabelled `alac`, which Safari refuses. Restore it locally so it
+        // can be repaired, instead of streaming the old bytes through.
+        if mp4_audio && task.platform == "applemusic" {
+            let path = ensure_local_audio_file(&state, &task).await?;
+            repair_cached_aac(&path).await;
             let content_type = content_type(&path);
             return stream_local_file(&path, filename, &content_type, headers).await;
         }

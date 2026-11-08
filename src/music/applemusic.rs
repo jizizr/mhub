@@ -4861,21 +4861,43 @@ fn sanitize_stsd(data: &[u8], stsd: Mp4Box) -> Result<Vec<u8>, BotError> {
     Ok(build_box(b"stsd", out_payload))
 }
 
-fn sanitize_sample_entry(data: &[u8], entry: Mp4Box) -> Result<Vec<u8>, BotError> {
-    let mut typ = entry.typ;
-    if &entry.typ == b"enca" || &entry.typ == b"encv" {
-        if let Some(frma) = find_box_recursive(data, entry.payload_start(), entry.end(), b"frma") {
-            let body = &data[frma.payload_start()..frma.end()];
-            if body.len() >= 4 {
-                typ.copy_from_slice(&body[..4]);
-            } else if &entry.typ == b"enca" {
-                typ.copy_from_slice(b"alac");
-            }
-        } else if &entry.typ == b"enca" {
-            typ.copy_from_slice(b"alac");
+/// The clear fourcc of an encrypted sample entry. `frma` lives in `sinf`,
+/// after the entry's fixed fields, so the search starts at its children;
+/// starting at the payload parses the fixed fields as boxes and finds
+/// nothing. Without `frma`, infer the codec from its config box: labelling
+/// AAC as `alac` makes Safari/CoreAudio reject the file even though
+/// Chromium decodes it from `esds`.
+fn original_sample_entry_type(data: &[u8], entry: Mp4Box) -> [u8; 4] {
+    let child_start = match &entry.typ {
+        b"enca" => entry.payload_start() + 28,
+        b"encv" => entry.payload_start() + 78,
+        _ => return entry.typ,
+    };
+    let end = entry.end();
+    if let Some(frma) = find_box_recursive(data, child_start, end, b"frma") {
+        let body = &data[frma.payload_start()..frma.end()];
+        if body.len() >= 4 {
+            return [body[0], body[1], body[2], body[3]];
         }
     }
+    if &entry.typ == b"encv" {
+        return entry.typ;
+    }
+    for (config, codec) in [
+        (b"esds", *b"mp4a"),
+        (b"dec3", *b"ec-3"),
+        (b"dac3", *b"ac-3"),
+        (b"alac", *b"alac"),
+    ] {
+        if find_box_recursive(data, child_start, end, config).is_some() {
+            return codec;
+        }
+    }
+    *b"alac"
+}
 
+fn sanitize_sample_entry(data: &[u8], entry: Mp4Box) -> Result<Vec<u8>, BotError> {
+    let typ = original_sample_entry_type(data, entry);
     let fixed = match &entry.typ {
         b"enca" | b"mp4a" | b"alac" => 28,
         b"encv" => 78,
@@ -6536,6 +6558,57 @@ track.m4a
         let entry = read_mp4_box(&sanitized, 16).unwrap().unwrap();
         assert_eq!(&entry.typ, b"alac");
         assert_eq!(entry.end(), sanitized.len());
+    }
+
+    #[test]
+    fn sanitized_encrypted_aac_entry_keeps_its_codec() {
+        fn mp4_box(typ: &[u8; 4], payload: Vec<u8>) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&((payload.len() + 8) as u32).to_be_bytes());
+            out.extend_from_slice(typ);
+            out.extend_from_slice(&payload);
+            out
+        }
+        fn stsd_with(entry: Vec<u8>) -> Vec<u8> {
+            let mut payload = vec![0, 0, 0, 0];
+            payload.extend_from_slice(&1u32.to_be_bytes());
+            payload.extend_from_slice(&entry);
+            mp4_box(b"stsd", payload)
+        }
+        fn sanitized_type(data: &[u8]) -> [u8; 4] {
+            let stsd = read_mp4_box(data, 0).unwrap().unwrap();
+            let sanitized = sanitize_stsd(data, stsd).unwrap();
+            let entry = read_mp4_box(&sanitized, 16).unwrap().unwrap();
+            assert!(
+                find_box_recursive(&sanitized, 16 + 8 + 28, sanitized.len(), b"sinf").is_none()
+            );
+            entry.typ
+        }
+
+        // Fixed fields that do not parse as a box, as in Apple's AAC entries.
+        let mut fixed = vec![0u8; 28];
+        fixed[6..8].copy_from_slice(&1u16.to_be_bytes());
+        fixed[16..18].copy_from_slice(&2u16.to_be_bytes());
+        fixed[18..20].copy_from_slice(&16u16.to_be_bytes());
+        fixed[24..26].copy_from_slice(&44100u16.to_be_bytes());
+        let esds = mp4_box(b"esds", vec![0u8; 12]);
+        let sinf = mp4_box(
+            b"sinf",
+            [
+                mp4_box(b"frma", b"mp4a".to_vec()),
+                mp4_box(b"schm", vec![0u8; 12]),
+            ]
+            .concat(),
+        );
+
+        let with_frma = stsd_with(mp4_box(
+            b"enca",
+            [fixed.clone(), esds.clone(), sinf].concat(),
+        ));
+        assert_eq!(&sanitized_type(&with_frma), b"mp4a");
+
+        let without_frma = stsd_with(mp4_box(b"enca", [fixed, esds].concat()));
+        assert_eq!(&sanitized_type(&without_frma), b"mp4a");
     }
 
     #[test]

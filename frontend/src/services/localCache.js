@@ -1,3 +1,5 @@
+import { repairMislabeledAacBlob } from "../utils/mp4-sample-entry.js";
+
 const DB_NAME = "music-splayer-web-cache-v1";
 const STORE = "tracks";
 const LIMIT_BYTES = 1_500 * 1024 * 1024;
@@ -80,8 +82,26 @@ export function cacheKey(task) {
   return base;
 }
 
-export function getCachedTrack(key) {
-  return tx("readonly", (store) => store.get(key));
+export async function getCachedTrack(key) {
+  return repairCachedAac(key, await tx("readonly", (store) => store.get(key)));
+}
+
+// Apple Music AAC cached before the server relabelled its sample entry is
+// rejected by Safari. Fix the stored Blob once; other browsers are unaffected.
+async function repairCachedAac(key, item) {
+  if (!String(key).startsWith("applemusic:") || item?.aac_checked || !hasCachedAudio(item)) return item;
+  const repaired = await repairMislabeledAacBlob(item.blob).catch(() => null);
+  const next = { ...item, aac_checked: true, ...(repaired ? { blob: repaired } : {}) };
+  void tx("readwrite", (store) => {
+    const request = store.get(key);
+    request.onsuccess = () => {
+      // Only update the record that was checked, never a newer download.
+      if (request.result?.blob?.size === item.blob.size) {
+        store.put({ ...request.result, aac_checked: true, ...(repaired ? { blob: repaired } : {}) }, key);
+      }
+    };
+  }).catch(() => {});
+  return next;
 }
 
 export async function putCachedTrack(key, value) {
