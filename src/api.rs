@@ -2497,7 +2497,7 @@ async fn stream_growing_audio_file(
             .unwrap_or_else(|| "audio/mp4".to_string())
     };
     let mut response = Response::builder()
-        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_TYPE, browser_audio_type(&content_type))
         .header(header::CACHE_CONTROL, "no-store, no-transform")
         .header("X-Accel-Buffering", "no")
         .header(
@@ -2679,7 +2679,7 @@ async fn stream_local_file(
     let stream_id = audio_stream_identity(&metadata);
     let disposition = format!("inline; filename=\"{}\"", ascii_filename(filename));
     let mut response = Response::builder()
-        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_TYPE, browser_audio_type(&content_type))
         .header(header::CONTENT_DISPOSITION, disposition)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CACHE_CONTROL, "public, max-age=86400, no-transform");
@@ -2861,6 +2861,16 @@ fn ascii_filename(value: &str) -> String {
         .collect()
 }
 
+/// `audio/m4a` (mime_guess's answer for `.m4a`) is not a type WebKit knows:
+/// Safari refuses an `/audio` URL served with it, as it cannot fall back to
+/// the file extension. Send the registered MP4 audio type instead.
+fn browser_audio_type(content_type: &str) -> String {
+    match content_type.trim().to_ascii_lowercase().as_str() {
+        "audio/m4a" | "audio/x-m4a" | "audio/m4a-latm" => "audio/mp4".to_string(),
+        _ => content_type.to_string(),
+    }
+}
+
 fn content_type(path: &FsPath) -> String {
     mime_guess::from_path(path)
         .first_or_octet_stream()
@@ -2934,7 +2944,7 @@ async fn stream_telegram_file(
         } else {
             StatusCode::OK
         })
-        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_TYPE, browser_audio_type(&content_type))
         .header(
             header::CONTENT_DISPOSITION,
             format!("inline; filename=\"{}\"", ascii_filename(filename)),
@@ -3190,6 +3200,15 @@ fn serve_web() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m4a_audio_is_served_as_registered_mp4_type() {
+        assert_eq!(content_type(FsPath::new("a.m4a")), "audio/m4a");
+        assert_eq!(browser_audio_type("audio/m4a"), "audio/mp4");
+        assert_eq!(browser_audio_type("audio/x-m4a"), "audio/mp4");
+        assert_eq!(browser_audio_type("audio/flac"), "audio/flac");
+        assert_eq!(browser_audio_type("audio/mp4"), "audio/mp4");
+    }
 
     #[test]
     fn recommendation_exclusions_are_bounded_unique_catalog_ids() {
