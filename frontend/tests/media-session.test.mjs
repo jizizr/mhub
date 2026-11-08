@@ -269,3 +269,38 @@ test("each platform CDN is asked for a rendition it serves; unknown hosts are le
   assert.equal(systemArtwork("https://example.test/art/test.webp"), null);
   assert.equal(systemArtwork("blob:https://example.test/1234"), null);
 });
+
+test("buffering holds the system progress at the target while keeping the playing controls", () => {
+  const h = fixture();
+  h.controller.update();
+  assert.equal(h.values.positions.at(-1).playbackRate, 1);
+  // A system seek lands beyond the download: no sound until the data arrives.
+  h.current.state = "buffering";
+  h.current.position = 90000;
+  h.controller.update();
+  const held = h.values.positions.at(-1);
+  assert.equal(held.position, 90);
+  assert.ok(held.playbackRate > 0 && held.playbackRate < 1e-3, "near-zero rate freezes OS extrapolation");
+  assert.equal(h.values.playbackState.at(-1), "playing", "the pause control and background eligibility stay");
+  h.advance(5000);
+  h.controller.syncPosition();
+  assert.deepEqual(h.values.positions.at(-1), held, "later updates keep holding the target");
+  // Audio renders from the target: the real rate is published at once.
+  h.current.state = "playing";
+  h.controller.update();
+  assert.equal(h.values.positions.at(-1).playbackRate, 1);
+  assert.equal(h.values.positions.at(-1).position, 90);
+});
+
+test("a browser rejecting the near-zero rate still receives the held position", () => {
+  const h = fixture();
+  const accepted = h.session.setPositionState;
+  h.session.setPositionState = (value) => {
+    if (value.playbackRate < 1e-3) throw new TypeError("rate");
+    accepted(value);
+  };
+  h.current.state = "buffering";
+  h.current.position = 30000;
+  h.controller.update();
+  assert.deepEqual(h.values.positions.at(-1), { duration: 120, playbackRate: 1, position: 30 });
+});

@@ -36,6 +36,8 @@ export function systemArtwork(src) {
   return null;
 }
 
+const BUFFERING_RATE = 1e-6;
+
 // Media Session supplies the browser's media controls; it does not use the
 // Notification API and does not request notification permission. Each optional
 // browser operation is isolated so system controls can never break playback.
@@ -202,9 +204,15 @@ export function createMediaSessionController({
     }
     const rawPosition = Number(current.position) / 1000;
     const rawRate = Number(current.speed);
+    const rate = Number.isFinite(rawRate) && rawRate > 0 ? rawRate : 1;
     const value = {
       duration,
-      playbackRate: Number.isFinite(rawRate) && rawRate > 0 ? rawRate : 1,
+      // While buffering (a seek ahead of the download, an underrun) no sound
+      // plays, but the session stays "playing" so the pause control and
+      // Android's background eligibility remain. The OS extrapolates the
+      // position from the rate, so a near-zero rate holds the system progress
+      // at the target instead of running ahead of the music (0 is invalid).
+      playbackRate: current.state === "buffering" ? BUFFERING_RATE : rate,
       position: Number.isFinite(rawPosition) ? Math.min(Math.max(rawPosition, 0), duration) : 0,
     };
     const timestamp = now();
@@ -220,7 +228,15 @@ export function createMediaSessionController({
       session.setPositionState(value);
       lastPosition = { ...value, timestamp, mode };
       positionCleared = false;
-    } catch { /* a rejected system progress update is never a playback error */ }
+    } catch {
+      // A browser rejecting the near-zero rate still gets the position.
+      if (value.playbackRate !== BUFFERING_RATE) return;
+      try {
+        session.setPositionState({ ...value, playbackRate: rate });
+        lastPosition = { ...value, playbackRate: rate, timestamp, mode };
+        positionCleared = false;
+      } catch { /* a rejected system progress update is never a playback error */ }
+    }
   }
 
   function update(track = state().track) {
