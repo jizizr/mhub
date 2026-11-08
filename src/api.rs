@@ -1431,11 +1431,12 @@ fn media_revision(task: &DownloadTask, packets: bool) -> String {
     let representation = if packets {
         "splayer-alac-v2"
     } else if task.platform == "applemusic" {
-        // v2: AAC sample entries are relabelled from `alac` to `mp4a`, which
-        // Safari needs; cached v1 bytes must not be served from the CDN.
-        "native-v2"
+        // v2 relabelled AAC sample entries `alac` -> `mp4a`; v3 also serves
+        // m4a as audio/mp4. Safari needs both; the CDN keeps headers too.
+        "native-v3"
     } else {
-        "native-v1"
+        // v2: m4a is served as audio/mp4 instead of audio/m4a.
+        "native-v2"
     };
     format!(
         "{:x}",
