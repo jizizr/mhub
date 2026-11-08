@@ -8,20 +8,53 @@ const activeAudioDownloads = new Map();
 
 function openDb() {
   if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
+  const pending = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);
     request.onupgradeneeded = () => request.result.createObjectStore(STORE);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      // Safari closes idle or backgrounded connections on its own; a cached
+      // handle then throws "The database connection is closing" on the next
+      // transaction.  Forget it so the next call reopens.
+      const forget = () => {
+        if (dbPromise === pending) dbPromise = null;
+      };
+      db.onclose = forget;
+      db.onversionchange = () => {
+        forget();
+        db.close();
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      if (dbPromise === pending) dbPromise = null;
+      reject(request.error);
+    };
   });
-  return dbPromise;
+  dbPromise = pending;
+  return pending;
+}
+
+// Start a transaction, reopening once when the cached connection was closed
+// by the browser without a close event (WebKit does this).
+async function openTransaction(mode) {
+  const db = await openDb();
+  try {
+    return db.transaction(STORE, mode);
+  } catch (error) {
+    if (error?.name !== "InvalidStateError") throw error;
+    if (dbPromise) {
+      const cached = await dbPromise.catch(() => null);
+      if (cached === db) dbPromise = null;
+    }
+    return (await openDb()).transaction(STORE, mode);
+  }
 }
 
 function tx(mode, handler) {
-  return openDb().then(
-    (db) =>
+  return openTransaction(mode).then(
+    (transaction) =>
       new Promise((resolve, reject) => {
-        const transaction = db.transaction(STORE, mode);
         const result = handler(transaction.objectStore(STORE));
         transaction.oncomplete = () => resolve(
           result && typeof result === "object" && "result" in result ? result.result : result,
@@ -260,9 +293,8 @@ export function deleteCachedTrack(key) {
 }
 
 export async function listCachedTracks() {
-  const db = await openDb();
+  const transaction = await openTransaction("readonly");
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE, "readonly");
     const request = transaction.objectStore(STORE).getAll();
     request.onsuccess = () => {
       resolve(
