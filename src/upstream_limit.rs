@@ -85,8 +85,8 @@ impl Kind {
 pub enum Mode {
     Off,
     /// Keep the books and log, never wait or refuse.
-    #[default]
     Shadow,
+    #[default]
     Enforce,
 }
 
@@ -123,6 +123,7 @@ impl Quota {
 /// halved (2026-11-09), and download/lyrics tightened again after replaying
 /// the shadow log: a scraper at ~7 songs a minute now runs dry within about
 /// five minutes, while no other client of that evening came near a limit.
+/// The download burst went down to 20 once enforced (2026-11-09).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -142,11 +143,11 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            mode: Mode::Shadow,
+            mode: Mode::Enforce,
             trusted_proxies: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
             max_wait_ms: 3000,
             // Ordinary peak: 59 playback starts in ten minutes.
-            download: Quota::new(30.0, 1.0),
+            download: Quota::new(20.0, 1.0),
             // Ordinary peak: 40 searches in ten minutes, 27 in one.
             search: Quota::new(20.0, 2.0),
             // A match request carries 25 songs and up to two searches each;
