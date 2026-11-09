@@ -550,7 +550,26 @@ async fn resolve_apple_track(
         .duration_in_millis
         .filter(|duration| *duration > 0)
         .map(|duration| ((duration + 500) / 1000) as u32);
-    let download_url = get_apple_download_url_with_quality(&id, quality, expected_duration).await?;
+    // Some catalog songs exist only as lossy AAC (no lossless trait and no
+    // enhancedHls master), so a lossless request could never succeed. Serve
+    // High and report it, as QQ does for a missing tier. A song the catalog
+    // does list as lossless still fails loudly if decryption breaks.
+    let served_quality = lossy_only_substitute(quality, &attrs.audio_traits);
+    if let Some(served) = served_quality {
+        tracing::info!(
+            track_id = %id,
+            requested = quality.as_str(),
+            served = served.as_str(),
+            audio_traits = ?attrs.audio_traits,
+            "Apple Music song has no lossless asset; serving AAC"
+        );
+    }
+    let download_url = get_apple_download_url_with_quality(
+        &id,
+        served_quality.unwrap_or(quality),
+        expected_duration,
+    )
+    .await?;
     Ok(MusicTrack {
         id: song.id,
         platform: MusicPlatform::AppleMusic,
@@ -569,7 +588,25 @@ async fn resolve_apple_track(
         duration: expected_duration,
         bitrate: None,
         format: Some("m4a".to_string()),
+        served_quality: served_quality.map(|quality| quality.as_str().to_string()),
     })
+}
+
+/// The quality to serve instead of a lossless request when the catalog lists
+/// the song's audio traits and none of them is lossless. An empty list means
+/// the catalog did not say, so the request stands.
+fn lossy_only_substitute(
+    quality: AppleMusicQuality,
+    audio_traits: &[String],
+) -> Option<AppleMusicQuality> {
+    let wants_lossless = matches!(
+        quality,
+        AppleMusicQuality::Lossless | AppleMusicQuality::HiRes
+    );
+    let has_lossless = audio_traits
+        .iter()
+        .any(|value| value.to_ascii_lowercase().contains("lossless"));
+    (wants_lossless && !audio_traits.is_empty() && !has_lossless).then_some(AppleMusicQuality::High)
 }
 
 #[derive(Deserialize)]
@@ -717,6 +754,8 @@ struct AppleMusicAttributes {
     url: Option<String>,
     #[serde(default, rename = "extendedAssetUrls")]
     extended_asset_urls: Option<AppleMusicExtendedAssetUrls>,
+    #[serde(default, rename = "audioTraits")]
+    audio_traits: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -5685,6 +5724,61 @@ impl EmptyDefault for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lossy_only_catalog_song_serves_high_for_lossless_requests() {
+        let traits = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        // 椅子乐团《岛》(1470198631): only lossy-stereo, no enhancedHls.
+        let lossy = traits(&["lossy-stereo"]);
+        for quality in [AppleMusicQuality::Lossless, AppleMusicQuality::HiRes] {
+            assert_eq!(
+                lossy_only_substitute(quality, &lossy),
+                Some(AppleMusicQuality::High)
+            );
+        }
+        for quality in [AppleMusicQuality::Standard, AppleMusicQuality::High] {
+            assert_eq!(lossy_only_substitute(quality, &lossy), None);
+        }
+        // A lossless song keeps the request, so a broken decrypt still fails
+        // loudly instead of silently turning into AAC.
+        for listed in [
+            traits(&["lossless", "lossy-stereo"]),
+            traits(&[
+                "atmos",
+                "hi-res-lossless",
+                "lossless",
+                "lossy-stereo",
+                "spatial",
+            ]),
+        ] {
+            assert_eq!(
+                lossy_only_substitute(AppleMusicQuality::Lossless, &listed),
+                None
+            );
+            assert_eq!(
+                lossy_only_substitute(AppleMusicQuality::HiRes, &listed),
+                None
+            );
+        }
+        // An absent audioTraits list says nothing about the song.
+        assert_eq!(
+            lossy_only_substitute(AppleMusicQuality::Lossless, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn catalog_attributes_read_audio_traits() {
+        let attrs: AppleMusicAttributes = serde_json::from_value(serde_json::json!({
+            "name": "岛",
+            "audioTraits": ["lossy-stereo"],
+        }))
+        .unwrap();
+        assert_eq!(attrs.audio_traits, ["lossy-stereo"]);
+        let attrs: AppleMusicAttributes =
+            serde_json::from_value(serde_json::json!({ "name": "x" })).unwrap();
+        assert!(attrs.audio_traits.is_empty());
+    }
 
     #[tokio::test]
     #[ignore = "requires live Apple Music catalog access"]

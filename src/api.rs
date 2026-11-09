@@ -1749,7 +1749,15 @@ async fn run_download_inner(
         quality: Some(task.quality.clone()),
     })
     .await?;
-    if track.id != checked_track_id
+    let mut task = task;
+    let substituted = adopt_served_quality(&mut task, &track);
+    if substituted {
+        if let Some(current) = state.downloads.write().await.get_mut(&id) {
+            adopt_served_quality(current, &track);
+        }
+        notify_task_change(&state);
+    }
+    if (substituted || track.id != checked_track_id)
         && let Some(cache) = find_music_cache(track.platform.id(), &track.id, &task.quality).await?
         && !cache.file_id.trim().is_empty()
     {
@@ -1769,7 +1777,6 @@ async fn run_download_inner(
     let progressive = music::can_stream_progressive_http(&track);
     let can_stream =
         progressive || music::can_stream_track_with_mode(&track, task.streaming_mode.as_deref());
-    let mut task = task;
     if (progressive || !can_stream) && task.streaming_mode.is_some() {
         // Invalid capability/quality combinations must return the ordinary
         // completed-file contract instead of advertising a packet endpoint
@@ -1808,6 +1815,23 @@ async fn run_download_inner(
 }
 
 /// Lets status readers name the song while it is still downloading.
+/// Relabels a task with the quality the provider will actually serve (an
+/// Apple song with no lossless asset plays as High AAC). The cache row,
+/// inflight key and transport all follow, so AAC is never offered to the
+/// browser as ALAC packets or stored as a lossless file.
+fn adopt_served_quality(task: &mut DownloadTask, track: &music::MusicTrack) -> bool {
+    let Some(served) = track
+        .served_quality
+        .as_deref()
+        .filter(|served| !served.eq_ignore_ascii_case(&task.quality))
+    else {
+        return false;
+    };
+    task.quality = served.to_string();
+    task.streaming_mode = None;
+    true
+}
+
 async fn publish_resolved_track(state: &AppState, id: &str, track: &music::MusicTrack) {
     if let Some(task) = state.downloads.write().await.get_mut(id) {
         task.track_id = Some(track.id.clone());
@@ -4880,6 +4904,74 @@ mod tests {
         assert!(!reason.contains("private-value"));
         assert!(!reason.contains("secret"));
         assert!(!reason.contains("example.test"));
+    }
+
+    #[test]
+    fn served_quality_relabels_lossless_task_as_plain_aac() {
+        let mut task = DownloadTask {
+            id: "applemusic--1470198631--lossless".to_string(),
+            work_id: "w".to_string(),
+            media_revision: "r".to_string(),
+            status: DownloadStatus::Processing,
+            platform: "applemusic".to_string(),
+            query: String::new(),
+            track_id: None,
+            selected_id: Some("1470198631".to_string()),
+            quality: "lossless".to_string(),
+            include_cover: false,
+            title: None,
+            artist: None,
+            album: None,
+            source_url: None,
+            filename: Some("audio.m4a".to_string()),
+            cover_filename: None,
+            file_id: None,
+            thumb_file_id: None,
+            content_type: Some("audio/mp4".to_string()),
+            byte_size: None,
+            bitrate: None,
+            duration: None,
+            format: Some("m4a".to_string()),
+            decrypt_elapsed_seconds: None,
+            error: None,
+            streaming_mode: Some("wasm_alac".to_string()),
+            stream_total: None,
+            replay_gain_centi_db: None,
+            cover_url: None,
+            transfer: Arc::default(),
+            upload_attempts: 0,
+            upload_error: None,
+        };
+        let mut track = music::MusicTrack {
+            id: "1470198631".to_string(),
+            platform: music::MusicPlatform::AppleMusic,
+            song: "岛".to_string(),
+            singer: String::new(),
+            album: String::new(),
+            cover: String::new(),
+            link: String::new(),
+            url: String::new(),
+            headers: HashMap::new(),
+            max_chunk_size: None,
+            duration: None,
+            bitrate: None,
+            format: Some("m4a".to_string()),
+            replay_gain_centi_db: None,
+            served_quality: None,
+        };
+        assert!(!adopt_served_quality(&mut task, &track));
+        assert_eq!(task.quality, "lossless");
+
+        track.served_quality = Some("high".to_string());
+        assert!(adopt_served_quality(&mut task, &track));
+        assert_eq!(task.quality, "high");
+        assert_eq!(task.streaming_mode, None);
+        // The completed AAC must not be offered as an ALAC source or packets.
+        task.status = DownloadStatus::Completed;
+        assert!(!serves_alac_source(&task));
+        upgrade_completed_alac_transport(&mut task, Some("wasm_alac"));
+        assert_eq!(task.streaming_mode, None);
+        assert!(!adopt_served_quality(&mut task, &track));
     }
 
     #[tokio::test]

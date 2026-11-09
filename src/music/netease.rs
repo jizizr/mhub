@@ -118,6 +118,7 @@ async fn resolve_netease_native(id: &str, quality: &str) -> Result<MusicTrack, B
         headers: HashMap::new(),
         max_chunk_size: None,
         replay_gain_centi_db: source.replay_gain_centi_db,
+        served_quality: None,
         duration: song
             .duration
             .or(source.duration_ms)
@@ -442,6 +443,7 @@ async fn get_vkeys_netease_track(id: &str, quality: &str) -> Result<MusicTrack, 
         headers: HashMap::new(),
         max_chunk_size: None,
         replay_gain_centi_db: None,
+        served_quality: None,
         duration: parse_vkeys_duration(&track.interval),
         // MusicTrack.bitrate 按 bps 消费，vkeys 报的是 kbps
         bitrate: parse_vkeys_kbps(&track.kbps).map(|kbps| kbps.saturating_mul(1000)),

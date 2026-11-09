@@ -228,6 +228,7 @@ pub(super) async fn resolve_with_quality(
         headers: browser_headers(),
         max_chunk_size: Some(CDN_MAX_CHUNK),
         replay_gain_centi_db: None,
+        served_quality: None,
         duration: view
             .duration
             .filter(|duration| *duration > 0)

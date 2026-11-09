@@ -184,6 +184,7 @@ async fn resolve_soda_track(
         headers: HashMap::new(),
         max_chunk_size: None,
         replay_gain_centi_db: None,
+        served_quality: None,
         duration: track
             .duration
             .filter(|duration| *duration > 0)

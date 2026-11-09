@@ -239,6 +239,7 @@ async fn resolve_with_client(client: &PlayerClient, id: &str) -> Result<MusicTra
         headers: HashMap::from([("User-Agent".to_string(), client.user_agent.to_string())]),
         max_chunk_size: Some(GOOGLE_VIDEO_MAX_CHUNK),
         replay_gain_centi_db: None,
+        served_quality: None,
         duration,
         // MusicTrack.bitrate 全链路按 bps 消费（caption 展示时才除以 1000）
         bitrate: best_bitrate(format),

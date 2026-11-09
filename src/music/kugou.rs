@@ -98,6 +98,7 @@ impl MusicProvider for KugouProvider {
             headers: HashMap::new(),
             max_chunk_size: None,
             replay_gain_centi_db: None,
+            served_quality: None,
             duration: None,
             bitrate: None,
             format: None,

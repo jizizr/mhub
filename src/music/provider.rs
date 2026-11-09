@@ -96,6 +96,10 @@ pub struct MusicTrack {
     /// ReplayGain 2 track gain in hundredths of a dB (relative to -18 LUFS)
     /// when the provider measured it; lets playback normalize from the start.
     pub replay_gain_centi_db: Option<i32>,
+    /// The quality actually served when the provider had to substitute one
+    /// for the request (an Apple song with no lossless asset); `None` means
+    /// the request stands.
+    pub served_quality: Option<String>,
 }
 
 impl MusicTrack {
@@ -877,6 +881,7 @@ mod tests {
             headers: HashMap::new(),
             max_chunk_size: None,
             replay_gain_centi_db: None,
+            served_quality: None,
             duration: None,
             bitrate: None,
             format: Some("flac".to_string()),
@@ -1059,6 +1064,7 @@ mod tests {
                 .collect(),
             max_chunk_size: None,
             replay_gain_centi_db: None,
+            served_quality: None,
             duration: None,
             bitrate: None,
             format: Some("m4a".to_string()),
@@ -1107,6 +1113,7 @@ mod tests {
             headers: Default::default(),
             max_chunk_size: Some(5),
             replay_gain_centi_db: None,
+            served_quality: None,
             duration: None,
             bitrate: None,
             format: Some("m4a".to_string()),
@@ -1129,6 +1136,7 @@ mod tests {
             headers: Default::default(),
             max_chunk_size: Some(5),
             replay_gain_centi_db: None,
+            served_quality: None,
             duration: None,
             bitrate: None,
             format: Some("m4a".to_string()),
