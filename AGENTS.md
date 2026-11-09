@@ -18,6 +18,7 @@
 | 移动端布局 | `frontend/src/styles.css`、`frontend/src/components/layout/Sidebar.vue`、`frontend/src/components/player/PlayerBar.vue` |
 | PWA / 主题 / 图标 | `frontend/src/pwa.js`、`frontend/public/sw.js`、`frontend/public/manifest*.webmanifest`、`frontend/src/utils/theme.js`、`scripts/*pwa*.mjs` |
 | 音源网关（供 Telegram bot 等使用） | `crates/music-gateway/`（共享类型、协议与客户端）、`src/api/gateway.rs` |
+| 原生客户端（iOS / Android） | 独立仓库 `jizizr/mhub-ios`、`jizizr/mhub-android`；本仓库只提供接口（含原生端用的可选字段 `stream_length`） |
 
 ## 已确认的协作约定
 
@@ -31,6 +32,7 @@
 - Android 的 Apple Music 无损也走 WASM：Web Audio 不算媒体播放器，系统会话由 `media-companion.js` 的静音循环元素持有，只要「想播放」（含加载下一首的间隙）就一直在播，用户暂停、停止才停。改动播放状态时保持这一点；锁屏后台解码是否被冻结只能真机验收。
 - Telegram 是歌曲的持久层，`data/downloads` 只是工作区。已缓存的 Apple Music 无损走 `/audio/source`：直接转发 Telegram 上的 M4A，浏览器 `mp4-alac.js` 拆包后用 WASM 解码，不在服务端转换数据包或复制到本地；`.alacstream` 只服务边下边播和旧客户端。
 - 平台账号、实现、下载与 `music_cache` 写入只在 MHub；Telegram bot 经回环网关取歌，自身不配平台凭据。改动 `crates/music-gateway` 的线上协议时提升 `PROTOCOL_VERSION`，并同步升级 bot 所钉的 `rev`。
+- 原生客户端在独立仓库，两者的 `contract/`、`docs/` 必须逐字节相同（各自 CI 互相比对）。改动它们依赖的接口字段时，同步更新两个仓库的 `contract/fixtures` 与 `docs/api-contract.md`。
 - 只运行与变更相关的检查；设备实测与模拟测试分开记录。体积合格、页面主题正确，不等于手机重启或系统栏行为已验证。
 
 ## 常用检查

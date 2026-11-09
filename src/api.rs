@@ -212,6 +212,12 @@ pub struct PlaybackTask {
     /// downloads save it as is. Older clients keep using `streaming_url`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alac_source_url: Option<String>,
+    /// Declared length of a growing progressive `/audio` stream. Present only
+    /// while `streaming` and the stream answers Range requests, so native
+    /// players (AVPlayer, ExoPlayer) can start before the task completes;
+    /// absent for remuxed/decrypted streams that have no final length yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_length: Option<u64>,
     pub cover_url: String,
     pub lyrics_url: String,
     /// Loudness derived from the provider's own measurement, available before
@@ -1709,6 +1715,9 @@ fn public_task(state: &AppState, task: &DownloadTask) -> PlaybackTask {
             .as_deref()
             .map(|_| media_url(state, task, true)),
         alac_source_url: serves_alac_source(task).then(|| source_media_url(state, task)),
+        stream_length: task
+            .stream_total
+            .filter(|_| task.status == DownloadStatus::Streaming),
         cover_url: format!("/api/v1/playbacks/{}/cover", task.id),
         lyrics_url: format!("/api/v1/playbacks/{}/lyrics", task.id),
         loudness_estimate: task
@@ -5270,6 +5279,23 @@ mod tests {
             .status = DownloadStatus::Completed;
         assert_eq!(next.await.unwrap().unwrap(), "final packet");
         assert!(body.next().await.is_none());
+    }
+
+    #[test]
+    fn public_task_exposes_stream_length_only_while_streaming() {
+        let directory = tempfile::tempdir().unwrap();
+        let (state, mut task) = test_cache_state(directory.path());
+        task.stream_total = Some(10);
+        task.status = DownloadStatus::Streaming;
+        let value = serde_json::to_value(public_task(&state, &task)).unwrap();
+        assert_eq!(value["stream_length"], 10);
+        task.status = DownloadStatus::Completed;
+        let value = serde_json::to_value(public_task(&state, &task)).unwrap();
+        assert!(value.get("stream_length").is_none());
+        task.status = DownloadStatus::Streaming;
+        task.stream_total = None;
+        let value = serde_json::to_value(public_task(&state, &task)).unwrap();
+        assert!(value.get("stream_length").is_none());
     }
 
     #[tokio::test]
