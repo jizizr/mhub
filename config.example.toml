@@ -100,8 +100,8 @@ max_wait_ms = 3000
 # burst = bucket size, per_minute = refill rate; per_minute = 0 disables a kind.
 # Bursts cover an ordinary listener's busiest ten minutes; refill rates stay
 # under a client that keeps going around the clock.
-download = { burst = 30, per_minute = 2 }
+download = { burst = 30, per_minute = 1 }
 search = { burst = 20, per_minute = 2 }
 import = { burst = 150, per_minute = 30 }
-lyrics = { burst = 30, per_minute = 2 }
+lyrics = { burst = 25, per_minute = 2 }
 metadata = { burst = 20, per_minute = 3 }

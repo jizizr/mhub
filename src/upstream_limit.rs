@@ -120,7 +120,9 @@ impl Quota {
 /// refill rates sit under the sustained hourly rate of the one client that
 /// polled and played around the clock (6.1 playback starts, 6.0 searches and
 /// 5.5 lyric loads per minute), so only that pattern runs dry. Both were then
-/// halved (2026-11-09) to start strict.
+/// halved (2026-11-09), and download/lyrics tightened again after replaying
+/// the shadow log: a scraper at ~7 songs a minute now runs dry within about
+/// five minutes, while no other client of that evening came near a limit.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -144,14 +146,14 @@ impl Default for Settings {
             trusted_proxies: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
             max_wait_ms: 3000,
             // Ordinary peak: 59 playback starts in ten minutes.
-            download: Quota::new(30.0, 2.0),
+            download: Quota::new(30.0, 1.0),
             // Ordinary peak: 40 searches in ten minutes, 27 in one.
             search: Quota::new(20.0, 2.0),
             // A match request carries 25 songs and up to two searches each;
             // a 1000-song import takes about forty minutes.
             import: Quota::new(150.0, 30.0),
             // Lyrics page (50 in ten minutes) plus one per played song.
-            lyrics: Quota::new(30.0, 2.0),
+            lyrics: Quota::new(25.0, 2.0),
             // Track details (28 in ten minutes), playlists, recommendations.
             metadata: Quota::new(20.0, 3.0),
         }
