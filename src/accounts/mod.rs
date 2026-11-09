@@ -2,6 +2,7 @@
 //! per-account synced library and cross-device playback hand-off.
 
 pub mod library;
+pub mod library_json;
 mod routes;
 pub mod store;
 

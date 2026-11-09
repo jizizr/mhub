@@ -54,6 +54,7 @@ ALAC 解码器只把完整数据包解码为 PCM，不处理账号、网络或�
 - **认证**（`src/accounts/`）：通行密钥（webauthn-rs，可发现凭据）为主，argon2 密码兜底，注册时生成 8 个一次性恢复码。会话令牌放在 `HttpOnly; SameSite=Lax` Cookie `mhub_session`，库中只存 SHA-256；30 天滑动续期，可在设备列表吊销。写操作要求 `x-mhub-client` 头，WebSocket 握手校验 Origin。注册可选 Cloudflare Turnstile；登录与注册按 IP 和用户名限流。
 - **资料库**：每个账号一份 Yjs 文档，包含歌单（含有序曲目键）、曲目元数据、喜欢／少推荐。曲目键为平台加源 ID，不含音质。服务端以 `yrs` 持有内存文档，更新追加写入 `mhub_library_updates`，每 200 条或 1 MB 压缩为快照；同一账号的连接通过广播互推。单次更新上限 2 MiB，单文档上限由 `library_limit_bytes` 配置。
 - **传输**：`/api/v1/sync/ws` 使用 y-sync 协议（step1/step2/update）；无法建立 WebSocket 时退回 `POST /api/v1/sync/library` 交换状态向量和差量。
+- **原生客户端**：没有 Yjs 引擎的 iOS/Android 用 `GET /api/v1/sync/library/json` 读取歌单快照（与网页 `readLibrary()` 同形），用 `POST` 同一路径提交 `create`/`append`/`rename`/`delete`/`remove`/`move`/`taste` 操作（语义同 `services/sync/library.js`，`move` 为原生拖动排序）。服务端在账号文档的临时副本上执行，生成的 Yjs 更新照常持久化并广播，网页副本实时合并；时间戳写成 float64，网页读出仍是普通数字。
 - **本地副本**：登录后的资料库保存在 IndexedDB（`mhub-library-<账号 ID>`），同步代码为懒加载分块。会话过期或断网时继续写入本地副本，重新登录同一账号后由 CRDT 自动合并，新增、改名、删除与重排都不会重复或丢失。
 - **登录合并**：同一账号的副本直接走 CRDT 同步；另一账号的副本保留在本机，切换到新账号；游客 localStorage 数据生成合并预览——规范化同名且曲目重合度不低于 60%、或来源链接相同的歌单合并，其余新建，喜欢／少推荐取并集。处理过的游客歌单打 `importedTo` 标记，不会重复询问。主动退出登录时可选择清除本机云端副本。
 - **接力播放**：播放队列不进入 CRDT。每台设备上报最近一份播放快照（队列窗口、位置、播放模式），服务端按设备后写覆盖并推送。其他设备在首页和队列页显示“在此设备继续”，用本机音质设置接管，不会打断本机播放。

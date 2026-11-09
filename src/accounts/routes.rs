@@ -2,7 +2,7 @@ use super::{
     Accounts, Authenticated, CLIENT_HEADER, client_ip, generate_recovery_codes, hash_password,
     hash_recovery_code, http_error,
     library::{LibraryEvent, MAX_UPDATE_BYTES},
-    normalize_username, now,
+    library_json, normalize_username, now,
     store::{PlaybackSession, StoredPasskey},
     validate_password, verify_password,
 };
@@ -79,6 +79,10 @@ pub fn router(accounts: Option<Shared>) -> Router {
         .route("/api/v1/auth/sessions/:id", delete(revoke_session))
         .route("/api/v1/sync/ws", get(sync_socket))
         .route("/api/v1/sync/library", post(sync_library))
+        .route(
+            "/api/v1/sync/library/json",
+            get(library_snapshot).post(library_ops),
+        )
         .route("/api/v1/sync/playback", get(playback_sessions))
         .route("/api/v1/sync/playback/:device_id", put(put_playback))
         .with_state(accounts)
@@ -639,6 +643,58 @@ async fn sync_library(
     }))
 }
 
+/// Plain JSON library for clients without a Yjs engine (native apps).
+async fn library_snapshot(
+    State(accounts): State<Shared>,
+    headers: HeaderMap,
+) -> ApiResult<Json<library_json::Snapshot>> {
+    let auth = accounts.require(&headers).await?;
+    let library = accounts.library.open(auth.user.id).await?;
+    let state = library.full_state().await;
+    accounts.library.release(&library);
+    let doc = library_json::replica(&state)?;
+    Ok(Json(library_json::snapshot(&doc)))
+}
+
+#[derive(Deserialize)]
+struct LibraryOps {
+    ops: Vec<library_json::Op>,
+}
+
+/// Apply JSON library operations as one Yjs update; answers the new snapshot.
+async fn library_ops(
+    State(accounts): State<Shared>,
+    headers: HeaderMap,
+    Json(request): Json<LibraryOps>,
+) -> ApiResult<Json<library_json::Snapshot>> {
+    check_client(&headers)?;
+    let auth = accounts.require(&headers).await?;
+    let library = accounts.library.open(auth.user.id).await?;
+    let result: ApiResult<library_json::Snapshot> = async {
+        let state = library.full_state().await;
+        // The scratch replica is dropped before the next await.
+        let (update, snapshot) = {
+            let doc = library_json::replica(&state)?;
+            let update = library_json::apply_ops(&doc, &request.ops, now_ms())?;
+            (update, library_json::snapshot(&doc))
+        };
+        if let Some(update) = update {
+            accounts.library.apply(&library, update, 0, now()).await?;
+        }
+        Ok(snapshot)
+    }
+    .await;
+    accounts.library.release(&library);
+    Ok(Json(result?))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 async fn sync_socket(
     State(accounts): State<Shared>,
     headers: HeaderMap,
@@ -949,6 +1005,66 @@ mod tests {
             .await
             .unwrap();
         assert!(after["user"].is_null());
+    }
+
+    #[tokio::test]
+    async fn json_library_ops_reach_yjs_replicas() {
+        let (base, _) = server().await;
+        let created = post(
+            &base,
+            "/api/v1/auth/register",
+            None,
+            json!({ "username": "native", "password": "correct horse", "device_id": "phone" }),
+        )
+        .await;
+        let cookie = cookie_of(&created);
+        let track = |id: &str| json!({ "platform": "netease", "source_id": id, "title": id, "artist": "a", "cover": "" });
+        let ops = json!({ "ops": [
+            { "op": "create", "id": "p1", "name": "通勤", "tracks": [track("1"), track("2")] },
+            { "op": "move", "id": "p1", "key": "netease:2", "after": null },
+        ] });
+        let answer = post(&base, "/api/v1/sync/library/json", Some(&cookie), ops).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        let snapshot: Value = answer.json().await.unwrap();
+        assert_eq!(snapshot["playlists"][0]["name"], "通勤");
+        assert_eq!(snapshot["playlists"][0]["tracks"][0]["key"], "netease:2");
+
+        // A Yjs replica (the web client) receives the same library.
+        let web = yrs::Doc::new();
+        let sv = STANDARD.encode(web.transact().state_vector().encode_v1());
+        let synced: Value = post(
+            &base,
+            "/api/v1/sync/library",
+            Some(&cookie),
+            json!({ "state_vector": sv }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        let update = STANDARD.decode(synced["update"].as_str().unwrap()).unwrap();
+        web.transact_mut()
+            .apply_update(Update::decode_v1(&update).unwrap())
+            .unwrap();
+        let read = library_json::snapshot(&web);
+        assert_eq!(serde_json::to_value(&read).unwrap(), snapshot);
+
+        let fetched: Value = reqwest::Client::new()
+            .get(format!("http://{base}/api/v1/sync/library/json"))
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(fetched, snapshot);
+        let anonymous = reqwest::Client::new()
+            .get(format!("http://{base}/api/v1/sync/library/json"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
