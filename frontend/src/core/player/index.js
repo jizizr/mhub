@@ -77,6 +77,33 @@ const autoplayRecent = new Map();
 
 const MAX_CONSECUTIVE_FAILURES = 5;
 const SKIP_ON_ERROR_DELAY_MS = 1000;
+// Songs the server reported as unplayable (no source can ever play them,
+// e.g. Apple Music tracks with only legacy-DRM assets). Queue advances step
+// over them so playback continues uninterrupted; kept for this page only.
+const unplayableTracks = new Set();
+
+export function isUnplayableError(error) {
+  return error?.code === "unplayable";
+}
+
+function markUnplayable(track) {
+  const identity = trackIdentity(track);
+  if (identity) unplayableTracks.add(identity);
+}
+
+function isKnownUnplayable(track) {
+  const identity = trackIdentity(track);
+  return Boolean(identity) && unplayableTracks.has(identity);
+}
+
+/** First queue index at or after `from` that is not known to be unplayable. */
+function playableIndexFrom(from) {
+  const { queue } = stores();
+  for (let index = Math.max(0, from); index < queue.queueLength; index += 1) {
+    if (!isKnownUnplayable(queue.getTrack(index))) return index;
+  }
+  return -1;
+}
 const PREFETCH_START_DELAY_MS = 2500;
 const PREFETCH_BUFFER_TARGET_SECONDS = 20;
 const PREFETCH_RETRY_DELAYS_MS = [5000, 15000, 30000];
@@ -614,7 +641,9 @@ function armedStillNext(armed = armedNext) {
   const { queue, status } = stores();
   if (!armed || armed.token !== trackToken || autoplayAdvance || status.repeatMode === "one") return false;
   const index = nextQueueIndex();
-  return index === armed.index && index === status.playIndex + 1 &&
+  // Ahead of the current song, possibly past songs known to be unplayable;
+  // a wrap to the queue start is never armed.
+  return index === armed.index && index > status.playIndex &&
     prefetchKey(normalizeTrackForQuality(queue.getTrack(index))) === armed.key;
 }
 
@@ -641,7 +670,7 @@ async function armNextTrack(myToken = trackToken) {
   const { queue, status } = stores();
   if (status.repeatMode === "one") return;
   const index = nextQueueIndex();
-  const track = index === status.playIndex + 1 ? normalizeTrackForQuality(queue.getTrack(index)) : null;
+  const track = index > status.playIndex ? normalizeTrackForQuality(queue.getTrack(index)) : null;
   const key = prefetchKey(track);
   if (!key || trackIdentity(track) === trackIdentity(status.currentTrack)) return;
   if (armedNext?.key === key && armedNext.token === myToken) return;
@@ -1302,7 +1331,7 @@ export function prepareAudio(quality = useStatusStore().quality) {
   }
 }
 
-async function skipOnFailure(myToken, getCurrentToken) {
+async function skipOnFailure(myToken, getCurrentToken, { delayMs = SKIP_ON_ERROR_DELAY_MS } = {}) {
   const queue = useQueueStore();
   consecutiveFailures += 1;
   if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES || consecutiveFailures >= queue.queueLength) {
@@ -1312,7 +1341,7 @@ async function skipOnFailure(myToken, getCurrentToken) {
   }
   window.setTimeout(() => {
     if (myToken === getCurrentToken()) void nextTrack();
-  }, SKIP_ON_ERROR_DELAY_MS);
+  }, delayMs);
 }
 
 function setupAlacCallbacks(myToken) {
@@ -1566,6 +1595,14 @@ async function loadTrack(track, autoPlay = true, { resolved: preResolved = null 
       status.state = "idle";
       status.trackLoading = false;
       media.clearLyric();
+      if (isUnplayableError(error)) {
+        // Nothing can play this song: move on as if it were not queued.
+        markUnplayable(track);
+        toast(`《${track.title || "这首歌"}》暂时无法播放，已跳过`);
+        updateMediaSession();
+        await skipOnFailure(myToken, () => trackToken, { delayMs: 0 });
+        return false;
+      }
       toast(error?.message || "音频准备失败");
       updateMediaSession();
     }
@@ -1623,7 +1660,8 @@ async function loadLyrics(track) {
 function nextQueueIndex() {
   const { queue, status } = stores();
   if (!queue.queueLength || status.playIndex < 0) return -1;
-  if (status.playIndex < queue.queueLength - 1) return status.playIndex + 1;
+  const ahead = playableIndexFrom(status.playIndex + 1);
+  if (ahead >= 0) return ahead;
   if (status.repeatMode === "list" || status.repeatMode === "one") return 0;
   return -1;
 }
@@ -1730,6 +1768,14 @@ async function prefetchNextTrack(myToken = trackToken) {
     .catch((error) => {
       if (error?.status === 429) {
         prefetchRateLimitWaitMs = Number(error.retryAfterMs) || 0;
+        return false;
+      }
+      if (isUnplayableError(error)) {
+        // The queue now steps over it; warm the song after it instead.
+        markUnplayable(track);
+        if (myToken === trackToken) {
+          window.setTimeout(() => { void prefetchNextTrack(myToken); }, 0);
+        }
         return false;
       }
       console.warn("[player] next-track prefetch failed", error);
@@ -2177,7 +2223,9 @@ export async function nextTrack(manual = false) {
   const { queue, status } = stores();
   if (queue.queueLength === 0) return;
   if (autoplayAdvance) return autoplayAdvance;
-  if (status.playIndex >= queue.queueLength - 1) {
+  // Songs already known to be unplayable are stepped over like absent ones.
+  const ahead = playableIndexFrom(status.playIndex + 1);
+  if (ahead < 0) {
     if (status.autoplayEnabled) {
       const generation = autoplayGeneration;
       const currentKey = trackIdentity(status.currentTrack);
@@ -2190,8 +2238,9 @@ export async function nextTrack(manual = false) {
         if (generation !== autoplayGeneration || !status.autoplayEnabled || trackIdentity(status.currentTrack) !== currentKey) return false;
         // Manual queue edits made while the request was pending take priority;
         // the next item is resolved from the current queue, never a stale index.
-        if (status.playIndex < queue.queueLength - 1) {
-          status.playIndex += 1;
+        const recommended = playableIndexFrom(status.playIndex + 1);
+        if (recommended >= 0) {
+          status.playIndex = recommended;
           status.persist();
           return loadTrack(status.currentTrack);
         }
@@ -2215,7 +2264,7 @@ export async function nextTrack(manual = false) {
       return;
     }
   } else {
-    status.playIndex += 1;
+    status.playIndex = ahead;
   }
   status.persist();
   await loadTrack(status.currentTrack);

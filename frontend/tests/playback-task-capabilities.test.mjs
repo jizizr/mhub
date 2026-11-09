@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { audioUrl } from "../src/apis/music.js";
+import { audioUrl, playbackFailure } from "../src/apis/music.js";
 import { trackFromPlayback } from "../src/utils/track.js";
 import { cacheKey, cacheEntryMatches, reusableNativeFlacCache } from "../src/services/localCache.js";
 
@@ -17,7 +17,7 @@ function harness(responses = []) {
     return responses[polls++];
   };
   const window = { setTimeout: (resolve) => queueMicrotask(resolve) };
-  const waitForReady = new Function("getPlayback", "window", `return (${functionSource});`)(getPlayback, window);
+  const waitForReady = new Function("getPlayback", "window", "playbackFailure", `return (${functionSource});`)(getPlayback, window, playbackFailure);
   return { waitForReady, polls: () => polls };
 }
 const shared = {
@@ -106,6 +106,13 @@ test("failure while native playback waits is surfaced instead of returning packe
   const h = harness([{ ...shared, status: "failed", error: "provider failed" }]);
   await assert.rejects(h.waitForReady(shared), /provider failed/);
   assert.equal(h.polls(), 1);
+});
+
+test("an unplayable task fails with the skip code", async () => {
+  const h = harness([{ ...shared, status: "failed", error: "《岛》暂时无法播放", error_code: "unplayable" }]);
+  await assert.rejects(h.waitForReady(shared), (error) => error.code === "unplayable" && /岛/.test(error.message));
+  const other = harness([{ ...shared, status: "failed", error: "provider failed" }]);
+  await assert.rejects(other.waitForReady(shared), (error) => error.code === undefined);
 });
 
 for (const fromMetadataCache of [false, true]) {

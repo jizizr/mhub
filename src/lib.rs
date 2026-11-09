@@ -21,6 +21,11 @@ pub enum ApiError {
     Retry(#[from] reqwest_middleware::Error),
     #[error("{0}")]
     Custom(String),
+    /// The song exists but no configured source can ever play it (an Apple
+    /// song with only legacy FairPlay assets). Clients skip it instead of
+    /// retrying.
+    #[error("{0}")]
+    Unplayable(String),
     #[error("{message}")]
     Http {
         status: axum::http::StatusCode,

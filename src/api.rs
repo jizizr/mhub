@@ -119,6 +119,8 @@ struct DownloadTask {
     format: Option<String>,
     decrypt_elapsed_seconds: Option<f64>,
     error: Option<String>,
+    /// `unplayable` when no source can play this song; clients skip it.
+    error_code: Option<String>,
     /// Explicit transport requested by a capable client (for example,
     /// `wasm_alac`).  This is deliberately separate from quality so an
     /// ordinary browser never receives ALAC expecting native decoding.
@@ -193,6 +195,10 @@ pub struct PlaybackTask {
     pub format: Option<String>,
     pub decrypt_elapsed_seconds: Option<f64>,
     pub error: Option<String>,
+    /// Machine-readable failure kind. `unplayable`: no configured source
+    /// can ever play this song, so players skip it instead of retrying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     /// Transport selected while the task was created.  `wasm_alac` means the
     /// dedicated streaming_url exposes decrypted SPLALAC1 packets for a
     /// WebAssembly decoder; it is absent for native AAC/full-download tasks.
@@ -1043,6 +1049,9 @@ async fn lyrics(Query(params): Query<LyricsParams>) -> ApiResult<Json<LyricsResp
     Ok(Json(lyrics_response(platform.id(), track_id, lyrics)))
 }
 
+/// `error_code` / response `code` for a song no source can play.
+const UNPLAYABLE_CODE: &str = "unplayable";
+
 fn normalize_streaming_mode(mode: Option<String>) -> Option<String> {
     mode.and_then(|value| {
         let normalized = value.trim().to_ascii_lowercase();
@@ -1184,6 +1193,7 @@ async fn start_download(state: &AppState, request: DownloadRequest) -> ApiResult
         format: None,
         decrypt_elapsed_seconds: None,
         error: None,
+        error_code: None,
         streaming_mode,
         stream_total: None,
         replay_gain_centi_db: None,
@@ -1645,6 +1655,7 @@ fn public_task(state: &AppState, task: &DownloadTask) -> PlaybackTask {
         format: task.format.clone(),
         decrypt_elapsed_seconds: task.decrypt_elapsed_seconds,
         error: task.error.clone(),
+        error_code: task.error_code.clone(),
         streaming_mode: task.streaming_mode.clone(),
         streaming_codec: task
             .streaming_mode
@@ -1691,6 +1702,8 @@ async fn run_download(state: AppState, id: String, mut charge: Option<upstream_l
         if let Some(task) = downloads.get_mut(&id) {
             task.status = DownloadStatus::Failed;
             task.error = Some(err.to_string());
+            task.error_code =
+                matches!(err, ApiError::Unplayable(_)).then(|| UNPLAYABLE_CODE.into());
         }
         drop(downloads);
         notify_task_change(&state);
@@ -1941,6 +1954,7 @@ async fn download_provider_track(
     task.replay_gain_centi_db = track.replay_gain_centi_db;
     task.decrypt_elapsed_seconds = media.decrypt_elapsed.map(duration_seconds);
     task.error = None;
+    task.error_code = None;
     let completed_task = task.clone();
     drop(downloads);
     notify_task_change(&state);
@@ -1992,6 +2006,7 @@ async fn download_provider_track_streaming(
         current.format = Some(streaming_format);
         current.stream_total = None;
         current.error = None;
+        current.error_code = None;
     }
     notify_task_change(&state);
 
@@ -2140,6 +2155,7 @@ async fn download_provider_track_streaming(
     current.decrypt_elapsed_seconds = decrypt_elapsed.map(duration_seconds);
     current.stream_total = None;
     current.error = None;
+    current.error_code = None;
     let completed_task = current.clone();
     drop(downloads);
     notify_task_change(&state);
@@ -2199,6 +2215,7 @@ async fn complete_task_from_cache(
     task.format = (!cache.file_ext.trim().is_empty()).then_some(cache.file_ext.clone());
     task.decrypt_elapsed_seconds = None;
     task.error = None;
+    task.error_code = None;
     // A capable client can reconstruct packets from the completed ALAC source,
     // avoiding a full FLAC transcode. Native clients retain their file endpoint.
     task.streaming_mode = None;
@@ -2222,6 +2239,7 @@ async fn complete_task_from_inflight(
                 task.id = id.to_string();
                 task.status = DownloadStatus::Completed;
                 task.error = None;
+                task.error_code = None;
                 // Inflight work is shared by platform/track/quality, while
                 // `streaming_mode` is a client capability. A native client
                 // joining a WASM request must never inherit the packet URL.
@@ -2873,6 +2891,7 @@ fn task_from_cache(
         format: (!cache.file_ext.trim().is_empty()).then_some(cache.file_ext.clone()),
         decrypt_elapsed_seconds: None,
         error: None,
+        error_code: None,
         streaming_mode: None,
         stream_total: None,
         replay_gain_centi_db: None,
@@ -3127,6 +3146,7 @@ impl IntoResponse for ApiError {
                 StatusCode::TOO_MANY_REQUESTS
             }
             ApiError::Custom(_) => StatusCode::BAD_REQUEST,
+            ApiError::Unplayable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let retry_after = match &self {
@@ -3139,7 +3159,12 @@ impl IntoResponse for ApiError {
             }
             _ => None,
         };
-        let body = Json(serde_json::json!({ "detail": self.to_string() }));
+        let body = match &self {
+            ApiError::Unplayable(message) => {
+                Json(serde_json::json!({ "detail": message, "code": UNPLAYABLE_CODE }))
+            }
+            _ => Json(serde_json::json!({ "detail": self.to_string() })),
+        };
         let mut response = (status, [(header::CACHE_CONTROL, "no-store")], body).into_response();
         if let Some(seconds) = retry_after {
             response
@@ -4906,6 +4931,25 @@ mod tests {
         assert!(!reason.contains("example.test"));
     }
 
+    #[tokio::test]
+    async fn unplayable_error_carries_a_machine_readable_code() {
+        let response = ApiError::Unplayable("《岛》暂时无法播放".into()).into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["code"], UNPLAYABLE_CODE);
+        assert_eq!(value["detail"], "《岛》暂时无法播放");
+
+        let response = ApiError::Custom("x".into()).into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(value.get("code").is_none());
+    }
+
     #[test]
     fn served_quality_relabels_lossless_task_as_plain_aac() {
         let mut task = DownloadTask {
@@ -4934,6 +4978,7 @@ mod tests {
             format: Some("m4a".to_string()),
             decrypt_elapsed_seconds: None,
             error: None,
+            error_code: None,
             streaming_mode: Some("wasm_alac".to_string()),
             stream_total: None,
             replay_gain_centi_db: None,
@@ -5003,6 +5048,7 @@ mod tests {
             format: None,
             decrypt_elapsed_seconds: None,
             error: None,
+            error_code: None,
             streaming_mode: Some("wasm_alac".to_string()),
             stream_total: None,
             replay_gain_centi_db: None,

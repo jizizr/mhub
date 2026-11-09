@@ -9,6 +9,7 @@ import {
   getRecommendationHome,
   getContinuationRecommendations,
   getTrackInfo,
+  playbackFailure,
   resolveCollection,
   searchTracks,
 } from "./apis/music";
@@ -302,7 +303,7 @@ async function waitForReady(task, { allowAlacStream = false } = {}) {
   let delay = 120;
   const deadline = Date.now() + 240_000;
   while (Date.now() < deadline) {
-    if (current.status === "failed") throw new Error(current.error || "音频准备失败");
+    if (current.status === "failed") throw playbackFailure(current);
     // Stable playback IDs are shared between browsers. A native client can
     // join a task started by a WASM-capable client; later polls may expose the
     // server's ALAC mode again even when the create response cleared it.

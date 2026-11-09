@@ -23,6 +23,24 @@ export function isRateLimited(error) {
   return error instanceof RateLimitError;
 }
 
+/**
+ * No source can ever play this song (server `code: "unplayable"`, e.g. an
+ * Apple Music track with only legacy-DRM assets). Players skip it.
+ */
+export class UnplayableError extends Error {
+  constructor(message) {
+    super(message || "这首歌暂时无法播放");
+    this.name = "UnplayableError";
+    this.code = "unplayable";
+  }
+}
+
+/** The error a failed playback task stands for. */
+export function playbackFailure(task) {
+  const message = task?.error || "音频准备失败";
+  return task?.error_code === "unplayable" ? new UnplayableError(message) : new Error(message);
+}
+
 /** `Retry-After` as milliseconds: delta-seconds or an HTTP date. */
 export function retryAfterMs(value, now = Date.now()) {
   const text = String(value ?? "").trim();
@@ -60,6 +78,7 @@ async function request(path, options = {}) {
     });
     if (response.ok) return response;
     const payload = await response.json().catch(() => ({}));
+    if (payload.code === "unplayable") throw new UnplayableError(payload.detail);
     if (response.status !== 429) throw new Error(payload.detail || `HTTP ${response.status}`);
     const delay = retryAfterMs(response.headers.get("retry-after"));
     if (waited + delay > maxWaitMs) {

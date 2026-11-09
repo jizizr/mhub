@@ -47,6 +47,9 @@ const WEB_PLAYBACK_LICENSE_URL: &str =
 const APPLE_WRAPPER_SCHEME: &str = "applemusic-wrapper://";
 const APPLE_WRAPPER_LITE_SCHEME: &str = "applemusic-wrapper-lite://";
 const APPLE_WIDEVINE_SCHEME: &str = "applemusic-widevine://";
+/// Marks a Widevine URL minted for a legacy-only song (see
+/// `AppleMusicExtendedAssetUrls::legacy_only`).
+const APPLE_LEGACY_ONLY_QUERY: &str = "legacy=1";
 const APPLE_WRAPPER_M3U8_PORT: u16 = 20020;
 const APPLE_WRAPPER_DECRYPT_PORT: u16 = 10020;
 const APPLE_PREFETCH_KEY_URI: &str = "skd://itunes.apple.com/P000000000/s1/e1";
@@ -564,12 +567,27 @@ async fn resolve_apple_track(
             "Apple Music song has no lossless asset; serving AAC"
         );
     }
-    let download_url = get_apple_download_url_with_quality(
-        &id,
-        served_quality.unwrap_or(quality),
-        expected_duration,
-    )
-    .await?;
+    let wanted = served_quality.unwrap_or(quality);
+    let legacy_only = attrs
+        .extended_asset_urls
+        .as_ref()
+        .is_some_and(AppleMusicExtendedAssetUrls::legacy_only);
+    let download_url = if legacy_only {
+        if widevine_target_kbps(wanted).is_none() || !widevine_configured() {
+            tracing::info!(
+                track_id = %id,
+                "Apple Music song has only legacy FairPlay assets and Widevine is not configured"
+            );
+            return Err(BotError::Unplayable(legacy_only_message(&attrs.name)));
+        }
+        // Skip the wrappers: they can only answer with the protected M4P.
+        format!(
+            "{}&{APPLE_LEGACY_ONLY_QUERY}",
+            apple_widevine_internal_url(&id, wanted, expected_duration)
+        )
+    } else {
+        get_apple_download_url_with_quality(&id, wanted, expected_duration).await?
+    };
     Ok(MusicTrack {
         id: song.id,
         platform: MusicPlatform::AppleMusic,
@@ -590,6 +608,18 @@ async fn resolve_apple_track(
         format: Some("m4a".to_string()),
         served_quality: served_quality.map(|quality| quality.as_str().to_string()),
     })
+}
+
+fn legacy_only_message(name: &str) -> String {
+    format!("《{name}》在 Apple Music 只有旧版加密音频，暂时无法播放")
+}
+
+/// WebPlayback Widevine needs an account token and a device.
+fn widevine_configured() -> bool {
+    let config = &SETTINGS.music.applemusic;
+    let device = !config.wv_device.trim().is_empty()
+        || (!config.wv_client_id.trim().is_empty() && !config.wv_private_key.trim().is_empty());
+    device && !normalize_media_user_token(config.media_user_token.trim()).is_empty()
 }
 
 /// The quality to serve instead of a lossless request when the catalog lists
@@ -767,6 +797,24 @@ struct AppleMusicArtwork {
 struct AppleMusicExtendedAssetUrls {
     #[serde(default, rename = "enhancedHls")]
     enhanced_hls: String,
+    #[serde(default)]
+    plus: String,
+    #[serde(default, rename = "lightweightPlus")]
+    lightweight_plus: String,
+    #[serde(default)]
+    lightweight: String,
+}
+
+impl AppleMusicExtendedAssetUrls {
+    /// The catalog lists only the old iTunes FairPlay (`drms`/`itun`) M4P
+    /// files and no HLS master. The wrappers decrypt streaming FairPlay
+    /// only, so such a song plays through WebPlayback Widevine or not at all.
+    fn legacy_only(&self) -> bool {
+        self.enhanced_hls.trim().is_empty()
+            && [&self.plus, &self.lightweight_plus, &self.lightweight]
+                .iter()
+                .any(|url| !url.trim().is_empty())
+    }
 }
 
 #[derive(Deserialize)]
@@ -1125,10 +1173,24 @@ where
         // is configured (get_apple_download_url_with_quality), and the endpoint
         // list is immutable for the process lifetime, so there is no wrapper
         // fallback to attempt here.
+        let legacy_only = query.split('&').any(|part| part == APPLE_LEGACY_ONLY_QUERY);
         return download_via_widevine_with_progress(track_id, quality, expected_duration, progress)
             .await
             .map(|data| (data, None))
-            .map_err(|error| BotError::Custom(apple_error_summary(&error)));
+            .map_err(|error| {
+                let summary = apple_error_summary(&error);
+                if legacy_only {
+                    // Nothing else can play this song; let clients skip it.
+                    tracing::warn!(
+                        "Apple Music legacy-only {track_id} failed via Widevine: {summary}"
+                    );
+                    BotError::Unplayable(format!(
+                        "这首歌在 Apple Music 只有旧版加密音频，暂时无法播放（{summary}）"
+                    ))
+                } else {
+                    BotError::Custom(summary)
+                }
+            });
     }
 
     let payload = url
@@ -5765,6 +5827,33 @@ mod tests {
             lossy_only_substitute(AppleMusicQuality::Lossless, &[]),
             None
         );
+    }
+
+    #[test]
+    fn legacy_only_means_m4p_assets_without_an_hls_master() {
+        let assets = |value: serde_json::Value| -> AppleMusicExtendedAssetUrls {
+            serde_json::from_value(value).unwrap()
+        };
+        // 椅子乐团《岛》1470198631 as the cn catalog lists it.
+        assert!(
+            assets(serde_json::json!({
+                "lightweight": "https://example.test/a.lw.aac.a.m4p",
+                "lightweightPlus": "https://example.test/a.lwhq.aac.a.m4p",
+                "plus": "https://example.test/a.plus.aac.a.m4p",
+                "superLightweight": "https://example.test/a.slw.aac.a.m4p",
+            }))
+            .legacy_only()
+        );
+        assert!(
+            !assets(serde_json::json!({
+                "enhancedHls": "https://example.test/master.m3u8",
+                "plus": "https://example.test/a.plus.aac.a.m4p",
+            }))
+            .legacy_only()
+        );
+        // Nothing listed is not proof of anything.
+        assert!(!assets(serde_json::json!({})).legacy_only());
+        assert!(legacy_only_message("岛").contains("《岛》"));
     }
 
     #[test]
