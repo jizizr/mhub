@@ -1097,40 +1097,12 @@ async fn create_download(
     Json(request): Json<DownloadRequest>,
 ) -> ApiResult<(StatusCode, Json<CreateDownloadResponse>)> {
     let task = start_download(&state, request).await?;
-    prewarm_telegram_audio(&state, &task).await;
     let status = if task.status == DownloadStatus::Completed {
         StatusCode::OK
     } else {
         StatusCode::ACCEPTED
     };
     Ok((status, Json(create_download_response(&state, &task))))
-}
-
-/// A browser that was just handed a completed task requests its audio next.
-/// When those bytes are only on Telegram, start bringing them back now rather
-/// than when that request arrives. Not done for gateway callers, which send
-/// the file by its id and never read it.
-async fn prewarm_telegram_audio(state: &AppState, task: &DownloadTask) {
-    if task.status != DownloadStatus::Completed {
-        return;
-    }
-    let Some(file_id) = task.file_id.as_deref().filter(|id| !id.trim().is_empty()) else {
-        return;
-    };
-    if let Some(filename) = task.filename.as_deref() {
-        let local = state
-            .data_dir
-            .join("downloads")
-            .join(&task.work_id)
-            .join(filename);
-        if fs::metadata(&local)
-            .await
-            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-        {
-            return;
-        }
-    }
-    telegram_cache::prewarm(file_id);
 }
 
 /// Joins the live task for this song and quality, completes a new one from
@@ -2611,12 +2583,27 @@ async fn serve_task_file(
         }
         // Apple Music AAC cached on Telegram before the sample-entry fix is
         // mislabelled `alac`, which Safari refuses. Patch those 4 bytes while
-        // streaming the local Bot API file, so the Telegram copy (sent as is
-        // by the bot) stays unchanged and nothing is copied to disk.
+        // streaming, so the Telegram copy (sent as is by the bot) stays
+        // unchanged and nothing is copied to disk.
         if mp4_audio
             && task.platform == "applemusic"
             && let Some(file_id) = task.file_id.as_deref().filter(|id| !id.trim().is_empty())
         {
+            if telegram_cache::cached_local_path(file_id).is_none()
+                && let Some(size) = task.byte_size.filter(|size| *size > 0)
+                && let Some(patch) = telegram_aac_patch(file_id, size).await
+                && let Some(response) = stream_telegram_segments(
+                    file_id,
+                    filename,
+                    "audio/mp4",
+                    Some(size),
+                    patch,
+                    headers,
+                )
+                .await?
+            {
+                return Ok(response);
+            }
             let file =
                 telegram_cache::locate_file(file_id)
                     .await
@@ -2979,15 +2966,50 @@ async fn ensure_local_audio_file(state: &AppState, task: &DownloadTask) -> ApiRe
                 message: "音频文件不存在".to_string(),
             });
         };
+        // The reserved temporary file is opened without create: a cancelled
+        // Tokio file operation cannot recreate it after its cleanup guard ran.
+        let mut output = fs::OpenOptions::new().write(true).open(&temporary).await?;
+        // Converting needs the whole file. Read it over MTProto when possible,
+        // so the Bot API server does not fetch and keep another copy.
+        if let Some(size) = task.byte_size.filter(|size| *size > 0)
+            && let Some(mut chunks) = telegram_segments::stream(file_id, size, 0, size - 1).await
+        {
+            use futures::StreamExt;
+            let mut written = 0u64;
+            let mut failed = None;
+            while let Some(chunk) = chunks.next().await {
+                match chunk {
+                    Ok(chunk) => {
+                        output.write_all(&chunk).await?;
+                        written += chunk.len() as u64;
+                    }
+                    Err(err) => {
+                        failed = Some(err);
+                        break;
+                    }
+                }
+            }
+            match failed {
+                None if written == size => {
+                    output.flush().await?;
+                    return Ok(());
+                }
+                failure => {
+                    tracing::warn!(
+                        "Telegram direct read of a whole file failed, using getFile: {}",
+                        failure.map_or_else(|| "short".to_string(), |err| err.to_string())
+                    );
+                    output.set_len(0).await?;
+                    output.seek(SeekFrom::Start(0)).await?;
+                }
+            }
+        }
         let file = telegram_cache::locate_file(file_id)
             .await
             .map_err(|err| ApiError::Http {
                 status: StatusCode::BAD_GATEWAY,
                 message: format!("Telegram 文件信息获取失败：{err}"),
             })?;
-        // The reserved temporary file is opened without create: a cancelled
-        // Tokio file operation cannot recreate it after its cleanup guard ran.
-        let mut output = fs::OpenOptions::new().write(true).open(&temporary).await?;
         if let Some(local_path) = telegram_cache::local_file_path(&file.file_path) {
             let mut source = fs::File::open(local_path).await?;
             tokio::io::copy(&mut source, &mut output).await?;
@@ -3026,7 +3048,7 @@ async fn stream_local_file(
 /// Overwrite the 4 bytes at `fourcc_at` with `mp4a` in a streamed range,
 /// leaving the file itself untouched.
 fn patch_fourcc(
-    stream: ReaderStream<impl tokio::io::AsyncRead>,
+    stream: impl futures::Stream<Item = std::io::Result<axum::body::Bytes>>,
     start: u64,
     fourcc_at: u64,
 ) -> impl futures::Stream<Item = std::io::Result<axum::body::Bytes>> {
@@ -3302,23 +3324,97 @@ async fn stream_telegram_file(
         return stream_local_file(&local_path, filename, &content_type, headers).await;
     }
     if let Some(response) =
-        stream_telegram_segments(file_id, filename, &content_type, size, headers).await?
+        stream_telegram_segments(file_id, filename, &content_type, size, None, headers).await?
     {
         return Ok(response);
     }
     stream_telegram_file_via_bot_api(file_id, filename, content_type, headers).await
 }
 
-/// Serve a cold Telegram file by byte range over MTProto, so the first bytes
-/// leave as soon as Telegram returns them. `getFile` runs alongside: once the
-/// Bot API server has the file on disk the response continues from there,
-/// and later requests read it locally. `None` when this route is unavailable
-/// for the file; nothing has been sent then.
+/// Where a Telegram-cached Apple AAC file needs its sample entry relabelled
+/// (`Some(None)`: it does not), read from the file's leading boxes over
+/// MTProto. `None` when that cannot be read directly. Remembered per file:
+/// every Range request of a song asks again.
+async fn telegram_aac_patch(file_id: &str, size: u64) -> Option<Option<u64>> {
+    use futures::StreamExt;
+    lazy_static::lazy_static! {
+        static ref PATCHES: std::sync::Mutex<HashMap<String, Option<u64>>> =
+            std::sync::Mutex::new(HashMap::new());
+    }
+    if let Some(patch) = PATCHES.lock().unwrap().get(file_id) {
+        return Some(*patch);
+    }
+    const LIMIT: u64 = 4 * 1024 * 1024;
+    let mut chunks = telegram_segments::stream(file_id, size, 0, size.min(LIMIT) - 1).await?;
+    let mut header = Vec::new();
+    loop {
+        match movie_header_end(&header) {
+            HeaderEnd::Complete => break,
+            HeaderEnd::NeedMore => {}
+        }
+        match chunks.next().await {
+            Some(Ok(bytes)) => header.extend_from_slice(&bytes),
+            Some(Err(err)) => {
+                tracing::warn!("failed to read the movie header over MTProto: {err}");
+                return None;
+            }
+            // The first 4 MiB hold no complete moov: nothing to relabel.
+            None => break,
+        }
+    }
+    drop(chunks);
+    let patch = crate::audio::mislabeled_aac_entry_offset(&header).map(|at| at as u64);
+    let mut patches = PATCHES.lock().unwrap();
+    if patches.len() >= 4096 {
+        patches.clear();
+    }
+    patches.insert(file_id.to_string(), patch);
+    Some(patch)
+}
+
+enum HeaderEnd {
+    Complete,
+    NeedMore,
+}
+
+/// Whether `data` (a file's first bytes) holds every top-level box up to and
+/// including `moov`, or shows there is none before the media data.
+fn movie_header_end(data: &[u8]) -> HeaderEnd {
+    let mut pos = 0usize;
+    loop {
+        let Some(head) = data.get(pos..pos + 8) else {
+            return HeaderEnd::NeedMore;
+        };
+        let size32 = u32::from_be_bytes(head[..4].try_into().unwrap()) as u64;
+        let size = match size32 {
+            0 => return HeaderEnd::Complete,
+            1 => match data.get(pos + 8..pos + 16) {
+                Some(large) => u64::from_be_bytes(large.try_into().unwrap()),
+                None => return HeaderEnd::NeedMore,
+            },
+            size => size,
+        };
+        match &head[4..8] {
+            b"mdat" => return HeaderEnd::Complete,
+            _ if size < 8 => return HeaderEnd::Complete,
+            b"moov" if pos as u64 + size <= data.len() as u64 => return HeaderEnd::Complete,
+            b"moov" => return HeaderEnd::NeedMore,
+            _ => pos = pos.saturating_add(size as usize),
+        }
+    }
+}
+
+/// Serve a Telegram file by byte range over MTProto, straight from Telegram
+/// to the listener: the first bytes leave as soon as Telegram returns them
+/// and nothing is kept on disk. `fourcc_patch` relabels a mislabelled AAC
+/// sample entry in flight. `None` when this route is unavailable for the
+/// file; nothing has been sent then and the caller uses `getFile`.
 async fn stream_telegram_segments(
     file_id: &str,
     filename: &str,
     content_type: &str,
     size: Option<u64>,
+    fourcc_patch: Option<u64>,
     headers: &HeaderMap,
 ) -> ApiResult<Option<Response>> {
     let Some(size) = size.filter(|size| *size > 0) else {
@@ -3329,14 +3425,12 @@ async fn stream_telegram_segments(
     }
     let range = parse_range(headers, size)?;
     let (start, end) = range.unwrap_or((0, size - 1));
-    telegram_cache::prewarm(file_id);
-    let local_id = file_id.to_string();
-    let Some(body) = telegram_segments::stream(file_id, size, start, end, move || {
-        telegram_cache::cached_local_path(&local_id)
-    })
-    .await
-    else {
+    let Some(body) = telegram_segments::stream(file_id, size, start, end).await else {
         return Ok(None);
+    };
+    let body = match fourcc_patch {
+        Some(at) => Body::from_stream(patch_fourcc(body, start, at)),
+        None => Body::from_stream(body),
     };
     let mut response = Response::builder()
         .header(header::CONTENT_TYPE, browser_audio_type(content_type))
@@ -3356,7 +3450,7 @@ async fn stream_telegram_segments(
         response.status(StatusCode::OK)
     };
     response
-        .body(Body::from_stream(body))
+        .body(body)
         .map(Some)
         .map_err(|err| ApiError::Custom(format!("failed to build response: {err}")))
 }
@@ -5279,6 +5373,50 @@ mod tests {
             .status = DownloadStatus::Completed;
         assert_eq!(next.await.unwrap().unwrap(), "final packet");
         assert!(body.next().await.is_none());
+    }
+
+    #[test]
+    fn movie_header_end_waits_for_a_whole_moov() {
+        let boxed = |typ: &[u8; 4], payload: usize| {
+            let mut out = ((payload + 8) as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(typ);
+            out.extend(std::iter::repeat_n(0u8, payload));
+            out
+        };
+        let mut file = boxed(b"ftyp", 16);
+        file.extend(boxed(b"moov", 100));
+        file.extend(boxed(b"mdat", 50));
+        let moov_end = 24 + 108;
+        assert!(matches!(movie_header_end(&file[..10]), HeaderEnd::NeedMore));
+        assert!(matches!(
+            movie_header_end(&file[..moov_end - 1]),
+            HeaderEnd::NeedMore
+        ));
+        assert!(matches!(
+            movie_header_end(&file[..moov_end]),
+            HeaderEnd::Complete
+        ));
+        // Media data before any moov: nothing more to wait for.
+        let mut no_moov = boxed(b"ftyp", 16);
+        no_moov.extend(boxed(b"mdat", 50));
+        assert!(matches!(
+            movie_header_end(&no_moov[..40]),
+            HeaderEnd::Complete
+        ));
+    }
+
+    #[tokio::test]
+    async fn fourcc_patch_applies_across_chunk_boundaries() {
+        use futures::StreamExt;
+        let chunks = vec![
+            Ok(axum::body::Bytes::from_static(b"0123al")),
+            Ok(axum::body::Bytes::from_static(b"ac6789")),
+        ];
+        let patched: Vec<u8> = patch_fourcc(futures::stream::iter(chunks), 100, 104)
+            .map(|chunk| chunk.unwrap().to_vec())
+            .concat()
+            .await;
+        assert_eq!(patched, b"0123mp4a6789");
     }
 
     #[test]

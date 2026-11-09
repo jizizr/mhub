@@ -244,7 +244,8 @@ async fn retag(cache: &MusicCache) -> ApiResult<Outcome> {
         }
     };
 
-    let audio = telegram_cache::read_file(&cache.file_id).await?;
+    let audio =
+        telegram_cache::read_file(&cache.file_id, Some(cache.music_size.max(0) as u64)).await?;
     let prepared = if lyric_tags::Container::sniff(&audio).is_none() {
         PreparedAudio::unchanged(audio, LYRICS_TAGGED)
     } else {
@@ -254,7 +255,7 @@ async fn retag(cache: &MusicCache) -> ApiResult<Outcome> {
         // A thumbnail cannot be sent by file_id; upload the old one again.
         let thumbnail = match cache.thumb_file_id.trim() {
             "" => None,
-            thumb => telegram_cache::read_file(thumb).await.ok(),
+            thumb => telegram_cache::read_file(thumb, None).await.ok(),
         };
         let chat_id = cache_upload_chat_id();
         let audio_len = prepared.audio.len();

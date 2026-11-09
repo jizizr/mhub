@@ -139,22 +139,6 @@ pub fn is_local_server_path(file_path: &str) -> bool {
     Path::new(file_path.trim()).is_absolute()
 }
 
-/// Start fetching a file the listener is about to request. A local Bot API
-/// server only answers `getFile` once the whole file is on its disk, so
-/// asking when the playback task is created lets that download overlap the
-/// round trips before the browser's audio request arrives.
-pub fn prewarm(file_id: &str) {
-    let file_id = file_id.trim().to_string();
-    if file_id.is_empty() || bot_token().is_err() {
-        return;
-    }
-    tokio::spawn(async move {
-        if let Err(err) = get_file(&file_id).await {
-            tracing::debug!("telegram prewarm failed: {err}");
-        }
-    });
-}
-
 async fn get_file_uncached(file_id: &str) -> ApiResult<TelegramFile> {
     let token = bot_token()?;
     let url = format!("{}/bot{}/getFile", telegram_api_base(), token);
@@ -507,9 +491,20 @@ fn bot_token() -> ApiResult<&'static str> {
     Ok(token)
 }
 
-/// The bytes of a file the bot can see, read from the local Bot API
-/// server's disk when it is there.
-pub async fn read_file(file_id: &str) -> ApiResult<Vec<u8>> {
+/// The bytes of a file the bot can see: over MTProto when `size` is known,
+/// otherwise from the local Bot API server's disk when it is there.
+pub async fn read_file(file_id: &str, size: Option<u64>) -> ApiResult<Vec<u8>> {
+    // Read straight from Telegram when the size is known, without making
+    // the Bot API server fetch and keep its own copy.
+    if let Some(size) = size.filter(|size| *size > 0) {
+        match crate::telegram_segments::read_all(file_id, size).await {
+            Some(Ok(bytes)) => return Ok(bytes),
+            Some(Err(err)) => {
+                tracing::warn!("Telegram direct read of a whole file failed, using getFile: {err}")
+            }
+            None => {}
+        }
+    }
     let file = locate_file(file_id).await?;
     if let Some(path) = local_file_path(&file.file_path)
         && let Ok(bytes) = tokio::fs::read(&path).await

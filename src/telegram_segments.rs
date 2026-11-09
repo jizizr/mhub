@@ -3,13 +3,19 @@
 //! The Bot API has no partial download: a local server's `getFile` answers
 //! only once the whole file is on its disk. Signing in to Telegram directly
 //! as the same bot lets a response start with the first 512 KiB instead.
-//! Everything here is optional: without `[bot].api_id` / `api_hash`, or when
-//! anything fails before the first chunk, callers keep using `getFile`.
+//! Bytes go straight from Telegram to the listener: nothing is written to
+//! disk, so a song cached on Telegram is downloaded once per request rather
+//! than once by us and again by the Bot API server. Everything here is
+//! optional: without `[bot].api_id` / `api_hash`, or when anything fails
+//! before the first chunk, callers keep using `getFile`.
 
 use crate::settings::SETTINGS;
 use axum::body::Bytes;
 use base64::Engine;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::{
+    FutureExt,
+    stream::{self, BoxStream, StreamExt},
+};
 use grammers_client::{
     Client, SenderPool,
     media::Downloadable,
@@ -24,14 +30,17 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// `upload.getFile` serves at most this much per request, at offsets that are
 /// multiples of it.
 const CHUNK: u64 = 512 * 1024;
-/// A first chunk slower than this is not worth waiting for: `getFile` is
-/// already running alongside.
+/// A first chunk slower than this is not worth waiting for: the caller falls
+/// back to `getFile` instead.
 const FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(8);
+/// Chunks requested at once. Sending stays in order; this only keeps the
+/// next few on their way while one is being sent, which is what makes whole
+/// file reads (a browser caching a song, the next-track prefetch) fast.
+const PARALLEL: usize = 4;
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 const CHUNK_RETRIES: u32 = 2;
 /// How long a failed sign-in keeps the direct route switched off.
@@ -374,96 +383,56 @@ async fn connection() -> Option<Arc<Connection>> {
     }
 }
 
-/// One chunk-aligned reader over a document, restartable after an error.
-struct Reader {
+/// Fetch chunk `index` of `document`: exactly the bytes the recorded size
+/// says it holds, retried `retries` times after a timeout or network error.
+async fn fetch_chunk(
     connection: Arc<Connection>,
-    document: Document,
-    /// Index of the next 512 KiB chunk to request.
-    next_chunk: u64,
-    download: grammers_client::client::DownloadIter,
-}
-
-impl Reader {
-    fn new(connection: Arc<Connection>, document: Document, chunk: u64) -> Self {
-        let download = Self::download(&connection, &document, chunk);
-        Self {
-            connection,
-            document,
-            next_chunk: chunk,
-            download,
-        }
-    }
-
-    fn download(
-        connection: &Connection,
-        document: &Document,
-        chunk: u64,
-    ) -> grammers_client::client::DownloadIter {
-        connection
+    document: Arc<Document>,
+    index: u64,
+    wait: Duration,
+    retries: u32,
+) -> io::Result<Bytes> {
+    let expected = CHUNK.min(document.size - index * CHUNK) as usize;
+    let mut attempt = 0;
+    loop {
+        // A fresh iterator per chunk: each moves its own request to the
+        // file's data centre and exports the bot's authorization there.
+        let mut download = connection
             .client
-            .iter_download(document)
-            .skip_chunks(chunk as i32)
-    }
-
-    /// The next chunk, or an error once the retries are spent. A finished
-    /// iterator is an error too: callers stop asking at the file's end.
-    async fn next(&mut self, wait: Duration) -> io::Result<Vec<u8>> {
-        let mut attempt = 0;
-        loop {
-            let failure = match tokio::time::timeout(wait, self.download.next()).await {
-                Ok(Ok(Some(bytes))) if !bytes.is_empty() => {
-                    self.next_chunk += 1;
-                    return Ok(bytes);
-                }
-                Ok(Ok(_)) => "Telegram 文件短于记录的长度".to_string(),
-                Ok(Err(err)) => err.to_string(),
-                Err(_) => "Telegram 分段读取超时".to_string(),
-            };
-            if attempt >= CHUNK_RETRIES {
-                return Err(io::Error::other(failure));
+            .iter_download(document.as_ref())
+            .skip_chunks(index as i32);
+        let failure = match tokio::time::timeout(wait, download.next()).await {
+            Ok(Ok(Some(bytes))) if bytes.len() == expected => return Ok(Bytes::from(bytes)),
+            // A length other than the recorded size implies is a wrong
+            // recorded size, which no retry changes.
+            Ok(Ok(Some(bytes))) if bytes.len() > expected => {
+                return Err(io::Error::other("Telegram 文件长于记录的长度"));
             }
-            attempt += 1;
-            tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
-            // An iterator that returned an error yields nothing afterwards.
-            self.download = Self::download(&self.connection, &self.document, self.next_chunk);
+            Ok(Ok(_)) => return Err(io::Error::other("Telegram 文件短于记录的长度")),
+            Ok(Err(err)) => err.to_string(),
+            Err(_) => "Telegram 分段读取超时".to_string(),
+        };
+        if attempt >= retries {
+            return Err(io::Error::other(failure));
         }
+        attempt += 1;
+        tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
     }
-}
-
-enum Source {
-    Remote(Box<Reader>),
-    Local(tokio::fs::File),
-}
-
-struct Cursor<L> {
-    source: Source,
-    /// Absolute offset of the next byte to send, and one past the last.
-    position: u64,
-    end: u64,
-    /// Bytes fetched from Telegram ahead of `position` and not sent yet.
-    pending: Bytes,
-    /// Recorded length of the whole file.
-    size: u64,
-    local: L,
 }
 
 /// The bytes `start..=end` of a Telegram document of `size` bytes, starting
-/// as soon as Telegram returns the first chunk.
+/// as soon as Telegram returns the first chunk. Later chunks are requested
+/// `PARALLEL` at a time ahead of the one being sent, and sent in order.
 ///
-/// `local` is asked between chunks whether the file has meanwhile arrived on
-/// disk (the Bot API server's own download); the rest is then read from
-/// there. Returns `None` when the direct route cannot serve this file, having
-/// sent nothing, so the caller can fall back to `getFile`.
-pub(crate) async fn stream<L>(
+/// Returns `None` when the direct route cannot serve this file, having sent
+/// nothing, so the caller can fall back to `getFile`. An error after that
+/// ends the body with an error rather than a clean, short EOF.
+pub(crate) async fn stream(
     file_id: &str,
     size: u64,
     start: u64,
     end: u64,
-    local: L,
-) -> Option<BoxStream<'static, io::Result<Bytes>>>
-where
-    L: Fn() -> Option<PathBuf> + Send + 'static,
-{
+) -> Option<BoxStream<'static, io::Result<Bytes>>> {
     if size == 0 || start > end || end >= size {
         tracing::warn!(
             size,
@@ -484,100 +453,75 @@ where
         tracing::warn!("Telegram direct reads not signed in; using getFile");
         return None;
     };
-    let document = Document {
+    let document = Arc::new(Document {
         dc_id,
         id,
         access_hash,
         file_reference,
         size,
+    });
+    let (first, last) = (start / CHUNK, end / CHUNK);
+    let chunks = {
+        let (connection, document) = (connection.clone(), document.clone());
+        stream::iter(first..=last)
+            .map(move |index| {
+                // Only the first chunk decides whether to fall back, so it
+                // gets one quick try; later ones may wait and retry.
+                let (wait, retries) = if index == first {
+                    (FIRST_CHUNK_TIMEOUT, 0)
+                } else {
+                    (CHUNK_TIMEOUT, CHUNK_RETRIES)
+                };
+                fetch_chunk(connection.clone(), document.clone(), index, wait, retries)
+                    .map(move |bytes| (index, bytes))
+            })
+            .buffered(PARALLEL)
     };
-    let mut reader = Reader::new(connection.clone(), document, start / CHUNK);
-    let first = match reader.next(FIRST_CHUNK_TIMEOUT).await {
-        Ok(bytes) => Bytes::from(bytes),
-        Err(err) => {
+    let mut chunks = Box::pin(chunks);
+    let first_chunk = match chunks.next().await {
+        Some((_, Ok(bytes))) => bytes,
+        Some((_, Err(err))) => {
             tracing::warn!("Telegram direct read failed before the first chunk: {err}");
             return None;
         }
+        None => return None,
     };
     // Reading from another data centre creates a key worth keeping.
     save_session(&connection);
-    let skip = (start % CHUNK) as usize;
-    if first.len() <= skip {
-        tracing::warn!("Telegram first chunk shorter than the requested offset; using getFile");
-        return None;
-    }
-    let cursor = Cursor {
-        source: Source::Remote(Box::new(reader)),
-        position: start,
-        end: end + 1,
-        pending: first.slice(skip..),
-        size,
-        local,
+    // Cut each chunk down to the part of `start..=end` it holds.
+    let trim = move |index: u64, bytes: Bytes| {
+        let offset = index * CHUNK;
+        let from = start.saturating_sub(offset) as usize;
+        let to = ((end + 1 - offset) as usize).min(bytes.len());
+        bytes.slice(from.min(to)..to)
     };
+    let head = stream::once(futures::future::ready(Ok(trim(first, first_chunk))));
+    let rest = chunks.map(move |(index, bytes)| bytes.map(|bytes| trim(index, bytes)));
+    // Stop after the first error: the body must not continue past a gap.
+    let mut failed = false;
     Some(
-        stream::unfold(cursor, |mut cursor| async move {
-            if cursor.position >= cursor.end {
-                return None;
-            }
-            let left = cursor.end - cursor.position;
-            let chunk = if !cursor.pending.is_empty() {
-                Ok(std::mem::take(&mut cursor.pending))
-            } else {
-                if matches!(cursor.source, Source::Remote(_))
-                    && let Some(path) = (cursor.local)()
-                    && let Ok(mut file) = tokio::fs::File::open(&path).await
-                    && file
-                        .seek(io::SeekFrom::Start(cursor.position))
-                        .await
-                        .is_ok()
-                {
-                    cursor.source = Source::Local(file);
-                }
-                match &mut cursor.source {
-                    Source::Remote(reader) => reader.next(CHUNK_TIMEOUT).await.map(Bytes::from),
-                    Source::Local(file) => {
-                        let mut buffer = vec![0u8; left.min(64 * 1024) as usize];
-                        match file.read(&mut buffer).await {
-                            Ok(0) => Err(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                "Telegram 本地文件短于记录的长度",
-                            )),
-                            Ok(read) => {
-                                buffer.truncate(read);
-                                Ok(Bytes::from(buffer))
-                            }
-                            Err(err) => Err(err),
-                        }
-                    }
-                }
-            };
-            match chunk {
-                Ok(mut bytes) => {
-                    if bytes.len() as u64 > left {
-                        // Telegram has more after what was recorded as the
-                        // last byte: the response's promised length is wrong.
-                        if cursor.end == cursor.size {
-                            cursor.position = cursor.end;
-                            return Some((
-                                Err(io::Error::other("Telegram 文件长于记录的长度")),
-                                cursor,
-                            ));
-                        }
-                        bytes.truncate(left as usize);
-                    }
-                    cursor.position += bytes.len() as u64;
-                    Some((Ok(bytes), cursor))
-                }
-                Err(err) => {
-                    // End the body here; a clean EOF would pass a short file
-                    // off as complete.
-                    cursor.position = cursor.end;
-                    Some((Err(err), cursor))
-                }
-            }
-        })
-        .boxed(),
+        head.chain(rest)
+            .take_while(move |item| {
+                let keep = !failed;
+                failed |= item.is_err();
+                futures::future::ready(keep)
+            })
+            .boxed(),
     )
+}
+
+/// The whole document, read over MTProto. `None` when the direct route
+/// cannot serve it (nothing was read); an error when it failed partway.
+pub(crate) async fn read_all(file_id: &str, size: u64) -> Option<io::Result<Vec<u8>>> {
+    let mut chunks = stream(file_id, size, 0, size.checked_sub(1)?).await?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    while let Some(chunk) = chunks.next().await {
+        match chunk {
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(err) => return Some(Err(err)),
+        }
+    }
+    Some(Ok(bytes))
 }
 
 #[cfg(test)]
