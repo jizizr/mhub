@@ -9,6 +9,7 @@ use base64::Engine;
 use lazy_static::lazy_static;
 use regex::Regex;
 use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::json;
 use sha1::{Digest, Sha1};
@@ -25,11 +26,13 @@ const LYRIC_ENDPOINT: &str = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_
 const SEARCH_ENDPOINT: &str = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp";
 
 lazy_static! {
-    static ref CLIENT: Client = Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .read_timeout(Duration::from_secs(30))
-        .build()
-        .expect("qq music http client");
+    static ref CLIENT: ClientWithMiddleware = crate::upstream_limit::audited(
+        Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(30))
+            .build()
+            .expect("qq music http client"),
+    );
     static ref QQ_SONG_PATH_PATTERNS: Vec<Regex> = vec![
         Regex::new(r"^n/ryqq/songDetail/([^/?#]+)$").unwrap(),
         Regex::new(r"^n/ryqq_v2/songDetail/([^/?#]+)$").unwrap(),
@@ -940,9 +943,9 @@ async fn verify_download_url(url: &str) -> Result<(), BotError> {
 }
 
 fn apply_qq_headers(
-    mut request: reqwest::RequestBuilder,
+    mut request: reqwest_middleware::RequestBuilder,
     include_cookie: bool,
-) -> reqwest::RequestBuilder {
+) -> reqwest_middleware::RequestBuilder {
     request = request
         .header("User-Agent", "QQMusic/14090508 (android 12)")
         .header("Referer", "https://y.qq.com/")

@@ -41,10 +41,14 @@ async fn main() {
     };
 
     tracing::info!("music-api listening on http://{addr}");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server failed");
+    // The peer address decides whether X-Real-IP is trusted for upstream quotas.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("server failed");
 }
 
 fn parse_addr(name: &str, value: &str) -> SocketAddr {

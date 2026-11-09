@@ -20,6 +20,8 @@ pub struct Settings {
     pub audio_cache: AudioCache,
     #[serde(default)]
     pub gateway: Gateway,
+    #[serde(default)]
+    pub upstream_limit: crate::upstream_limit::Settings,
 }
 
 /// Loopback API that lends MHub's music sources to other local services,
@@ -374,5 +376,9 @@ mod tests {
         assert!(!settings.music.applemusic.wrapper_lite_enabled);
         assert!(settings.auth.rp_origin.is_empty());
         assert!(settings.auth.turnstile_secret.is_empty());
+        assert_eq!(
+            settings.upstream_limit.download,
+            crate::upstream_limit::Settings::default().download
+        );
     }
 }

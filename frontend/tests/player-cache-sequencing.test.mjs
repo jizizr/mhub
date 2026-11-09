@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 let moduleId = 0;
-async function harness({ saveData = false, failPersistenceOnce = false, growing = false } = {}) {
+async function harness({ saveData = false, failPersistenceOnce = false, growing = false, rateLimitPrefetchOnce = 0 } = {}) {
   const current = { id: "current", platform: "applemusic", quality: "lossless", streaming_mode: "wasm_alac", duration: 1000 };
   const next = { ...current, id: "next" };
   const status = { volume: 0.8, speed: 1, state: "paused", playIndex: 0, repeatMode: "list", currentTrack: current, quality: "lossless", persist() {}, setNotice() {} };
@@ -46,7 +46,15 @@ async function harness({ saveData = false, failPersistenceOnce = false, growing 
       if (failPersistenceOnce && persistAttempts === 1) throw new DOMException("Temporary cache write failure", "QuotaExceededError");
       return new Promise((resolve) => { persist = resolve; });
     },
-    prefetchTrackSource: async (track) => { events.push({ type: "prefetch", track }); return true; },
+    prefetchTrackSource: async (track) => {
+      events.push({ type: "prefetch", track });
+      if (rateLimitPrefetchOnce) {
+        const error = Object.assign(new Error("请求过于频繁"), { status: 429, retryAfterMs: rateLimitPrefetchOnce });
+        rateLimitPrefetchOnce = 0;
+        throw error;
+      }
+      return true;
+    },
   });
   await player.load("test:current", false, current);
   return { player, worklet, events, timers, persist: () => persist(true) };
@@ -72,6 +80,28 @@ test("ALAC EOF starts the next request immediately after persistence without ano
   await runTimers(h); // prefetch's cooperative zero-delay yield
   assert.deepEqual(h.events.map((e) => e.type), ["persist", "prefetch"]);
   assert.equal(h.events[1].track.id, "next");
+});
+
+test("a prefetch over the client quota retries only after the server's wait", async () => {
+  const h = await harness({ rateLimitPrefetchOnce: 45000 });
+  const warn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+  try {
+    h.worklet.onStreamComplete({ duration: 1000 });
+    await tick();
+    h.persist(); await tick();
+    await runTimers(h); // cooperative yield, then the refused prefetch
+    await tick();
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(h.events.map((e) => e.type), ["persist", "prefetch"]);
+  assert.equal(warnings.length, 0, "a quota refusal is expected, not a failure");
+  assert.deepEqual([...h.timers.values()].map(({ delay }) => delay), [45000]);
+  await runTimers(h); // the retry
+  await runTimers(h); // its cooperative yield
+  assert.deepEqual(h.events.map((e) => e.type), ["persist", "prefetch", "prefetch"]);
 });
 
 test("Data Saver still persists received ALAC bytes but blocks next-track network prefetch", async () => {

@@ -401,6 +401,16 @@ async function resolveTrackSource(track, { prefetch = false } = {}) {
         selectedId: track.selected_id || track.source_id,
         quality: requestTrack.quality,
         streamingMode: streamingMode || null,
+        // Over the server's per-client download quota: a prefetch gives up at
+        // once and the player retries it after the server's wait; the song
+        // someone asked for waits it out and plays when allowed.
+        rateLimit: prefetch
+          ? { maxWaitMs: 0 }
+          : {
+            // A song the listener chose waits up to two minutes.
+            maxWaitMs: 2 * 60 * 1000,
+            onWait: (ms) => status.toast(`切歌太频繁，${Math.ceil(ms / 1000)} 秒后自动播放`),
+          },
       })).playback;
       let cached = await getCachedTrack(requestKey).catch(() => null);
       if (hasCachedAudio(cached) && !cacheEntryMatches(cached, requestTrack)) {

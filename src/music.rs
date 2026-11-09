@@ -201,7 +201,11 @@ pub async fn search(
         // Apple's public search page usually still answers. Bulk work keeps
         // the gate's pacing instead.
         Err(ApiError::RateLimited { .. }) if platform == MusicPlatform::AppleMusic => {
-            applemusic::search_web(keyword, limit).await
+            crate::upstream_limit::metered(
+                crate::upstream_limit::Kind::Search,
+                applemusic::search_web(keyword, limit),
+            )
+            .await
         }
         result => result,
     }

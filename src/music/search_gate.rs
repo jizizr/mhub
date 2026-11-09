@@ -16,7 +16,7 @@
 //!   re-imports and overlapping playlists cost no upstream requests.
 
 use super::provider::{MusicPlatform, MusicSearchItem};
-use crate::{ApiError, ApiResult};
+use crate::{ApiError, ApiResult, upstream_limit};
 use std::{
     collections::HashMap,
     future::Future,
@@ -107,13 +107,27 @@ impl SearchGate {
         if let Some(items) = self.cached(&key) {
             return Ok(items);
         }
-        self.admit(platform, lane).await?;
-        let result = match lane {
-            Lane::Interactive => upstream().await,
-            Lane::Bulk { .. } => tokio::time::timeout(self.tuning.bulk_timeout, upstream())
-                .await
-                .unwrap_or_else(|_| Err(ApiError::Custom("平台搜索超时".to_string()))),
+        // Only a search that leaves the cache costs the client.
+        let unit = match lane {
+            Lane::Interactive => upstream_limit::Kind::Search,
+            Lane::Bulk { .. } => upstream_limit::Kind::Import,
         };
+        let charge = upstream_limit::charge(unit).await?;
+        if let Err(error) = self.admit(platform, lane).await {
+            if let Some(charge) = charge {
+                charge.refund();
+            }
+            return Err(error);
+        }
+        let result = upstream_limit::within(unit, async {
+            match lane {
+                Lane::Interactive => upstream().await,
+                Lane::Bulk { .. } => tokio::time::timeout(self.tuning.bulk_timeout, upstream())
+                    .await
+                    .unwrap_or_else(|_| Err(ApiError::Custom("平台搜索超时".to_string()))),
+            }
+        })
+        .await;
         match &result {
             Ok(items) => {
                 self.record_success(platform);

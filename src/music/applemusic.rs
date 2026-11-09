@@ -13,6 +13,7 @@ use oxideav_mp4::cenc::{SencBox, SubsampleEntry, TencBox, parse_senc, parse_tenc
 use protobuf::Message;
 use regex::Regex;
 use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 use rsa::{RsaPrivateKey, pkcs1::DecodeRsaPrivateKey};
 use scraper::{Html, Selector};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -57,29 +58,35 @@ const APPLE_WRAPPER_LITE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
 
 lazy_static! {
-    static ref CLIENT: Client = {
+    static ref CLIENT: ClientWithMiddleware = {
         let timeout = apple_timeout();
-        Client::builder()
-            .timeout(timeout)
-            .build()
-            .unwrap_or_else(|_| Client::new())
+        crate::upstream_limit::audited(
+            Client::builder()
+                .timeout(timeout)
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+        )
     };
     // Media transfers can legitimately outlive any whole-request deadline
     // (lossless tracks are tens of MB), so this client only bounds connect
     // and per-read stalls instead of the total request time.
-    static ref MEDIA_CLIENT: Client = {
+    static ref MEDIA_CLIENT: ClientWithMiddleware = {
         let timeout = apple_timeout();
-        Client::builder()
-            .connect_timeout(timeout)
-            .read_timeout(timeout)
-            .build()
-            .unwrap_or_else(|_| Client::new())
+        crate::upstream_limit::audited(
+            Client::builder()
+                .connect_timeout(timeout)
+                .read_timeout(timeout)
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+        )
     };
-    static ref WRAPPER_LITE_MEDIA_CLIENT: Client = Client::builder()
-        .connect_timeout(apple_timeout())
-        .read_timeout(APPLE_WRAPPER_LITE_MEDIA_IDLE_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| Client::new());
+    static ref WRAPPER_LITE_MEDIA_CLIENT: ClientWithMiddleware = crate::upstream_limit::audited(
+        Client::builder()
+            .connect_timeout(apple_timeout())
+            .read_timeout(APPLE_WRAPPER_LITE_MEDIA_IDLE_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| Client::new()),
+    );
     static ref DEVELOPER_TOKEN: RwLock<Option<String>> = RwLock::new(None);
     static ref DEVELOPER_TOKEN_FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
     static ref JS_ASSET_PATTERN: Regex = Regex::new(r#"/assets/index[^"'\s]*\.js"#).unwrap();
@@ -3047,7 +3054,7 @@ async fn download_enhanced_hls_part(part: &EnhancedHlsPart) -> Result<Vec<u8>, B
 
 async fn download_enhanced_hls_part_with_retry(
     part: &EnhancedHlsPart,
-    client: &Client,
+    client: &ClientWithMiddleware,
 ) -> Result<Vec<u8>, BotError> {
     let mut last_error = None;
     for attempt in 0..3u32 {
@@ -3066,7 +3073,7 @@ async fn download_enhanced_hls_part_with_retry(
 
 async fn download_enhanced_hls_part_with_client(
     part: &EnhancedHlsPart,
-    client: &Client,
+    client: &ClientWithMiddleware,
 ) -> Result<Vec<u8>, BotError> {
     let mut request = client.get(&part.url).header("User-Agent", APPLE_MUSIC_UA);
     if let Some(range) = part.range {

@@ -3,6 +3,7 @@ use crate::BotError;
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, time::Duration};
@@ -68,10 +69,12 @@ const PLAYER_CLIENTS: [PlayerClient; 2] = [
 pub static YOUTUBE_MUSIC_PROVIDER: YouTubeMusicProvider = YouTubeMusicProvider;
 
 lazy_static! {
-    static ref CLIENT: Client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .expect("youtube music http client");
+    static ref CLIENT: ClientWithMiddleware = crate::upstream_limit::audited(
+        Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("youtube music http client"),
+    );
     static ref VISITOR_DATA: Mutex<String> = Mutex::new(String::new());
 }
 

@@ -53,6 +53,8 @@ let audioErrorTrackToken = -1;
 const activePrefetches = new Map();
 let prefetchRetryTimer = 0;
 let prefetchRetryAttempt = 0;
+// The server's wait after it refused the last prefetch over this client's quota.
+let prefetchRateLimitWaitMs = 0;
 let activeTrackCache = null;
 let autoplayGeneration = 0;
 let autoplayRequest = null;
@@ -1726,6 +1728,10 @@ async function prefetchNextTrack(myToken = trackToken) {
       return ready;
     })
     .catch((error) => {
+      if (error?.status === 429) {
+        prefetchRateLimitWaitMs = Number(error.retryAfterMs) || 0;
+        return false;
+      }
       console.warn("[player] next-track prefetch failed", error);
       return false;
     })
@@ -1758,7 +1764,10 @@ function schedulePrefetchNextTrack(myToken, { immediate = false } = {}) {
           PREFETCH_RETRY_DELAYS_MS.length - 1,
         );
         prefetchRetryAttempt += 1;
-        prefetchRetryTimer = window.setTimeout(attempt, PREFETCH_RETRY_DELAYS_MS[retryIndex]);
+        // Never retry before the server said the quota allows it again.
+        const delay = Math.max(PREFETCH_RETRY_DELAYS_MS[retryIndex], prefetchRateLimitWaitMs);
+        prefetchRateLimitWaitMs = 0;
+        prefetchRetryTimer = window.setTimeout(attempt, delay);
       });
       return;
     }

@@ -3,19 +3,73 @@ import { playbackAudioUrl, withTaskVersion } from "./media-routing.js";
 const API = "/api/v1";
 const playbackStatusRequests = new Map();
 
-async function request(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      ...(options.body ? { "content-type": "application/json" } : {}),
-      ...(options.headers ?? {}),
-    },
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail || `HTTP ${response.status}`);
+// How long a request waits out the server's per-client quota by default
+// before the 429 reaches the caller. Kept short so an interactive action
+// still answers; callers that know better pass `rateLimit`.
+export const DEFAULT_RATE_LIMIT_WAIT_MS = 10000;
+const MIN_RATE_LIMIT_RETRY_MS = 1000;
+
+/** The server refused because this client used up its quota for now. */
+export class RateLimitError extends Error {
+  constructor(message, retryAfterMs) {
+    super(message);
+    this.name = "RateLimitError";
+    this.status = 429;
+    this.retryAfterMs = retryAfterMs;
   }
-  return response;
+}
+
+export function isRateLimited(error) {
+  return error instanceof RateLimitError;
+}
+
+/** `Retry-After` as milliseconds: delta-seconds or an HTTP date. */
+export function retryAfterMs(value, now = Date.now()) {
+  const text = String(value ?? "").trim();
+  if (!text) return MIN_RATE_LIMIT_RETRY_MS;
+  if (/^\d+$/.test(text)) return Math.max(MIN_RATE_LIMIT_RETRY_MS, Number(text) * 1000);
+  const date = Date.parse(text);
+  return Number.isFinite(date) ? Math.max(MIN_RATE_LIMIT_RETRY_MS, date - now) : MIN_RATE_LIMIT_RETRY_MS;
+}
+
+function pause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+  });
+}
+
+/**
+ * `rateLimit.maxWaitMs` is the total time spent waiting out 429 answers
+ * before giving up (0 never waits); `rateLimit.onWait(ms)` runs before each
+ * wait so the caller can tell the listener a retry is coming.
+ */
+async function request(path, options = {}) {
+  const { rateLimit = {}, ...fetchOptions } = options;
+  const maxWaitMs = rateLimit.maxWaitMs ?? DEFAULT_RATE_LIMIT_WAIT_MS;
+  const wait = rateLimit.wait || pause;
+  let waited = 0;
+  for (;;) {
+    const response = await fetch(path, {
+      ...fetchOptions,
+      headers: {
+        ...(fetchOptions.body ? { "content-type": "application/json" } : {}),
+        ...(fetchOptions.headers ?? {}),
+      },
+    });
+    if (response.ok) return response;
+    const payload = await response.json().catch(() => ({}));
+    if (response.status !== 429) throw new Error(payload.detail || `HTTP ${response.status}`);
+    const delay = retryAfterMs(response.headers.get("retry-after"));
+    if (waited + delay > maxWaitMs) {
+      const seconds = Math.ceil(delay / 1000);
+      throw new RateLimitError(`${payload.detail || "请求过于频繁"}（约 ${seconds} 秒后可重试）`, delay);
+    }
+    rateLimit.onWait?.(delay);
+    await wait(delay, fetchOptions.signal);
+    waited += delay;
+  }
 }
 
 export function getHealth() {
@@ -81,14 +135,6 @@ const MATCH_BATCH = 25;
 // Rounds in a row that may finish nothing before the rest is left deferred.
 const MATCH_MAX_STALLS = 5;
 
-function pause(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(signal.reason);
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
-  });
-}
-
 // Matches a whole playlist in small batches. The server paces its platform
 // searches and answers "deferred" for songs it could not search yet; those
 // are resent after its suggested wait, so a throttled platform slows the
@@ -111,6 +157,9 @@ export async function matchCollection({
     const response = await request(`${API}/collections/match`, {
       method: "POST",
       signal,
+      // An import is background work: wait out the client quota and show
+      // the wait in the progress instead of failing the whole import.
+      rateLimit: { maxWaitMs: 5 * 60 * 1000, onWait: report, wait },
       body: JSON.stringify({
         source_platform: sourcePlatform,
         target_platform: targetPlatform,
@@ -157,9 +206,10 @@ export async function matchCollection({
   };
 }
 
-export function createPlayback({ platform, query, selectedId, quality, includeCover = false, streamingMode = null }) {
+export function createPlayback({ platform, query, selectedId, quality, includeCover = false, streamingMode = null, rateLimit }) {
   return request(`${API}/playbacks`, {
     method: "POST",
+    rateLimit,
     body: JSON.stringify({
       platform,
       query,

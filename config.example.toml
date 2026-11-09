@@ -84,3 +84,24 @@ turnstile_secret = ""
 # hours, and the oldest go first once the directory passes max_gib.
 idle_hours = 72
 max_gib = 20
+
+[upstream_limit]
+# Per-client quotas on work that reaches a music platform: new downloads,
+# searches the search cache cannot answer, lyrics and catalog metadata.
+# Cached songs, status polls, audio and covers are free. Every client address
+# (IPv6 by /64) has its own buckets; nothing is shared between clients.
+# shadow logs what enforce would do without waiting or refusing; off disables.
+mode = "shadow"
+# Peers whose X-Real-IP names the client. The proxy must overwrite that header
+# with the address it verified.
+trusted_proxies = ["127.0.0.1/32", "::1/128"]
+# A shortfall that refills within this time waits instead of answering 429.
+max_wait_ms = 3000
+# burst = bucket size, per_minute = refill rate; per_minute = 0 disables a kind.
+# Bursts cover an ordinary listener's busiest ten minutes; refill rates stay
+# under a client that keeps going around the clock.
+download = { burst = 30, per_minute = 2 }
+search = { burst = 20, per_minute = 2 }
+import = { burst = 150, per_minute = 30 }
+lyrics = { burst = 30, per_minute = 2 }
+metadata = { burst = 20, per_minute = 3 }

@@ -11,7 +11,7 @@ use crate::{
     matching,
     music::{self, ResolveOptions},
     settings::SETTINGS,
-    telegram_cache,
+    telegram_cache, upstream_limit,
 };
 use axum::{
     Json, Router,
@@ -508,7 +508,9 @@ fn app_with_state(state: AppState, serve_web: bool) -> Router {
         .route("/api/v1/playbacks/:id/lyrics", get(download_lyrics))
         .route("/api/v1/playbacks/:id/loudness", get(playback_loudness))
         .with_state(state)
-        .merge(crate::accounts::router(accounts));
+        .merge(crate::accounts::router(accounts))
+        // Upstream work started by a request is metered against its client.
+        .layer(middleware::from_fn(crate::upstream_limit::attach_principal));
 
     let router = if serve_web {
         // The frontend build writes `.br`/`.gz` siblings; serve them directly
@@ -655,7 +657,11 @@ async fn track_info(
     Json<music::TrackInfo>,
 )> {
     let platform = music::parse_platform(&platform)?;
-    let info = music::track_info(platform, &id).await?;
+    let info = upstream_limit::metered(
+        upstream_limit::Kind::Metadata,
+        music::track_info(platform, &id),
+    )
+    .await?;
     Ok((
         [(header::CACHE_CONTROL, "public, max-age=3600")],
         Json(info),
@@ -774,7 +780,11 @@ async fn resolve_collection(
         return Err(ApiError::Custom("url 不能为空".to_string()));
     }
     let limit = collection_request_limit(params.limit)?;
-    let collection = music::collection(platform, source_url, limit).await?;
+    let collection = upstream_limit::metered(
+        upstream_limit::Kind::Metadata,
+        music::collection(platform, source_url, limit),
+    )
+    .await?;
     if params.limit.is_none() && collection.items.len() > music::MAX_COLLECTION_ITEMS {
         return Err(ApiError::Custom(format!(
             "歌单超过 {} 首，已停止导入以避免截断；请先拆分歌单",
@@ -886,7 +896,8 @@ async fn match_collection(
                 ApiError::RateLimited {
                     retry_after: Some(wait),
                     ..
-                } => wait,
+                }
+                | ApiError::ClientRateLimited { retry_after: wait } => wait,
                 _ => DEFERRED_RETRY,
             };
             retry_after = Some(retry_after.map_or(wait, |current| current.min(wait)));
@@ -1010,17 +1021,24 @@ async fn lyrics(Query(params): Query<LyricsParams>) -> ApiResult<Json<LyricsResp
         .as_deref()
         .is_some_and(|title| !title.trim().is_empty())
     {
-        music::lyrics_for_track(
-            platform,
-            track_id,
-            params.title.as_deref().unwrap_or_default(),
-            params.artist.as_deref().unwrap_or_default(),
-            params.album.as_deref().unwrap_or_default(),
-            params.duration,
+        upstream_limit::metered(
+            upstream_limit::Kind::Lyrics,
+            music::lyrics_for_track(
+                platform,
+                track_id,
+                params.title.as_deref().unwrap_or_default(),
+                params.artist.as_deref().unwrap_or_default(),
+                params.album.as_deref().unwrap_or_default(),
+                params.duration,
+            ),
         )
         .await?
     } else {
-        music::lyrics(platform, track_id).await?
+        upstream_limit::metered(
+            upstream_limit::Kind::Lyrics,
+            music::lyrics(platform, track_id),
+        )
+        .await?
     };
     Ok(Json(lyrics_response(platform.id(), track_id, lyrics)))
 }
@@ -1085,13 +1103,17 @@ async fn start_download(state: &AppState, request: DownloadRequest) -> ApiResult
     let query = request.query.trim().to_string();
     let selected_id = request.selected_id.filter(|id| !id.trim().is_empty());
     let resolved_track = if selected_id.is_none() {
+        // Without an id the platform is searched for the query.
         Some(
-            music::resolve(ResolveOptions {
-                platform,
-                query: query.clone(),
-                selected_id: None,
-                quality: Some(quality.clone()),
-            })
+            upstream_limit::metered(
+                upstream_limit::Kind::Search,
+                music::resolve(ResolveOptions {
+                    platform,
+                    query: query.clone(),
+                    selected_id: None,
+                    quality: Some(quality.clone()),
+                }),
+            )
             .await?,
         )
     } else {
@@ -1123,6 +1145,17 @@ async fn start_download(state: &AppState, request: DownloadRequest) -> ApiResult
     // of create -> poll -> complete, which is especially noticeable when the
     // browser is starting a song over a high-latency connection.
     let cached = find_music_cache(platform.id(), &track_id, &quality).await?;
+    let cache_hit = cached
+        .as_ref()
+        .is_some_and(|cache| !cache.file_id.trim().is_empty());
+    // Only a song that is neither live nor cached reaches the platform, so
+    // only that costs the client a download. Charged before the task is
+    // published, so a refused request leaves nothing behind.
+    let charge = if cache_hit {
+        None
+    } else {
+        upstream_limit::charge(upstream_limit::Kind::Download).await?
+    };
 
     let media_revision = uuid::Uuid::new_v4().simple().to_string();
     let task = DownloadTask {
@@ -1168,6 +1201,9 @@ async fn start_download(state: &AppState, request: DownloadRequest) -> ApiResult
     // otherwise a worker could publish filenames into another generation's
     // directory. Recheck atomically before publishing or starting work.
     if let Some(existing) = register_download_task(state, &task).await {
+        if let Some(charge) = charge {
+            charge.refund();
+        }
         return Ok(existing);
     }
 
@@ -1182,7 +1218,7 @@ async fn start_download(state: &AppState, request: DownloadRequest) -> ApiResult
             .ok_or_else(|| ApiError::Custom("Download not found".to_string()));
     }
 
-    tokio::spawn(run_download(state.clone(), id));
+    tokio::spawn(run_download(state.clone(), id, charge));
     Ok(task)
 }
 
@@ -1304,13 +1340,16 @@ async fn download_lyrics(
     Ok(Json(lyrics_response(
         platform.id(),
         track_id,
-        music::lyrics_for_track(
-            platform,
-            track_id,
-            task.title.as_deref().unwrap_or_default(),
-            task.artist.as_deref().unwrap_or_default(),
-            task.album.as_deref().unwrap_or_default(),
-            task.duration,
+        upstream_limit::metered(
+            upstream_limit::Kind::Lyrics,
+            music::lyrics_for_track(
+                platform,
+                track_id,
+                task.title.as_deref().unwrap_or_default(),
+                task.artist.as_deref().unwrap_or_default(),
+                task.album.as_deref().unwrap_or_default(),
+                task.duration,
+            ),
         )
         .await?,
     )))
@@ -1641,8 +1680,13 @@ fn create_download_response(state: &AppState, task: &DownloadTask) -> CreateDown
     }
 }
 
-async fn run_download(state: AppState, id: String) {
-    if let Err(err) = run_download_inner(state.clone(), id.clone()).await {
+async fn run_download(state: AppState, id: String, mut charge: Option<upstream_limit::Charge>) {
+    let result = upstream_limit::within(
+        upstream_limit::Kind::Download,
+        run_download_inner(state.clone(), id.clone(), &mut charge),
+    )
+    .await;
+    if let Err(err) = result {
         let mut downloads = state.downloads.write().await;
         if let Some(task) = downloads.get_mut(&id) {
             task.status = DownloadStatus::Failed;
@@ -1653,7 +1697,18 @@ async fn run_download(state: AppState, id: String) {
     }
 }
 
-async fn run_download_inner(state: AppState, id: String) -> ApiResult<()> {
+/// `charge` is the client's download unit; it is refunded when the song turns
+/// out to be live or cached after all and the platform is not needed.
+async fn run_download_inner(
+    state: AppState,
+    id: String,
+    charge: &mut Option<upstream_limit::Charge>,
+) -> ApiResult<()> {
+    let refund = |charge: &mut Option<upstream_limit::Charge>| {
+        if let Some(charge) = charge.take() {
+            charge.refund();
+        }
+    };
     let task = {
         let mut downloads = state.downloads.write().await;
         let task = downloads
@@ -1682,6 +1737,7 @@ async fn run_download_inner(state: AppState, id: String) -> ApiResult<()> {
         && let Some(inflight) =
             find_inflight(&state, platform.id(), selected_id, &task.quality).await
     {
+        refund(charge);
         complete_task_from_inflight(&state, &id, &inflight).await?;
         return Ok(());
     }
@@ -1697,6 +1753,7 @@ async fn run_download_inner(state: AppState, id: String) -> ApiResult<()> {
         && let Some(cache) = find_music_cache(track.platform.id(), &track.id, &task.quality).await?
         && !cache.file_id.trim().is_empty()
     {
+        refund(charge);
         complete_task_from_cache(&state, &id, &track.id, &cache).await?;
         return Ok(());
     }
@@ -1704,6 +1761,7 @@ async fn run_download_inner(state: AppState, id: String) -> ApiResult<()> {
     let inflight_key = inflight_key(track.platform.id(), &track.id, &task.quality);
     let (inflight, owns_inflight) = register_inflight(&state, inflight_key.clone()).await;
     if !owns_inflight {
+        refund(charge);
         complete_task_from_inflight(&state, &id, &inflight).await?;
         return Ok(());
     }
@@ -3041,7 +3099,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self {
             ApiError::Http { status, .. } => status,
-            ApiError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::RateLimited { .. } | ApiError::ClientRateLimited { .. } => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
             ApiError::Custom(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -3049,7 +3109,10 @@ impl IntoResponse for ApiError {
             ApiError::RateLimited {
                 retry_after: Some(wait),
                 ..
-            } => Some(wait.as_secs_f64().ceil().max(1.0) as u64),
+            }
+            | ApiError::ClientRateLimited { retry_after: wait } => {
+                Some(wait.as_secs_f64().ceil().max(1.0) as u64)
+            }
             _ => None,
         };
         let body = Json(serde_json::json!({ "detail": self.to_string() }));

@@ -77,12 +77,22 @@ async fn recommendation_pool(refresh: bool) -> Result<RecommendationHome, BotErr
     if let Some(home) = cached_home(ttl) {
         return Ok(home);
     }
+    // Only a fetch costs the client; one refused falls back to a stale pool.
+    let _charge = match crate::upstream_limit::charge(crate::upstream_limit::Kind::Metadata).await {
+        Ok(charge) => charge,
+        Err(error) => return cached_home(STALE_HOME_TTL).ok_or(error),
+    };
     if let Ok(mut cache) = HOME_CACHE.write()
         && let Some(cache) = cache.as_mut()
     {
         cache.attempted_at = Instant::now();
     }
-    match fetch_recommendation_pool().await {
+    match crate::upstream_limit::within(
+        crate::upstream_limit::Kind::Metadata,
+        fetch_recommendation_pool(),
+    )
+    .await
+    {
         Ok(home) => {
             if !home.tracks.is_empty()
                 && let Ok(mut cache) = HOME_CACHE.write()
@@ -348,10 +358,27 @@ pub async fn continuation_recommendations(
     let mut excluded = exclude.to_vec();
     excluded.push(seed_id.to_string());
     let seeds = autoplay_seeds(seed_id, seeds);
+    // An AutoPlay station is always fetched from Apple.
+    let _charge = crate::upstream_limit::charge(crate::upstream_limit::Kind::Metadata).await?;
+    crate::upstream_limit::within(
+        crate::upstream_limit::Kind::Metadata,
+        continuation_from_seeds(seed_id, &seeds, station, &mut excluded, exclude, limit),
+    )
+    .await
+}
+
+async fn continuation_from_seeds(
+    seed_id: &str,
+    seeds: &[String],
+    station: Option<&str>,
+    excluded: &mut Vec<String>,
+    exclude: &[String],
+    limit: usize,
+) -> Result<RecommendationContinuation, BotError> {
     let mut station_id = None;
-    match autoplay_station_tracks(&seeds, station, limit).await {
+    match autoplay_station_tracks(seeds, station, limit).await {
         Ok((id, pool)) => {
-            let tracks = select_tracks(pool, limit, &excluded);
+            let tracks = select_tracks(pool, limit, excluded);
             if !tracks.is_empty() {
                 return Ok(RecommendationContinuation {
                     source: "applemusic-autoplay".into(),
@@ -363,7 +390,7 @@ pub async fn continuation_recommendations(
         }
         Err(error) => tracing::info!("Apple Music AutoPlay station unavailable: {error}"),
     }
-    let mut result = related_continuation(seed_id, &mut excluded, exclude, limit).await?;
+    let mut result = related_continuation(seed_id, excluded, exclude, limit).await?;
     result.station = station_id;
     Ok(result)
 }

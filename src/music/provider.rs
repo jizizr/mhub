@@ -25,6 +25,8 @@ lazy_static! {
             .expect("music http client");
         ClientBuilder::new(client)
             .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            // Inside the retry layer, so each attempt is counted.
+            .with(crate::upstream_limit::AuditMiddleware)
             .build()
     };
 }

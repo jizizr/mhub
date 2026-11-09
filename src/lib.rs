@@ -9,6 +9,7 @@ pub mod matching;
 pub mod music;
 pub mod settings;
 pub mod telegram_cache;
+pub mod upstream_limit;
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
@@ -31,6 +32,9 @@ pub enum ApiError {
         message: String,
         retry_after: Option<std::time::Duration>,
     },
+    /// This client used up its own quota of upstream work.
+    #[error("请求过于频繁，请稍后再试")]
+    ClientRateLimited { retry_after: std::time::Duration },
     #[error("{0}")]
     IOError(#[from] std::io::Error),
     #[error("{0}")]
