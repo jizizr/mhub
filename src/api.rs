@@ -11,7 +11,7 @@ use crate::{
     matching,
     music::{self, ResolveOptions},
     settings::SETTINGS,
-    telegram_cache, upstream_limit,
+    telegram_cache, telegram_segments, upstream_limit,
 };
 use axum::{
     Json, Router,
@@ -486,6 +486,7 @@ fn start_state() -> AppState {
     };
     spawn_audio_cache_sweeper(state.clone());
     music::spawn_netease_session_keeper(state.data_dir.clone());
+    telegram_segments::warm_up();
     state
 }
 
@@ -1090,12 +1091,40 @@ async fn create_download(
     Json(request): Json<DownloadRequest>,
 ) -> ApiResult<(StatusCode, Json<CreateDownloadResponse>)> {
     let task = start_download(&state, request).await?;
+    prewarm_telegram_audio(&state, &task).await;
     let status = if task.status == DownloadStatus::Completed {
         StatusCode::OK
     } else {
         StatusCode::ACCEPTED
     };
     Ok((status, Json(create_download_response(&state, &task))))
+}
+
+/// A browser that was just handed a completed task requests its audio next.
+/// When those bytes are only on Telegram, start bringing them back now rather
+/// than when that request arrives. Not done for gateway callers, which send
+/// the file by its id and never read it.
+async fn prewarm_telegram_audio(state: &AppState, task: &DownloadTask) {
+    if task.status != DownloadStatus::Completed {
+        return;
+    }
+    let Some(file_id) = task.file_id.as_deref().filter(|id| !id.trim().is_empty()) else {
+        return;
+    };
+    if let Some(filename) = task.filename.as_deref() {
+        let local = state
+            .data_dir
+            .join("downloads")
+            .join(&task.work_id)
+            .join(filename);
+        if fs::metadata(&local)
+            .await
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        {
+            return;
+        }
+    }
+    telegram_cache::prewarm(file_id);
 }
 
 /// Joins the live task for this song and quality, completes a new one from
@@ -1418,7 +1447,14 @@ async fn download_source(
             message: "音频文件不存在".to_string(),
         });
     };
-    stream_telegram_file(file_id, filename, Some("audio/mp4".to_string()), &headers).await
+    stream_telegram_file(
+        file_id,
+        filename,
+        Some("audio/mp4".to_string()),
+        task.byte_size,
+        &headers,
+    )
+    .await
 }
 
 /// Serve SPLALAC1 packets to a capable WebAssembly decoder. The regular
@@ -2010,6 +2046,11 @@ async fn download_provider_track_streaming(
     }
     notify_task_change(&state);
 
+    // The shared Telegram upload always carries the cover. Fetch it while the
+    // audio streams, so completion does not wait for another request after
+    // the last audio byte.
+    let cover_track = track.clone();
+    let cover_download = tokio::spawn(async move { music::download_cover(&cover_track).await });
     let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u64>>();
     let ready_state = state.clone();
     let ready_id = id.clone();
@@ -2069,9 +2110,11 @@ async fn download_provider_track_streaming(
                 if let Some(current) = state.downloads.write().await.get_mut(&id) {
                     current.streaming_mode = None;
                 }
+                cover_download.abort();
                 return download_provider_track(state, id, task, track, inflight_key, inflight)
                     .await;
             }
+            cover_download.abort();
             return Err(error);
         }
     };
@@ -2089,8 +2132,10 @@ async fn download_provider_track_streaming(
         // expose raw M4A bytes to the packet parser.
     });
     let audio_content_type = content_type(&audio_path);
-    // As in `download_provider_track`: the shared upload always has a cover.
-    let cover_bytes = music::download_cover(&track).await?;
+    let cover_bytes = match cover_download.await {
+        Ok(cover) => cover?,
+        Err(_) => Vec::new(),
+    };
     let cover_filename = if cover_bytes.is_empty() {
         None
     } else {
@@ -2563,12 +2608,13 @@ async fn serve_task_file(
             && task.platform == "applemusic"
             && let Some(file_id) = task.file_id.as_deref().filter(|id| !id.trim().is_empty())
         {
-            let file = telegram_cache::get_file(file_id)
-                .await
-                .map_err(|err| ApiError::Http {
-                    status: StatusCode::BAD_GATEWAY,
-                    message: format!("Telegram 文件信息获取失败：{err}"),
-                })?;
+            let file =
+                telegram_cache::locate_file(file_id)
+                    .await
+                    .map_err(|err| ApiError::Http {
+                        status: StatusCode::BAD_GATEWAY,
+                        message: format!("Telegram 文件信息获取失败：{err}"),
+                    })?;
             if let Some(local) = telegram_cache::local_file_path(&file.file_path) {
                 let patch = find_mislabeled_aac(&local).await.unwrap_or_else(|err| {
                     tracing::warn!(
@@ -2599,7 +2645,14 @@ async fn serve_task_file(
         {
             let file_id = task.file_id.as_deref().unwrap();
             let filename = filename.as_deref().unwrap_or("telegram-audio.bin");
-            stream_telegram_file(file_id, filename, task.content_type, headers).await
+            stream_telegram_file(
+                file_id,
+                filename,
+                task.content_type,
+                task.byte_size,
+                headers,
+            )
+            .await
         }
         FileKind::Cover
             if task
@@ -2612,6 +2665,7 @@ async fn serve_task_file(
                 file_id,
                 filename.as_deref().unwrap_or("cover.jpg"),
                 Some("image/jpeg".to_string()),
+                None,
                 headers,
             )
             .await
@@ -2916,7 +2970,7 @@ async fn ensure_local_audio_file(state: &AppState, task: &DownloadTask) -> ApiRe
                 message: "音频文件不存在".to_string(),
             });
         };
-        let file = telegram_cache::get_file(file_id)
+        let file = telegram_cache::locate_file(file_id)
             .await
             .map_err(|err| ApiError::Http {
                 status: StatusCode::BAD_GATEWAY,
@@ -3226,27 +3280,92 @@ async fn stream_telegram_file(
     file_id: &str,
     filename: &str,
     content_type: Option<String>,
+    size: Option<u64>,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
-    let file = telegram_cache::get_file(file_id)
+    let content_type = content_type.unwrap_or_else(|| {
+        mime_guess::from_path(filename)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string()
+    });
+    if let Some(local_path) = telegram_cache::cached_local_path(file_id) {
+        return stream_local_file(&local_path, filename, &content_type, headers).await;
+    }
+    if let Some(response) =
+        stream_telegram_segments(file_id, filename, &content_type, size, headers).await?
+    {
+        return Ok(response);
+    }
+    stream_telegram_file_via_bot_api(file_id, filename, content_type, headers).await
+}
+
+/// Serve a cold Telegram file by byte range over MTProto, so the first bytes
+/// leave as soon as Telegram returns them. `getFile` runs alongside: once the
+/// Bot API server has the file on disk the response continues from there,
+/// and later requests read it locally. `None` when this route is unavailable
+/// for the file; nothing has been sent then.
+async fn stream_telegram_segments(
+    file_id: &str,
+    filename: &str,
+    content_type: &str,
+    size: Option<u64>,
+    headers: &HeaderMap,
+) -> ApiResult<Option<Response>> {
+    let Some(size) = size.filter(|size| *size > 0) else {
+        return Ok(None);
+    };
+    if !telegram_segments::enabled() {
+        return Ok(None);
+    }
+    let range = parse_range(headers, size)?;
+    let (start, end) = range.unwrap_or((0, size - 1));
+    telegram_cache::prewarm(file_id);
+    let local_id = file_id.to_string();
+    let Some(body) = telegram_segments::stream(file_id, size, start, end, move || {
+        telegram_cache::cached_local_path(&local_id)
+    })
+    .await
+    else {
+        return Ok(None);
+    };
+    let mut response = Response::builder()
+        .header(header::CONTENT_TYPE, browser_audio_type(content_type))
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{}\"", ascii_filename(filename)),
+        )
+        .header(header::ACCEPT_RANGES, "bytes")
+        // The same immutable bytes as the Bot API route; see there.
+        .header(header::CACHE_CONTROL, "public, max-age=86400, no-transform")
+        .header(header::CONTENT_LENGTH, (end - start + 1).to_string());
+    response = if range.is_some() {
+        response
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
+    } else {
+        response.status(StatusCode::OK)
+    };
+    response
+        .body(Body::from_stream(body))
+        .map(Some)
+        .map_err(|err| ApiError::Custom(format!("failed to build response: {err}")))
+}
+
+async fn stream_telegram_file_via_bot_api(
+    file_id: &str,
+    filename: &str,
+    content_type: String,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let file = telegram_cache::locate_file(file_id)
         .await
         .map_err(|err| ApiError::Http {
             status: StatusCode::BAD_GATEWAY,
             message: format!("Telegram 文件信息获取失败：{err}"),
         })?;
     if let Some(local_path) = telegram_cache::local_file_path(&file.file_path) {
-        return stream_local_file(
-            &local_path,
-            filename,
-            &content_type.unwrap_or_else(|| {
-                mime_guess::from_path(filename)
-                    .first_or_octet_stream()
-                    .essence_str()
-                    .to_string()
-            }),
-            headers,
-        )
-        .await;
+        return stream_local_file(&local_path, filename, &content_type, headers).await;
     }
     // Keep the browser's single Range request intact when Telegram's file
     // endpoint supports it (the local Bot API does). The previous code always
@@ -3264,12 +3383,6 @@ async fn stream_telegram_file(
             status: StatusCode::BAD_GATEWAY,
             message: format!("Telegram 文件下载失败：{err}"),
         })?;
-    let content_type = content_type.unwrap_or_else(|| {
-        mime_guess::from_path(filename)
-            .first_or_octet_stream()
-            .essence_str()
-            .to_string()
-    });
 
     let upstream_status = response.status();
     let upstream_headers = response.headers();

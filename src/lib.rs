@@ -9,6 +9,7 @@ pub mod matching;
 pub mod music;
 pub mod settings;
 pub mod telegram_cache;
+mod telegram_segments;
 pub mod upstream_limit;
 
 pub type ApiResult<T> = Result<T, ApiError>;

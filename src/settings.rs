@@ -148,6 +148,13 @@ pub struct Bot {
     pub token: String,
     #[serde(default)]
     pub api_url: Option<String>,
+    /// Telegram app credentials (my.telegram.org). With both set, MHub signs
+    /// in as the same bot over MTProto to read cached songs by byte range,
+    /// so playback starts before the whole file has been fetched.
+    #[serde(default)]
+    pub api_id: Option<i32>,
+    #[serde(default)]
+    pub api_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

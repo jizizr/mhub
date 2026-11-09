@@ -22,6 +22,8 @@ ctr = "0.9"
 encoding_rs = "0.8"
 flate2 = "1"
 futures = "0.3"
+# Reads Telegram files by offset (MTProto); optional at runtime.
+grammers-client = { version = "0.12", default-features = false }
 lazy_static = "1.5"
 music-gateway = { path = "crates/music-gateway" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

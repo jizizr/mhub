@@ -5,6 +5,12 @@ owner = 0
 token = ""
 # Optional local Telegram Bot API; requires matching shared file storage.
 # api_url = "http://telegram-bot-api:8081"
+# Optional Telegram app credentials from my.telegram.org. With both set,
+# MHub also signs in as this bot over MTProto and streams cached songs by byte
+# range instead of waiting for the Bot API to fetch the whole file. The
+# session keys are kept in data/telegram-mtproto-session.json (keep private).
+# api_id = 0
+# api_hash = ""
 
 [db.mysql]
 # Optional existing music_cache database. Do not publish this URL.

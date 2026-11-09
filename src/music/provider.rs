@@ -286,11 +286,14 @@ const PROGRESSIVE_READY_BYTES: usize = 64 * 1024;
 const PROGRESSIVE_RESUME_ATTEMPTS: u32 = 3;
 
 /// Whether a resolved track is a plain CDN file a browser can decode while it
-/// is still arriving. Only NetEase is enabled so far; other providers have
-/// chunking or container quirks that still need their own verification.
+/// is still arriving: an unchunked MP3 or FLAC from NetEase or QQ Music.
+/// Providers that must be fetched in bounded ranges, or whose containers a
+/// browser cannot play from a prefix, still download completely first.
 pub fn can_stream_progressive_http(track: &MusicTrack) -> bool {
-    matches!(track.platform, MusicPlatform::Netease)
-        && track.max_chunk_size.is_none()
+    matches!(
+        track.platform,
+        MusicPlatform::Netease | MusicPlatform::Tencent
+    ) && track.max_chunk_size.is_none()
         && (track.url.starts_with("https://") || track.url.starts_with("http://"))
         && matches!(track.file_extension().as_str(), "mp3" | "flac")
 }
@@ -914,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_netease_mp3_or_flac_streams_progressively() {
+    fn only_plain_mp3_or_flac_files_stream_progressively() {
         let track = progressive_track("https://example.test/a".to_string());
         assert!(can_stream_progressive_http(&track));
         let mut other = track.clone();
@@ -922,6 +925,11 @@ mod tests {
         assert!(!can_stream_progressive_http(&other));
         let mut other = track.clone();
         other.platform = MusicPlatform::Tencent;
+        assert!(can_stream_progressive_http(&other));
+        other.format = Some("ogg".to_string());
+        assert!(!can_stream_progressive_http(&other));
+        let mut other = track.clone();
+        other.platform = MusicPlatform::Bilibili;
         assert!(!can_stream_progressive_http(&other));
         let mut other = track.clone();
         other.max_chunk_size = Some(1024);

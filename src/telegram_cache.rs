@@ -102,6 +102,59 @@ pub async fn get_file(file_id: &str) -> ApiResult<TelegramFile> {
     Ok(file)
 }
 
+/// Ask Telegram for the file again, ignoring a remembered answer. A local Bot
+/// API server reports a path on its disk, which stops being true once that
+/// file is cleaned up.
+async fn refresh_file(file_id: &str) -> ApiResult<TelegramFile> {
+    FILE_CACHE.write().await.remove(file_id);
+    get_file(file_id).await
+}
+
+/// The local Bot API file behind `file_id`, when an earlier `getFile` has
+/// already put it on disk. Never waits and never asks Telegram.
+pub fn cached_local_path(file_id: &str) -> Option<PathBuf> {
+    let cache = FILE_CACHE.try_read().ok()?;
+    let cached = cache.get(file_id)?;
+    if cached.fetched_at.elapsed() >= FILE_CACHE_TTL {
+        return None;
+    }
+    local_file_path(&cached.file.file_path)
+}
+
+/// Where a file's bytes are right now. A remembered local path whose file
+/// has since left the Bot API server's disk is looked up again, which makes
+/// the server fetch it back instead of failing every request until the
+/// remembered answer expires.
+pub async fn locate_file(file_id: &str) -> ApiResult<TelegramFile> {
+    let file = get_file(file_id).await?;
+    if is_local_server_path(&file.file_path) && local_file_path(&file.file_path).is_none() {
+        return refresh_file(file_id).await;
+    }
+    Ok(file)
+}
+
+/// Whether `file_path` names a file on a local Bot API server's disk, as
+/// opposed to a path under Telegram's HTTP file endpoint.
+pub fn is_local_server_path(file_path: &str) -> bool {
+    Path::new(file_path.trim()).is_absolute()
+}
+
+/// Start fetching a file the listener is about to request. A local Bot API
+/// server only answers `getFile` once the whole file is on its disk, so
+/// asking when the playback task is created lets that download overlap the
+/// round trips before the browser's audio request arrives.
+pub fn prewarm(file_id: &str) {
+    let file_id = file_id.trim().to_string();
+    if file_id.is_empty() || bot_token().is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        if let Err(err) = get_file(&file_id).await {
+            tracing::debug!("telegram prewarm failed: {err}");
+        }
+    });
+}
+
 async fn get_file_uncached(file_id: &str) -> ApiResult<TelegramFile> {
     let token = bot_token()?;
     let url = format!("{}/bot{}/getFile", telegram_api_base(), token);
@@ -457,7 +510,7 @@ fn bot_token() -> ApiResult<&'static str> {
 /// The bytes of a file the bot can see, read from the local Bot API
 /// server's disk when it is there.
 pub async fn read_file(file_id: &str) -> ApiResult<Vec<u8>> {
-    let file = get_file(file_id).await?;
+    let file = locate_file(file_id).await?;
     if let Some(path) = local_file_path(&file.file_path)
         && let Ok(bytes) = tokio::fs::read(&path).await
     {
