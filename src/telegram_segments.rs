@@ -142,6 +142,36 @@ fn decode_file_id(file_id: &str) -> Option<(i32, i64, i64, Vec<u8>)> {
     Some((dc_id, id, access_hash, file_reference))
 }
 
+/// What a file id that `decode_file_id` refused looks like, without the
+/// identifiers themselves: its version bytes, type, data centre and length.
+fn file_id_shape(file_id: &str) -> String {
+    let Ok(packed) = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(file_id.trim().trim_end_matches('='))
+    else {
+        return format!("not base64, {} chars", file_id.len());
+    };
+    let mut data = Vec::new();
+    let mut bytes = packed.iter().copied();
+    while let Some(byte) = bytes.next() {
+        if byte == 0 {
+            data.extend(std::iter::repeat_n(0u8, bytes.next().unwrap_or(0) as usize));
+        } else {
+            data.push(byte);
+        }
+    }
+    let word = |at: usize| {
+        data.get(at..at + 4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+    };
+    format!(
+        "len={} tail={:?} kind={:?} dc={:?}",
+        data.len(),
+        data.get(data.len().saturating_sub(2)..),
+        word(0).map(|kind| format!("{kind:#x}")),
+        word(4),
+    )
+}
+
 /// The keys that keep the bot signed in between restarts. Signing in again
 /// each time would run into Telegram's flood limits.
 #[derive(Serialize, Deserialize)]
@@ -435,10 +465,25 @@ where
     L: Fn() -> Option<PathBuf> + Send + 'static,
 {
     if size == 0 || start > end || end >= size {
+        tracing::warn!(
+            size,
+            start,
+            end,
+            "Telegram direct read got an impossible range"
+        );
         return None;
     }
-    let (dc_id, id, access_hash, file_reference) = decode_file_id(file_id)?;
-    let connection = connection().await?;
+    let Some((dc_id, id, access_hash, file_reference)) = decode_file_id(file_id) else {
+        tracing::warn!(
+            shape = %file_id_shape(file_id),
+            "Telegram file id is not a readable document; using getFile"
+        );
+        return None;
+    };
+    let Some(connection) = connection().await else {
+        tracing::warn!("Telegram direct reads not signed in; using getFile");
+        return None;
+    };
     let document = Document {
         dc_id,
         id,
@@ -458,6 +503,7 @@ where
     save_session(&connection);
     let skip = (start % CHUNK) as usize;
     if first.len() <= skip {
+        tracing::warn!("Telegram first chunk shorter than the requested offset; using getFile");
         return None;
     }
     let cursor = Cursor {
