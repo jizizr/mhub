@@ -80,6 +80,7 @@ function harness(items, { quality = "hires", support = playable } = {}) {
     createPlayback: async () => { posts++; throw new Error("offline"); },
     cachedAudioUrl: (item) => item.track.streaming_mode === "wasm_alac" ? "blob:packet" : "blob:flac",
   };
+  deps.localBlobUrl = (item) => deps.cachedAudioUrl(item);
   const resolve = new Function("deps", `const { ${Object.keys(deps).join(", ")} } = deps; return (${resolver.trim()});`)(deps);
   return { resolve, reads, writes, deleted, posts: () => posts };
 }

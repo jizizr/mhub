@@ -76,7 +76,7 @@ function resolverFixture() {
   const deps = {
     requestedStreamingMode, status, canRequestAlacPlayback,
     inflightTrackResolutions: new Map(), cacheKey, cacheEntryMatches, reusableNativeFlacCache,
-    audioUrl, trackFromPlayback, hasCachedAudio, cachedAudioUrl, getPlayback, waitForReady,
+    audioUrl, trackFromPlayback, hasCachedAudio, cachedAudioUrl, localBlobUrl: cachedAudioUrl, getPlayback, waitForReady,
     getCachedTrack: async (key) => { reads.push(key); return entries.get(key); },
     putCachedTrack: async (key, value) => { const stored = { ...entries.get(key), ...value, key }; entries.set(key, stored); return stored; },
     deleteCachedTrack: async (key) => { entries.delete(key); },

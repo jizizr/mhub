@@ -73,6 +73,12 @@ const preparedElements = new WeakSet();
 const PREROLL_SECONDS = 1.2;
 // One reload per song after a MEDIA_ERR_NETWORK before the queue advances.
 let networkRetryKey = "";
+// A locally cached Blob that the browser cannot read (iOS 16 Safari can lose
+// a stored Blob's bytes) is dropped once and the song reloads from the
+// network. While that reload is pending for `localRetryToken`, the stale
+// element's error and play() rejection stay silent.
+let dropCachedTrackSource = null;
+let localRetryToken = -1;
 const autoplayRecent = new Map();
 
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -944,6 +950,39 @@ export async function retryAutoplay() {
   return Boolean(await ensureAutoplayRecommendations({ force: true }));
 }
 
+// True when the failure belongs to the current song's local Blob and a
+// network reload has taken over (or already did) for this track.
+function retryWithoutLocalCache(element, wantsPlay) {
+  if (localRetryToken === trackToken) return true;
+  const status = useStatusStore();
+  const track = status.currentTrack;
+  const source = element?.currentSrc || element?.src || "";
+  const key = prefetchKey(track);
+  if (!dropCachedTrackSource || !track || !key || !source.startsWith("blob:")) return false;
+  const token = trackToken;
+  const position = Math.round((element.currentTime || 0) * 1000);
+  localRetryToken = token;
+  void Promise.resolve()
+    .then(() => dropCachedTrackSource(source))
+    .catch(() => false)
+    .then((dropped) => {
+      if (token !== trackToken) return;
+      if (!dropped) {
+        // Not a Blob this app cached: reloading would pick the same bytes.
+        localRetryToken = -1;
+        playback.setPlaying(false);
+        status.state = "paused";
+        toast("本地缓存无法读取，请在缓存管理中删除后重试");
+        updateMediaSession();
+        return;
+      }
+      status.setNotice(`${track.title || "音乐"} 本地缓存损坏，改为在线播放`);
+      void loadTrack(track, wantsPlay);
+      if (position > 0) void seek(position);
+    });
+  return true;
+}
+
 function canPrefetchWithoutStarvingPlayback() {
   // A WASM ALAC stream has no native `buffered` timeline. Once its reader has
   // reached EOF, the current track is fully consumed and it is safe to fill
@@ -1249,6 +1288,10 @@ function attachAudioEvents(element = audio) {
     if (!active() || !element.error) return;
     const status = useStatusStore();
     if (!status.currentSource || audioErrorTrackToken === trackToken) return;
+    if (retryWithoutLocalCache(element, status.isPlaying || (status.trackLoading && loadWantsPlay) || status.state === "buffering")) {
+      audioErrorTrackToken = trackToken;
+      return;
+    }
     audioErrorTrackToken = trackToken;
     // A frozen/backgrounded phone can drop the stream's connection. Reload
     // the same song once at its position instead of skipping to the next.
@@ -1285,6 +1328,7 @@ export function initPlayer(options) {
   getContinuationRecommendations = options.getContinuationRecommendations || null;
   alacPlayerFactory = options.alacPlayerFactory || null;
   resolveCachedTrackSource = options.resolveCachedTrackSource || null;
+  dropCachedTrackSource = options.dropCachedTrackSource || null;
   outputFactory = options.outputFactory || null;
   lookupLoudness = options.lookupLoudness || null;
   warmTrackLoudness = options.warmLoudness || null;
@@ -1920,6 +1964,7 @@ export async function play(options = {}) {
       return false;
     }
     if (error?.name === "NotSupportedError") {
+      if (!usingAlacPlayer && retryWithoutLocalCache(audio, true)) return false;
       status.state = "paused";
       toast("浏览器暂时无法解码该音频流，请稍后重试");
       return false;

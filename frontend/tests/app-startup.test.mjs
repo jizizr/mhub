@@ -44,7 +44,7 @@ function harness() {
     onBeforeUnmount: (callback) => { state.unmount = callback; },
   };
   for (const name of ["handlePopstate", "handleDocumentPointerDown", "handleDocumentKeydown", "handleAudioGesture",
-    "trustedMediaOrigins", "resolveTrackSource", "resolveCachedTrackSource", "prepareOutput", "preparePlaybackSession",
+    "trustedMediaOrigins", "resolveTrackSource", "resolveCachedTrackSource", "dropCachedTrackSource", "prepareOutput", "preparePlaybackSession",
     "createNativeOutput", "retireOutputContext", "createRenderClockWatch", "createMediaSessionController", "createMediaCompanion", "needsMediaCompanion", "createPlaybackLifecycle", "getCachedLoudness", "warmLoudness",
     "waitForCompletedSource", "prefetchTrackSource", "cacheActiveTrackSource", "loadLyricsForTrack", "getContinuationRecommendations",
     "canUseAlacPlayback", "canRequestAlacPlayback", "loadAlacModule", "handlePageHide", "handleVisibility", "scheduleAutoSync"]) context[name] = () => {};

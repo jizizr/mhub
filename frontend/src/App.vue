@@ -500,7 +500,7 @@ async function resolveTrackSource(track, { prefetch = false } = {}) {
   if (!prefetch && resolved?.cached) {
     status.setNotice(`${resolved.track?.title || "音乐"} 使用本地缓存`);
   }
-  const source = resolved?.cached ? cachedAudioUrl(resolved.cached) : resolved?.source;
+  const source = resolved?.cached ? localBlobUrl(resolved.cached, resolved.key) : resolved?.source;
   return source ? { source, track: resolved.track } : null;
 }
 
@@ -512,15 +512,42 @@ async function resolveCachedTrackSource(track) {
   // A quality preference change must not reinterpret the still-playing file.
   // Candidate tracks are already normalized by the player to the new quality.
   const request = { ...track, streaming_mode: canRequestAlacPlayback(track) ? "wasm_alac" : null };
-  let cached = await getCachedTrack(cacheKey(request)).catch(() => null);
+  let key = cacheKey(request);
+  let cached = await getCachedTrack(key).catch(() => null);
   if (!hasCachedAudio(cached) || !cacheEntryMatches(cached, request)) {
+    key = cacheKey({ ...request, streaming_mode: null });
     cached = request.streaming_mode === "wasm_alac"
-      ? await getCachedTrack(cacheKey({ ...request, streaming_mode: null }))
+      ? await getCachedTrack(key)
         .then((item) => reusableNativeFlacCache(item, request)).catch(() => null)
       : null;
   }
   if (!hasCachedAudio(cached)) return null;
-  return { source: cachedAudioUrl(cached), track: { ...(cached.track || track), byte_size: cached.blob.size } };
+  return { source: localBlobUrl(cached, key), track: { ...(cached.track || track), byte_size: cached.blob.size } };
+}
+
+// The IndexedDB key behind each Blob URL handed to the player. iOS 16 Safari
+// can lose a stored Blob's bytes; the element then fails with
+// MEDIA_ERR_SRC_NOT_SUPPORTED and the song would never play again from that
+// browser. The player asks to drop exactly that record and reloads it from
+// the network.
+const blobCacheKeys = new Map();
+
+function localBlobUrl(cached, key) {
+  const url = cachedAudioUrl(cached);
+  if (url && key) {
+    if (blobCacheKeys.size >= 64) blobCacheKeys.delete(blobCacheKeys.keys().next().value);
+    blobCacheKeys.set(url, key);
+  }
+  return url;
+}
+
+async function dropCachedTrackSource(source) {
+  const key = blobCacheKeys.get(source);
+  if (!key) return false;
+  blobCacheKeys.delete(source);
+  await deleteCachedTrack(key).catch(() => {});
+  void refreshLocalCache();
+  return true;
 }
 
 async function cacheActiveTrackSource(track, { signal, blob } = {}) {
@@ -1330,6 +1357,7 @@ onMounted(() => {
     audio: audioRef.value,
     resolveTrackSource,
     resolveCachedTrackSource,
+    dropCachedTrackSource,
     outputFactory: { prepare: prepareOutput, prepareSession: preparePlaybackSession, createNative: createNativeOutput, retire: retireOutputContext, renderClock: createRenderClockWatch() },
     mediaSessionFactory: createMediaSessionController,
     mediaCompanionFactory: needsMediaCompanion() ? createMediaCompanion : null,
