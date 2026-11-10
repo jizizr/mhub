@@ -319,6 +319,11 @@ pub struct CollectionParams {
     pub url: String,
     /// Omit for complete import; an explicit limit requests a preview.
     pub limit: Option<usize>,
+    /// Import what the platform listed even when it listed fewer songs than
+    /// the collection claims (the user confirmed after an
+    /// `incomplete_collection` error).
+    #[serde(default)]
+    pub allow_incomplete: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -795,7 +800,7 @@ async fn resolve_collection(
     let limit = collection_request_limit(params.limit)?;
     let collection = upstream_limit::metered(
         upstream_limit::Kind::Metadata,
-        music::collection(platform, source_url, limit),
+        music::collection(platform, source_url, limit, params.allow_incomplete),
     )
     .await?;
     if params.limit.is_none() && collection.items.len() > music::MAX_COLLECTION_ITEMS {
@@ -1058,6 +1063,7 @@ async fn lyrics(Query(params): Query<LyricsParams>) -> ApiResult<Json<LyricsResp
 
 /// `error_code` / response `code` for a song no source can play.
 const UNPLAYABLE_CODE: &str = "unplayable";
+const INCOMPLETE_COLLECTION_CODE: &str = "incomplete_collection";
 
 fn normalize_streaming_mode(mode: Option<String>) -> Option<String> {
     mode.and_then(|value| {
@@ -3232,6 +3238,7 @@ impl IntoResponse for ApiError {
             }
             ApiError::Custom(_) => StatusCode::BAD_REQUEST,
             ApiError::Unplayable(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::IncompleteCollection(_) => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let retry_after = match &self {
@@ -3247,6 +3254,9 @@ impl IntoResponse for ApiError {
         let body = match &self {
             ApiError::Unplayable(message) => {
                 Json(serde_json::json!({ "detail": message, "code": UNPLAYABLE_CODE }))
+            }
+            ApiError::IncompleteCollection(message) => {
+                Json(serde_json::json!({ "detail": message, "code": INCOMPLETE_COLLECTION_CODE }))
             }
             _ => Json(serde_json::json!({ "detail": self.to_string() })),
         };
@@ -5145,6 +5155,29 @@ mod tests {
         assert!(!reason.contains("private-value"));
         assert!(!reason.contains("secret"));
         assert!(!reason.contains("example.test"));
+    }
+
+    #[tokio::test]
+    async fn incomplete_collection_error_lets_the_client_offer_import_anyway() {
+        let response = ApiError::IncompleteCollection("缺 2 首".into()).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["code"], INCOMPLETE_COLLECTION_CODE);
+        assert_eq!(value["detail"], "缺 2 首");
+    }
+
+    #[tokio::test]
+    async fn collection_requests_are_strict_unless_the_caller_opts_in() {
+        assert!(!music::incomplete_collection_allowed());
+        let parse = |query: &str| {
+            let uri: axum::http::Uri = format!("/x?{query}").parse().unwrap();
+            Query::<CollectionParams>::try_from_uri(&uri).unwrap().0
+        };
+        assert!(parse("platform=netease&url=x&allow_incomplete=true").allow_incomplete);
+        assert!(!parse("platform=netease&url=x").allow_incomplete);
     }
 
     #[tokio::test]

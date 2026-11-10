@@ -27,6 +27,10 @@ pub enum ApiError {
     /// retrying.
     #[error("{0}")]
     Unplayable(String),
+    /// The platform listed fewer songs than the collection says it has.
+    /// Web clients may retry with `allow_incomplete` to import the rest.
+    #[error("{0}")]
+    IncompleteCollection(String),
     #[error("{message}")]
     Http {
         status: axum::http::StatusCode,

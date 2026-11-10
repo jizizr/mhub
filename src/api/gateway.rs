@@ -672,7 +672,9 @@ impl From<ApiError> for Failure {
                 Self::new(status, code, redact_error_message(&message))
             }
             // Provider failures are written for users ("未找到歌曲" …).
-            ApiError::Custom(message) | ApiError::Unplayable(message) => Self::new(
+            ApiError::Custom(message)
+            | ApiError::Unplayable(message)
+            | ApiError::IncompleteCollection(message) => Self::new(
                 StatusCode::BAD_GATEWAY,
                 ErrorCode::Upstream,
                 redact_error_message(&message),

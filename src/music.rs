@@ -296,12 +296,30 @@ pub async fn recommendation_continuation(
 
 pub const MAX_COLLECTION_ITEMS: usize = 5000;
 
+tokio::task_local! {
+    static ALLOW_INCOMPLETE_COLLECTION: bool;
+}
+
+/// Whether the current collection request accepts a playlist the platform
+/// listed only partly. Off unless the web user confirmed it; gateway
+/// clients and playlist sync always get the strict check.
+pub(crate) fn incomplete_collection_allowed() -> bool {
+    ALLOW_INCOMPLETE_COLLECTION
+        .try_with(|allowed| *allowed)
+        .unwrap_or(false)
+}
+
 pub async fn collection(
     platform: MusicPlatform,
     keyword: &str,
     limit: usize,
+    allow_incomplete: bool,
 ) -> ApiResult<Collection> {
-    let collection = provider_collection(platform, keyword, limit)
+    let collection = ALLOW_INCOMPLETE_COLLECTION
+        .scope(
+            allow_incomplete,
+            provider_collection(platform, keyword, limit),
+        )
         .await?
         .ok_or_else(|| ApiError::Custom("该平台暂不支持此歌单链接".to_string()))?;
     Ok(collection_to_api(collection))

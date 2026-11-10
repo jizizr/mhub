@@ -19,6 +19,10 @@ const input = ref(null);
 const url = ref("");
 const loading = ref(false);
 const error = ref("");
+// The platform listed fewer songs than the playlist claims: the reason, shown
+// with an "import anyway" button, and after that as a note on the result.
+const incomplete = ref("");
+const skipped = ref("");
 const collection = ref(null);
 const matches = ref(null);
 // Imported songs are played from the platform the user is browsing.
@@ -71,24 +75,30 @@ const selectedTracks = computed(() => rows.value
 const canImport = computed(() => !loading.value && !error.value && selectedTracks.value.length > 0 &&
   (mode.value === "create" ? Boolean(name.value.trim()) : Boolean(mergeId.value)));
 
-async function resolve() {
+async function resolve(allowIncomplete = false) {
   const value = url.value.trim();
   if (!value || loading.value) return;
   const version = ++requestVersion;
+  const reason = incomplete.value;
   loading.value = true;
   error.value = "";
+  incomplete.value = "";
+  skipped.value = "";
   collection.value = null;
   matches.value = null;
   try {
     const source = sourcePlatform(value);
-    const resolved = await resolveCollection({ platform: source, url: value });
+    const resolved = await resolveCollection({ platform: source, url: value, allowIncomplete });
     if (version !== requestVersion) return;
     if (!resolved.items?.length) throw new Error("歌单没有可导入的歌曲");
     collection.value = resolved;
+    skipped.value = allowIncomplete ? reason : "";
     name.value = resolved.title || "未命名歌单";
     await match(version);
   } catch (reason) {
-    if (version === requestVersion) error.value = reason?.message || "歌单解析失败";
+    if (version !== requestVersion) return;
+    if (reason?.code === "incomplete_collection" && !allowIncomplete) incomplete.value = reason.message;
+    else error.value = reason?.message || "歌单解析失败";
   } finally {
     if (version === requestVersion) loading.value = false;
   }
@@ -210,6 +220,8 @@ function keydown(event) {
   if (event.key === "Escape") close();
 }
 
+// The warning belongs to the link it was found for.
+watch(url, () => { incomplete.value = ""; });
 watch(target, (value, previous) => {
   if (value !== previous && collection.value) void match();
 });
@@ -235,17 +247,22 @@ onBeforeUnmount(() => {
         <button class="mini-button" type="button" title="关闭" aria-label="关闭" @click="close"><X :size="18" /></button>
       </header>
 
-      <form class="search-box import__url" @submit.prevent="resolve">
+      <form class="search-box import__url" @submit.prevent="resolve()">
         <Search :size="18" />
         <input ref="input" v-model="url" placeholder="粘贴歌单链接" aria-label="歌单链接" :disabled="loading" />
         <button type="submit" :disabled="loading || !url.trim()">{{ loading ? "处理中" : "解析" }}</button>
       </form>
 
       <div v-if="error" class="error-banner import__error">{{ error }}</div>
+      <div v-else-if="incomplete" class="import__incomplete" role="alert">
+        <CircleAlert :size="18" />
+        <span>{{ incomplete }}。仍然导入会跳过这些歌曲。</span>
+        <button type="button" class="ghost-action" :disabled="loading" @click="resolve(true)">仍然导入</button>
+      </div>
 
       <template v-if="collection">
         <div class="import__route">
-          <span class="import__source"><strong>{{ collection.title || "未命名歌单" }}</strong><small>{{ platformName(collection.platform) }} · {{ collection.items.length }} 首</small></span>
+          <span class="import__source"><strong>{{ collection.title || "未命名歌单" }}</strong><small>{{ platformName(collection.platform) }} · {{ collection.items.length }} 首</small><small v-if="skipped" class="import__skipped">{{ skipped }}，已跳过</small></span>
           <label class="import__target">
             <span>导入到</span>
             <select v-model="target" :disabled="loading" aria-label="目标平台">
@@ -347,6 +364,10 @@ onBeforeUnmount(() => {
 .import__head p { margin: 6px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
 .import__url { flex: 0 0 auto; max-width: none; margin: 16px 22px 0; box-shadow: none; }
 .import__error { margin: 12px 22px 0; }
+.import__incomplete { display: flex; align-items: center; gap: 10px; margin: 12px 22px 0; padding: 10px 10px 10px 14px; border-radius: 12px; color: var(--text); background: var(--surface-muted); font-size: 13px; line-height: 1.45; }
+.import__incomplete svg { flex: 0 0 auto; color: var(--danger); }
+.import__incomplete span { flex: 1; min-width: 0; }
+.import__incomplete button { flex: 0 0 auto; }
 .import__route { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 22px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
 .import__source { display: grid; gap: 3px; min-width: 0; }
 .import__source strong { overflow-wrap: anywhere; }
@@ -395,7 +416,7 @@ onBeforeUnmount(() => {
 @media (max-width: 640px) {
   .import { width: 100%; max-height: calc(100dvh - 24px); border-radius: 16px; }
   .import__head, .import__footer { padding-left: 16px; padding-right: 16px; }
-  .import__url, .import__route, .import__tabs, .import__bulk, .import__error { margin-left: 16px; margin-right: 16px; }
+  .import__url, .import__route, .import__tabs, .import__bulk, .import__error, .import__incomplete { margin-left: 16px; margin-right: 16px; }
   .import__list { padding: 0 16px 12px; }
   /* Give the song list the screen once results are in. */
   .has-result .import__head p { display: none; }

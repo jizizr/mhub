@@ -116,3 +116,20 @@ test("complete import omits preview limit while recommendations may request one"
   assert.equal(urls[0].searchParams.has("limit"), false);
   assert.equal(urls[1].searchParams.get("limit"), "40");
 });
+
+test("an incomplete playlist is reported by code and can be imported on request", async () => {
+  const urls = [];
+  globalThis.fetch = async (path) => {
+    const url = new URL(path, "http://localhost");
+    urls.push(url);
+    if (url.searchParams.get("allow_incomplete") === "true") return Response.json({ items: [{ id: "1" }] });
+    return Response.json({ detail: "网易云歌单应有 3 首，但接口只返回 2 首", code: "incomplete_collection" }, { status: 409 });
+  };
+  await assert.rejects(
+    resolveCollection({ platform: "netease", url: "https://music.163.com/playlist?id=1" }),
+    (error) => error.code === "incomplete_collection" && /只返回 2 首/.test(error.message),
+  );
+  const collection = await resolveCollection({ platform: "netease", url: "https://music.163.com/playlist?id=1", allowIncomplete: true });
+  assert.equal(collection.items.length, 1);
+  assert.equal(urls[0].searchParams.has("allow_incomplete"), false);
+});

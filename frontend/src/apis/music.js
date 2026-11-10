@@ -79,6 +79,11 @@ async function request(path, options = {}) {
     if (response.ok) return response;
     const payload = await response.json().catch(() => ({}));
     if (payload.code === "unplayable") throw new UnplayableError(payload.detail);
+    // The platform listed fewer songs than the playlist claims; the import
+    // dialog lets the user import the rest anyway.
+    if (payload.code === "incomplete_collection") {
+      throw Object.assign(new Error(payload.detail || "歌单不完整"), { code: payload.code });
+    }
     if (response.status !== 429) throw new Error(payload.detail || `HTTP ${response.status}`);
     const delay = retryAfterMs(response.headers.get("retry-after"));
     if (waited + delay > maxWaitMs) {
@@ -142,8 +147,9 @@ export function getTrackInfo({ platform, id, signal }) {
   return request(`${API}/tracks/${encodeURIComponent(platform)}/${encodeURIComponent(id)}`, { signal }).then((res) => res.json());
 }
 
-export function resolveCollection({ platform, url, limit }) {
+export function resolveCollection({ platform, url, limit, allowIncomplete = false }) {
   const params = new URLSearchParams({ platform, url });
+  if (allowIncomplete) params.set("allow_incomplete", "true");
   // Omitting limit asks the server for the complete collection. Recommendation
   // previews can still pass a smaller explicit limit.
   if (limit != null) params.set("limit", String(limit));

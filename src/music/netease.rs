@@ -702,7 +702,8 @@ async fn get_netease_playlist(id: &str, limit: usize) -> Result<MusicCollection,
         .playlist
         .ok_or_else(|| BotError::Custom("没有找到网易云歌单".to_string()))?;
     let max_items = limit.max(1);
-    validate_playlist_completeness(&playlist, max_items)?;
+    let allow_incomplete = super::incomplete_collection_allowed();
+    validate_playlist_completeness(&playlist, max_items, allow_incomplete)?;
     let playlist_id = json_id_to_string(playlist.id);
     let track_ids = playlist
         .track_ids
@@ -721,7 +722,7 @@ async fn get_netease_playlist(id: &str, limit: usize) -> Result<MusicCollection,
     let songs = if track_ids.is_empty() {
         playlist.tracks.into_iter().take(max_items).collect()
     } else {
-        get_netease_songs(&track_ids).await?
+        get_netease_songs(&track_ids, allow_incomplete).await?
     };
     let items = songs
         .into_iter()
@@ -736,9 +737,12 @@ async fn get_netease_playlist(id: &str, limit: usize) -> Result<MusicCollection,
     })
 }
 
+/// NetEase may count songs it no longer lists (removed or hidden), so a
+/// shortfall is reported as incomplete; the user can still import the rest.
 fn validate_playlist_completeness(
     playlist: &NeteasePlaylist,
     limit: usize,
+    allow_incomplete: bool,
 ) -> Result<(), BotError> {
     let available = if playlist.track_ids.is_empty() {
         playlist.tracks.len()
@@ -747,14 +751,24 @@ fn validate_playlist_completeness(
     };
     let expected = playlist.track_count.unwrap_or(available).min(limit);
     if available < expected {
-        return Err(BotError::Custom(format!(
-            "网易云歌单应有 {expected} 首，但接口只返回 {available} 首的 ID，已停止导入以避免漏歌"
+        if allow_incomplete {
+            tracing::info!(
+                "importing NetEase playlist with {available} of {expected} track ids by request"
+            );
+            return Ok(());
+        }
+        return Err(BotError::IncompleteCollection(format!(
+            "网易云歌单应有 {expected} 首，但接口只返回 {available} 首，缺少的 {} 首可能已下架或不可见",
+            expected - available
         )));
     }
     Ok(())
 }
 
-async fn get_netease_songs(ids: &[String]) -> Result<Vec<NeteaseSong>, BotError> {
+async fn get_netease_songs(
+    ids: &[String],
+    allow_incomplete: bool,
+) -> Result<Vec<NeteaseSong>, BotError> {
     let mut songs_by_id = HashMap::new();
     for chunk in ids.chunks(200) {
         let encoded_ids = format!("[{}]", chunk.join(","));
@@ -775,9 +789,9 @@ async fn get_netease_songs(ids: &[String]) -> Result<Vec<NeteaseSong>, BotError>
         .iter()
         .filter(|id| !songs_by_id.contains_key(*id))
         .count();
-    if missing > 0 {
-        return Err(BotError::Custom(format!(
-            "网易云歌单有 {missing} 首歌曲详情未返回，已停止导入以避免漏歌"
+    if missing > 0 && !allow_incomplete {
+        return Err(BotError::IncompleteCollection(format!(
+            "网易云歌单有 {missing} 首歌曲详情未返回，可能已下架或不可见"
         )));
     }
     Ok(songs_in_playlist_order(ids, &songs_by_id))
@@ -1100,8 +1114,13 @@ mod tests {
             "id": 1, "name": "Fixture", "trackCount": 25,
             "tracks": [], "trackIds": (1..=10).map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>()
         })).unwrap();
-        assert!(validate_playlist_completeness(&playlist, 5001).is_err());
-        assert!(validate_playlist_completeness(&playlist, 10).is_ok());
+        assert!(matches!(
+            validate_playlist_completeness(&playlist, 5001, false),
+            Err(BotError::IncompleteCollection(_))
+        ));
+        assert!(validate_playlist_completeness(&playlist, 10, false).is_ok());
+        // The user confirmed importing the songs NetEase still lists.
+        assert!(validate_playlist_completeness(&playlist, 5001, true).is_ok());
     }
 
     #[test]
@@ -1110,7 +1129,7 @@ mod tests {
             "id": 1, "name": "Fixture", "trackCount": 275,
             "tracks": [], "trackIds": (1..=275).map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>()
         })).unwrap();
-        assert!(validate_playlist_completeness(&playlist, 5001).is_ok());
+        assert!(validate_playlist_completeness(&playlist, 5001, false).is_ok());
         assert_eq!(playlist.track_ids.len(), 275);
     }
 
