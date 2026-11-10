@@ -2382,7 +2382,44 @@ fn reuse_upload(mut cache: MusicCache, existing: &MusicCache) -> MusicCache {
     cache.music_size = existing.music_size;
     cache.lyrics_tag = existing.lyrics_tag;
     cache.from_chat_id = existing.from_chat_id;
+    // The upload may be a re-encode in another format (`telegram_audio`).
+    if !existing.file_ext.trim().is_empty() && existing.file_ext != cache.file_ext {
+        cache.file_ext = existing.file_ext.clone();
+        cache.bitrate = existing.bitrate;
+    }
     cache
+}
+
+/// Telegram keeps only MP3, M4A and FLAC as songs; anything else sent with
+/// sendAudio comes back as a voice message or a document, which the bot
+/// cannot send as a song. Re-encodes such a file to AAC M4A and points the
+/// job and its row at the new format. Returns whether it did.
+async fn telegram_audio(job: &mut TelegramCacheUpload) -> ApiResult<bool> {
+    if crate::lyric_tags::Container::sniff(&job.audio).is_some() {
+        return Ok(false);
+    }
+    let source_bps = u32::try_from(job.cache.bitrate).ok();
+    let kbps = crate::audio::aac_kbps_for(source_bps);
+    let started = std::time::Instant::now();
+    let m4a = crate::audio::transcode_to_m4a(&job.audio, kbps).await?;
+    tracing::info!(
+        platform = %job.cache.platform,
+        track_id = %job.cache.track_id,
+        from = %job.cache.file_ext,
+        kbps,
+        ms = started.elapsed().as_millis() as u64,
+        "re-encoded audio to M4A for the Telegram cache"
+    );
+    job.audio = m4a;
+    job.cache.file_ext = "m4a".to_string();
+    job.cache.bitrate = (kbps * 1000) as i32;
+    job.content_type = "audio/mp4".to_string();
+    let stem = job
+        .filename
+        .rsplit_once('.')
+        .map_or(job.filename.as_str(), |(stem, _)| stem);
+    job.filename = format!("{stem}.m4a");
+    Ok(true)
 }
 
 async fn upload_audio_to_telegram_cache(mut job: TelegramCacheUpload) {
@@ -2442,6 +2479,7 @@ async fn upload_or_reuse(
         Err(err) => tracing::warn!("telegram cache lookup by audio failed: {err}"),
     }
 
+    let reencoded = telegram_audio(job).await?;
     let cover = std::mem::take(&mut job.cover);
     let thumbnail = async move {
         if cover.is_empty() {
@@ -2479,7 +2517,7 @@ async fn upload_or_reuse(
     if let Err(err) = upsert_music_cache(&cache, Some(source)).await {
         tracing::warn!("failed to save music cache: {err}");
     }
-    Ok((cache, !prepared.embedded))
+    Ok((cache, !prepared.embedded && !reencoded))
 }
 
 async fn finish_telegram_upload(job: TelegramCacheUpload, result: ApiResult<(MusicCache, bool)>) {

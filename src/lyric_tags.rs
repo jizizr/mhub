@@ -212,6 +212,10 @@ pub fn embed(audio: &[u8], lyrics: &str) -> Result<Vec<u8>, EmbedError> {
                 lyrics.to_string(),
             )));
             file.set_id3v2(tag);
+            if let Some(mut v1) = file.remove_id3v1() {
+                fit_id3v1(&mut v1);
+                file.set_id3v1(v1);
+            }
             cursor.set_position(0);
             file.save_to(&mut cursor, write)?;
         }
@@ -219,6 +223,29 @@ pub fn embed(audio: &[u8], lyrics: &str) -> Result<Vec<u8>, EmbedError> {
         Container::Mp4 => return embed_mp4(audio, lyrics),
     }
     Ok(cursor.into_inner())
+}
+
+/// Lofty 0.22 reads ID3v1 text byte by byte as Latin-1, so a byte above
+/// 0x7F becomes a two-byte char, then writes each field back cut with
+/// `split_at` at its byte limit: a cut inside such a char panics, and a
+/// panic aborts the whole server. Cut the fields at a char boundary first.
+fn fit_id3v1(tag: &mut lofty::id3::v1::Id3v1Tag) {
+    for (field, limit) in [
+        (&mut tag.title, 30),
+        (&mut tag.artist, 30),
+        (&mut tag.album, 30),
+        (&mut tag.year, 4),
+        // Lofty always writes v1.1, whose comment has 28 bytes.
+        (&mut tag.comment, 28),
+    ] {
+        if let Some(text) = field {
+            let mut end = text.len().min(limit);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+    }
 }
 
 const FLAC_STREAMINFO: u8 = 0;
@@ -702,6 +729,39 @@ mod tests {
                 Err(err) => println!("{name}: {err}"),
             }
         }
+    }
+
+    /// Two silent MPEG-1 Layer III frames (128 kbps, 44.1 kHz) and an
+    /// ID3v1 tag whose title, artist and comment end in Latin-1 bytes that
+    /// lofty turns into two-byte chars straddling its write limits.
+    fn mp3_with_latin1_id3v1() -> Vec<u8> {
+        let mut mp3 = Vec::new();
+        for _ in 0..2 {
+            let mut frame = vec![0u8; 417];
+            frame[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+            mp3.extend_from_slice(&frame);
+        }
+        let mut v1 = [0u8; 128];
+        v1[..3].copy_from_slice(b"TAG");
+        v1[3..32].fill(b'a');
+        v1[32] = 0xC6; // Æ at byte 29 of the title
+        v1[33..62].fill(b'b');
+        v1[62] = 0xBE; // ¾ at byte 29 of the artist
+        v1[97..124].fill(b'c');
+        v1[124] = 0xF0; // ð at byte 27 of the comment
+        v1[127] = 255;
+        mp3.extend_from_slice(&v1);
+        mp3
+    }
+
+    #[test]
+    fn latin1_id3v1_fields_do_not_break_mp3_tagging() {
+        let tagged = embed(&mp3_with_latin1_id3v1(), "[00:01.00]第一行").unwrap();
+        let v1 = &tagged[tagged.len() - 128..];
+        assert_eq!(&v1[..3], b"TAG");
+        assert!(v1[3..32].iter().all(|byte| *byte == b'a'));
+        assert_eq!(v1[32], 0, "the split char is dropped, not cut in half");
+        assert!(tagged.starts_with(b"ID3"));
     }
 
     #[test]

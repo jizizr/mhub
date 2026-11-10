@@ -282,8 +282,10 @@ pub fn local_file_path(file_path: &str) -> Option<PathBuf> {
 /// Uploads a song for the main bot. With an upload channel configured, the
 /// upload bot posts it there and the main bot forwards that post to get its
 /// own file id: Telegram stores a file in the uploader's data centre, so a
-/// bot whose data centre is near the server uploads many times faster. Any
-/// failure on that route falls back to uploading directly to `chat_id`.
+/// bot whose data centre is near the server uploads many times faster. A
+/// failure on that route falls back to uploading directly to `chat_id`,
+/// except a file Telegram did not keep as a song: that is the file's fault,
+/// and the fallback would only post it to `chat_id` (the owner) as well.
 #[allow(clippy::too_many_arguments)]
 pub async fn upload_audio(
     chat_id: i64,
@@ -309,11 +311,12 @@ pub async fn upload_audio(
         )
         .await;
         match relayed {
-            Ok(uploaded) => return Ok(uploaded),
+            Ok(Some(uploaded)) => return Ok(uploaded),
+            Ok(None) => return Err(not_a_song(filename)),
             Err(err) => tracing::warn!("upload bot route failed, uploading directly: {err}"),
         }
     }
-    send_audio(
+    let (_, uploaded) = send_audio(
         bot_token()?,
         chat_id,
         filename,
@@ -324,8 +327,12 @@ pub async fn upload_audio(
         performer,
         duration,
     )
-    .await
-    .map(|(_, uploaded)| uploaded)
+    .await?;
+    uploaded.ok_or_else(|| not_a_song(filename))
+}
+
+fn not_a_song(filename: &str) -> ApiError {
+    ApiError::Custom(format!("Telegram 没有把 {filename} 存为歌曲"))
 }
 
 /// The upload channel and the upload bot's token, when both are configured.
@@ -350,8 +357,8 @@ async fn relay_audio(
     title: &str,
     performer: &str,
     duration: Option<u32>,
-) -> ApiResult<UploadedAudio> {
-    let (post_id, _) = send_audio(
+) -> ApiResult<Option<UploadedAudio>> {
+    let (post_id, posted) = send_audio(
         uploader,
         channel_id,
         filename,
@@ -363,6 +370,9 @@ async fn relay_audio(
         duration,
     )
     .await?;
+    if posted.is_none() {
+        return Ok(None);
+    }
     let token = bot_token()?;
     let url = format!("{}/bot{}/forwardMessage", telegram_api_base(), token);
     let response: TelegramResponse<TelegramMessage> = CLIENT
@@ -380,16 +390,20 @@ async fn relay_audio(
     let forwarded = telegram_result(response, "forwardMessage")?;
     // The upload bot's post keeps the file; the forward was only how the main
     // bot learns its own file id.
+    delete_message(token, channel_id, forwarded.message_id).await;
+    uploaded_audio(forwarded, "forwardMessage").map(Some)
+}
+
+async fn delete_message(token: &str, chat_id: i64, message_id: i64) {
     let delete = format!("{}/bot{}/deleteMessage", telegram_api_base(), token);
     let _ = CLIENT
         .post(delete)
         .form(&[
-            ("chat_id", channel_id.to_string()),
-            ("message_id", forwarded.message_id.to_string()),
+            ("chat_id", chat_id.to_string()),
+            ("message_id", message_id.to_string()),
         ])
         .send()
         .await;
-    uploaded_audio(forwarded, "forwardMessage")
 }
 
 fn telegram_result<T>(response: TelegramResponse<T>, method: &str) -> ApiResult<T> {
@@ -416,7 +430,9 @@ fn uploaded_audio(message: TelegramMessage, method: &str) -> ApiResult<UploadedA
     })
 }
 
-/// Sends a song as `token`'s bot; returns the message id and its file ids.
+/// Sends a song as `token`'s bot; returns the message id and its file ids,
+/// or `None` (the message deleted again) when Telegram kept the file as
+/// something other than a song, such as an OGG turned into a voice message.
 #[allow(clippy::too_many_arguments)]
 async fn send_audio(
     token: &str,
@@ -428,7 +444,7 @@ async fn send_audio(
     title: &str,
     performer: &str,
     duration: Option<u32>,
-) -> ApiResult<(i64, UploadedAudio)> {
+) -> ApiResult<(i64, Option<UploadedAudio>)> {
     let url = format!("{}/bot{}/sendAudio", telegram_api_base(), token);
     let part = multipart::Part::bytes(audio)
         .file_name(filename.to_string())
@@ -459,7 +475,16 @@ async fn send_audio(
         .await?;
     let message = telegram_result(response, "sendAudio")?;
     let message_id = message.message_id;
-    Ok((message_id, uploaded_audio(message, "sendAudio")?))
+    if message.audio.is_none() {
+        tracing::warn!(
+            chat_id,
+            filename,
+            "Telegram did not keep the upload as a song; deleting it"
+        );
+        delete_message(token, chat_id, message_id).await;
+        return Ok((message_id, None));
+    }
+    Ok((message_id, Some(uploaded_audio(message, "sendAudio")?)))
 }
 
 fn telegram_api_base() -> String {

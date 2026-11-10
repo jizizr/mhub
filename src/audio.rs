@@ -213,6 +213,51 @@ impl LosslessTranscoder for FfmpegLosslessTranscoder {
     }
 }
 
+/// AAC bit rate (kbps) for re-encoding a lossy source of `source_bps`: a
+/// quarter above it to absorb the second generation, within 128-320.
+pub fn aac_kbps_for(source_bps: Option<u32>) -> u32 {
+    let source_kbps = source_bps.filter(|bps| *bps > 0).unwrap_or(192_000) / 1000;
+    (source_kbps.saturating_mul(5) / 4).clamp(128, 320)
+}
+
+/// `audio` (any format ffmpeg reads) re-encoded as AAC in a plain,
+/// non-fragmented M4A with its index up front.
+pub async fn transcode_to_m4a(audio: &[u8], kbps: u32) -> ApiResult<Vec<u8>> {
+    let dir = env::temp_dir().join(format!("mhub-m4a-{}", uuid::Uuid::new_v4().simple()));
+    fs::create_dir_all(&dir).await?;
+    let result = async {
+        let input = dir.join("input");
+        let output = dir.join("output.m4a");
+        fs::write(&input, audio).await?;
+        let binary = env::var("MUSIC_API_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
+        let finished = Command::new(binary)
+            .kill_on_drop(true)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&input)
+            .args(["-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a"])
+            .arg(format!("{kbps}k"))
+            .args(["-movflags", "+faststart", "-f", "mp4"])
+            .arg(&output)
+            .output()
+            .await
+            .map_err(|err| ApiError::Custom(format!("转码器启动失败：{err}")))?;
+        if !finished.status.success() {
+            let stderr = String::from_utf8_lossy(&finished.stderr);
+            return Err(ApiError::Custom(format!(
+                "音频转 M4A 失败：{}",
+                match stderr.trim() {
+                    "" => finished.status.to_string(),
+                    detail => detail.to_string(),
+                }
+            )));
+        }
+        Ok(fs::read(&output).await?)
+    }
+    .await;
+    let _ = fs::remove_dir_all(&dir).await;
+    result
+}
+
 pub fn needs_browser_lossless_derivative(
     quality: &str,
     format: Option<&str>,
@@ -390,6 +435,61 @@ pub async fn repair_mislabeled_aac(path: &Path) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aac_rate_sits_above_the_source_within_bounds() {
+        assert_eq!(aac_kbps_for(Some(96_000)), 128);
+        assert_eq!(aac_kbps_for(Some(192_000)), 240);
+        assert_eq!(aac_kbps_for(Some(320_000)), 320);
+        assert_eq!(aac_kbps_for(None), 240);
+        assert_eq!(aac_kbps_for(Some(0)), 240);
+    }
+
+    /// Needs an ffmpeg with the native Vorbis encoder; skipped without one.
+    #[tokio::test]
+    async fn ogg_vorbis_becomes_a_plain_m4a() {
+        let dir = tempfile::tempdir().unwrap();
+        let ogg = dir.path().join("in.ogg");
+        let made = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=2")
+            .args(["-ac", "2", "-c:a", "vorbis", "-strict", "-2"])
+            .arg(&ogg)
+            .status()
+            .await;
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("skipped: ffmpeg cannot make an OGG Vorbis file here");
+            return;
+        }
+        let source = std::fs::read(&ogg).unwrap();
+        assert!(source.starts_with(b"OggS"));
+        assert!(crate::lyric_tags::Container::sniff(&source).is_none());
+
+        let m4a = transcode_to_m4a(&source, 128).await.unwrap();
+        assert_eq!(
+            crate::lyric_tags::Container::sniff(&m4a),
+            Some(crate::lyric_tags::Container::Mp4)
+        );
+        // Index first, and no fragments: lyrics can still be written in.
+        let moov = m4a.windows(4).position(|w| w == b"moov").unwrap();
+        let mdat = m4a.windows(4).position(|w| w == b"mdat").unwrap();
+        assert!(moov < mdat);
+        assert!(!m4a.windows(4).any(|w| w == b"moof"));
+        crate::lyric_tags::embed(&m4a, "[00:01.00]第一行").unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreadable_audio_fails_to_transcode() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .await
+            .is_err()
+        {
+            return;
+        }
+        assert!(transcode_to_m4a(b"not audio", 128).await.is_err());
+    }
 
     fn test_box(typ: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
