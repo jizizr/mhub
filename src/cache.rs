@@ -1,4 +1,5 @@
 use crate::{ApiError, ApiResult, settings::SETTINGS};
+use music_gateway::{CacheStats, PlatformCacheStats, QualityCacheStats};
 use serde::Serialize;
 use sqlx::{MySqlPool, mysql::MySqlPoolOptions};
 use tokio::sync::OnceCell;
@@ -198,6 +199,98 @@ pub async fn delete_music_cache_file(platform: &str, file_id: &str) -> ApiResult
     Ok(result.rows_affected() > 0)
 }
 
+/// Per-platform counts of the shared Telegram cache. Quality keys are folded
+/// at their first `:`, so legacy `<quality>:<suffix>` rows count under their
+/// tier, and a file shared by several tiers is sized once.
+pub async fn music_cache_stats() -> ApiResult<CacheStats> {
+    let pool = pool().await?;
+    ensure_schema(pool).await?;
+    let songs: Vec<(String, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT platform,
+               COUNT(DISTINCT track_id),
+               COUNT(DISTINCT CASE WHEN lyrics_tag > 0 THEN track_id END)
+        FROM music_cache
+        GROUP BY platform
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let files: Vec<(String, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT platform, COUNT(*), CAST(COALESCE(SUM(size), 0) AS SIGNED)
+        FROM (
+            SELECT platform, file_id, MAX(music_size) AS size
+            FROM music_cache
+            GROUP BY platform, file_id
+        ) AS files
+        GROUP BY platform
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let tiers: Vec<(String, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT platform, SUBSTRING_INDEX(quality, ':', 1) AS tier, COUNT(DISTINCT track_id)
+        FROM music_cache
+        GROUP BY platform, tier
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(assemble_stats(songs, files, tiers))
+}
+
+fn assemble_stats(
+    songs: Vec<(String, i64, i64)>,
+    files: Vec<(String, i64, i64)>,
+    tiers: Vec<(String, String, i64)>,
+) -> CacheStats {
+    let count = |value: i64| value.max(0) as u64;
+    let mut platforms: Vec<PlatformCacheStats> = songs
+        .into_iter()
+        .map(|(platform, tracks, with_lyrics)| PlatformCacheStats {
+            platform,
+            tracks: count(tracks),
+            with_lyrics: count(with_lyrics),
+            ..Default::default()
+        })
+        .collect();
+    for (platform, file_count, bytes) in files {
+        if let Some(entry) = platforms
+            .iter_mut()
+            .find(|entry| entry.platform == platform)
+        {
+            entry.files = count(file_count);
+            entry.bytes = count(bytes);
+        }
+    }
+    for (platform, quality, tracks) in tiers {
+        if let Some(entry) = platforms
+            .iter_mut()
+            .find(|entry| entry.platform == platform)
+        {
+            entry.qualities.push(QualityCacheStats {
+                quality,
+                tracks: count(tracks),
+            });
+        }
+    }
+    for entry in &mut platforms {
+        entry.qualities.sort_by(|a, b| {
+            b.tracks
+                .cmp(&a.tracks)
+                .then_with(|| a.quality.cmp(&b.quality))
+        });
+    }
+    platforms.sort_by(|a, b| {
+        b.tracks
+            .cmp(&a.tracks)
+            .then_with(|| a.platform.cmp(&b.platform))
+    });
+    CacheStats { platforms }
+}
+
 async fn ensure_schema(pool: &MySqlPool) -> ApiResult<()> {
     MUSIC_CACHE_SCHEMA
         .get_or_try_init(|| async {
@@ -285,4 +378,40 @@ async fn pool() -> ApiResult<&'static MySqlPool> {
                 .map_err(ApiError::from)
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_join_platform_rows_and_sort_by_song_count() {
+        let stats = assemble_stats(
+            vec![("netease".into(), 3, 1), ("tencent".into(), 10, 8)],
+            vec![("netease".into(), 2, 300), ("tencent".into(), 9, -1)],
+            vec![
+                ("tencent".into(), "high".into(), 2),
+                ("tencent".into(), "lossless".into(), 9),
+                ("netease".into(), "lossless".into(), 3),
+            ],
+        );
+        let ids: Vec<_> = stats
+            .platforms
+            .iter()
+            .map(|p| p.platform.as_str())
+            .collect();
+        assert_eq!(ids, ["tencent", "netease"]);
+        let tencent = &stats.platforms[0];
+        assert_eq!(
+            (
+                tencent.tracks,
+                tencent.files,
+                tencent.bytes,
+                tencent.with_lyrics
+            ),
+            (10, 9, 0, 8)
+        );
+        assert_eq!(tencent.qualities[0].quality, "lossless");
+        assert_eq!(stats.platforms[1].bytes, 300);
+    }
 }

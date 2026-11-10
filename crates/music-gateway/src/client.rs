@@ -1,6 +1,6 @@
 use crate::Platform;
 use crate::protocol::{
-    CacheInvalidateRequest, CacheLookupRequest, CachedTrack, Capabilities, Collection,
+    CacheInvalidateRequest, CacheLookupRequest, CacheStats, CachedTrack, Capabilities, Collection,
     CollectionRequest, ErrorBody, ErrorCode, JobState, Lyrics, LyricsRequest, Media, MediaJob,
     MediaLookup, MediaRequest, PROTOCOL_HEADER, PROTOCOL_VERSION, ResolveRequest, SearchItem,
     SearchRequest, Track, paths,
@@ -226,6 +226,15 @@ impl GatewayClient {
         self.post::<_, serde::de::IgnoredAny>(paths::CACHE_INVALIDATE, request)
             .await
             .map(|_| ())
+    }
+
+    /// Songs the shared Telegram cache holds, per platform.
+    pub async fn cache_stats(&self) -> Result<CacheStats, GatewayError> {
+        self.send(
+            self.request(Method::GET, paths::CACHE_STATS),
+            REQUEST_TIMEOUT,
+        )
+        .await
     }
 
     async fn post<B, T>(&self, path: &str, body: &B) -> Result<T, GatewayError>

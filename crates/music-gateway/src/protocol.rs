@@ -22,6 +22,8 @@ pub mod paths {
     pub const MEDIA_LOOKUP: &str = "/v1/media/lookup";
     pub const CACHE_LOOKUP: &str = "/v1/cache/lookup";
     pub const CACHE_INVALIDATE: &str = "/v1/cache/invalidate";
+    /// `GET`: how many songs the shared Telegram cache holds per platform.
+    pub const CACHE_STATS: &str = "/v1/cache/stats";
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -257,6 +259,38 @@ pub struct CacheInvalidateRequest {
     pub track_id: String,
     pub quality: Quality,
     pub file_id: String,
+}
+
+/// What the shared Telegram cache holds, one entry per platform id found in
+/// it. Platform ids stay strings: rows of a platform since taken offline are
+/// still counted.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheStats {
+    pub platforms: Vec<PlatformCacheStats>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlatformCacheStats {
+    pub platform: String,
+    /// Distinct songs, whatever tiers they are cached at.
+    pub tracks: u64,
+    /// Distinct Telegram files; tiers that got the same audio share one.
+    pub files: u64,
+    /// Total size of those distinct files.
+    pub bytes: u64,
+    /// Songs whose file has lyrics embedded.
+    pub with_lyrics: u64,
+    /// Songs per requested tier, legacy key suffixes folded in.
+    pub qualities: Vec<QualityCacheStats>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QualityCacheStats {
+    pub quality: String,
+    pub tracks: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

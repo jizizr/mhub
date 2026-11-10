@@ -6,10 +6,10 @@
 //! `music_cache`.
 
 use super::*;
-use crate::cache::{delete_music_cache_file, find_music_cache_by_file_id};
+use crate::cache::{delete_music_cache_file, find_music_cache_by_file_id, music_cache_stats};
 use axum::extract::rejection::JsonRejection;
 use music_gateway::{
-    CacheInvalidateRequest, CacheLookupRequest, CachedTrack, Capabilities, Collection,
+    CacheInvalidateRequest, CacheLookupRequest, CacheStats, CachedTrack, Capabilities, Collection,
     CollectionRequest, ErrorBody, ErrorCode, JobState, Lyrics, LyricsRequest, Media, MediaJob,
     MediaLookup, MediaPollQuery, MediaRequest, PROTOCOL_HEADER, PROTOCOL_VERSION, Platform,
     PlatformCapability, Quality, ResolveRequest, SearchItem, SearchRequest, Track, protocol::paths,
@@ -48,6 +48,7 @@ pub(super) fn router(state: AppState, token: &str) -> Router {
         .route(&format!("{}/:id", paths::MEDIA), get(poll_media))
         .route(paths::CACHE_LOOKUP, post(lookup_cache))
         .route(paths::CACHE_INVALIDATE, post(invalidate_cache))
+        .route(paths::CACHE_STATS, get(cache_stats))
         .route_layer(middleware::from_fn_with_state(gateway.clone(), authorize))
         .fallback(|| async {
             Failure::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "接口不存在")
@@ -383,6 +384,10 @@ async fn invalidate_cache(
     }
     tracing::warn!(playback_id = %id, deleted, "gateway client reported an unusable Telegram file");
     Ok(Json(deleted))
+}
+
+async fn cache_stats() -> Result<Json<CacheStats>, Failure> {
+    Ok(Json(music_cache_stats().await?))
 }
 
 /// `music_cache` quality keys a gateway client may have a file under, the

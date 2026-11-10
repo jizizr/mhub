@@ -16,10 +16,11 @@ mod client;
 
 pub use platform::Platform;
 pub use protocol::{
-    CacheInvalidateRequest, CacheLookupRequest, CachedTrack, Capabilities, Collection,
+    CacheInvalidateRequest, CacheLookupRequest, CacheStats, CachedTrack, Capabilities, Collection,
     CollectionRequest, ErrorBody, ErrorCode, JobState, Lyrics, LyricsRequest, Media, MediaJob,
     MediaLookup, MediaPollQuery, MediaRequest, PROTOCOL_HEADER, PROTOCOL_VERSION,
-    PlatformCapability, ResolveRequest, SearchItem, SearchRequest, Track,
+    PlatformCacheStats, PlatformCapability, QualityCacheStats, ResolveRequest, SearchItem,
+    SearchRequest, Track,
 };
 pub use quality::Quality;
 
