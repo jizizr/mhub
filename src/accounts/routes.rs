@@ -722,6 +722,9 @@ async fn sync_socket(
         }))
 }
 
+const SOCKET_PING_INTERVAL: Duration = Duration::from_secs(25);
+const SOCKET_IDLE_LIMIT: Duration = Duration::from_secs(70);
+
 async fn serve_socket(
     socket: WebSocket,
     accounts: Shared,
@@ -744,10 +747,19 @@ async fn serve_socket(
     }
     let mut revalidate = tokio::time::interval(Duration::from_secs(300));
     revalidate.tick().await;
+    // Proxies and CDNs drop idle connections; a ping keeps the path open and
+    // a peer that stops answering (pong or anything else) is dropped.
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + SOCKET_PING_INTERVAL,
+        SOCKET_PING_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_seen = Instant::now();
     loop {
         tokio::select! {
             incoming = receiver.next() => {
                 let Some(Ok(message)) = incoming else { break };
+                last_seen = Instant::now();
                 let data = match message {
                     WsMessage::Binary(data) => data,
                     WsMessage::Close(_) => break,
@@ -791,6 +803,13 @@ async fn serve_socket(
                     Err(RecvError::Closed) => break,
                 };
                 if sender.send(outgoing).await.is_err() { break }
+            }
+            _ = heartbeat.tick() => {
+                if last_seen.elapsed() > SOCKET_IDLE_LIMIT
+                    || sender.send(WsMessage::Ping(Vec::new().into())).await.is_err()
+                {
+                    break;
+                }
             }
             _ = revalidate.tick() => {
                 // Revoked or expired sessions lose their live connection.

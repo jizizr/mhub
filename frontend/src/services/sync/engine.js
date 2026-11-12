@@ -15,6 +15,7 @@ const MESSAGE_SYNC = 0;
 const REMOTE = Symbol("remote");
 const HTTP_INTERVAL_MS = 30_000;
 const MAX_BACKOFF_MS = 30_000;
+const CONNECT_TIMEOUT_MS = 15_000;
 
 const toBase64 = (bytes) => {
   let binary = "";
@@ -34,10 +35,14 @@ export function libraryDatabaseName(accountId) {
  * @param options.onState       ("loading"|"syncing"|"synced"|"offline"|"expired"|"error", message?)
  * @param options.onPlayback    another device's playback session
  * @param options.onChange      the library changed (local or remote)
+ * @param options.persist       (name, doc) → local store; IndexedDB by default
  */
-export function createReplica({ accountId, onState = () => {}, onPlayback = () => {}, onChange = () => {} }) {
+export function createReplica({
+  accountId, onState = () => {}, onPlayback = () => {}, onChange = () => {},
+  persist = (name, doc) => new IndexeddbPersistence(name, doc),
+}) {
   const doc = new Y.Doc();
-  const persistence = new IndexeddbPersistence(libraryDatabaseName(accountId), doc);
+  const persistence = persist(libraryDatabaseName(accountId), doc);
   let socket = null;
   let stopped = false;
   let online = false;
@@ -49,9 +54,12 @@ export function createReplica({ accountId, onState = () => {}, onPlayback = () =
   const synced = new Promise((resolve) => { resolveSynced = resolve; });
   const loaded = persistence.whenSynced.then(() => onChange());
 
-  const markSynced = () => {
+  // Only a WebSocket sync resets the reconnect backoff: when the socket keeps
+  // failing (a proxy without WebSocket support), the HTTP fallback succeeds
+  // every time and would otherwise retry — and poll — every second.
+  const markSynced = ({ live }) => {
     online = true;
-    retry = 0;
+    if (live) retry = 0;
     resolveSynced();
     // Concurrent additions of one song on two devices: tidy after merging.
     if (removeDuplicates(doc)) onChange();
@@ -82,7 +90,7 @@ export function createReplica({ accountId, onState = () => {}, onPlayback = () =
     encoding.writeVarUint(encoder, MESSAGE_SYNC);
     const type = syncProtocol.readSyncMessage(decoder, encoder, doc, REMOTE);
     if (encoding.length(encoder) > 1) send(encoder);
-    if (type === syncProtocol.messageYjsSyncStep2) markSynced();
+    if (type === syncProtocol.messageYjsSyncStep2) markSynced({ live: true });
   }
 
   function handleText(text) {
@@ -102,8 +110,11 @@ export function createReplica({ accountId, onState = () => {}, onPlayback = () =
     current.binaryType = "arraybuffer";
     socket = current;
     let opened = false;
+    // A handshake a proxy holds open forever would otherwise block reconnects.
+    const connectTimer = window.setTimeout(() => { if (!opened) current.close(); }, CONNECT_TIMEOUT_MS);
     current.onopen = () => {
       opened = true;
+      window.clearTimeout(connectTimer);
       const encoder = encoding.createEncoder();
       encoding.writeVarUint(encoder, MESSAGE_SYNC);
       syncProtocol.writeSyncStep1(encoder, doc);
@@ -114,6 +125,7 @@ export function createReplica({ accountId, onState = () => {}, onPlayback = () =
       else handleBinary(event.data);
     };
     current.onclose = () => {
+      window.clearTimeout(connectTimer);
       if (socket === current) socket = null;
       if (stopped) return;
       online = false;
@@ -145,7 +157,7 @@ export function createReplica({ accountId, onState = () => {}, onPlayback = () =
       Y.applyUpdate(doc, fromBase64(result.update), REMOTE);
       serverStateVector = fromBase64(result.state_vector);
       if (!socket || socket.readyState !== WebSocket.OPEN) {
-        markSynced();
+        markSynced({ live: false });
         scheduleHttp(HTTP_INTERVAL_MS);
       }
     } catch (error) {
@@ -187,9 +199,11 @@ export function createReplica({ accountId, onState = () => {}, onPlayback = () =
     },
     stop,
     resyncNow() {
-      if (socket?.readyState === WebSocket.OPEN) return;
+      // An open or still-connecting socket settles on its own; replacing a
+      // connecting one would leave it to fail later and start a second
+      // retry chain.
+      if (stopped || socket) return;
       window.clearTimeout(retryTimer);
-      socket = null;
       connect();
     },
     async destroy({ clearLocal = false } = {}) {
