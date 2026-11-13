@@ -1364,7 +1364,9 @@ button.artwork-card__play:hover { background: rgba(255, 255, 255, .86); color: v
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 0 min(5vw, 64px) 10vh 0;
+  /* Same vertical padding as the lyrics column, so the cover and title sit
+     centred on the lyrics box rather than above it. */
+  padding: 2vh min(5vw, 64px) 5vh 0;
 }
 
 .full-player__right {
@@ -1382,14 +1384,12 @@ button.artwork-card__play:hover { background: rgba(255, 255, 255, .86); color: v
   border-radius: 30px;
   overflow: hidden;
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
-  transform: translateY(-3vh);
 }
 
 .full-player__meta {
   width: min(34vw, 50vh, 520px);
   min-width: 240px;
   margin-top: 24px;
-  transform: translateY(-3vh);
 }
 
 .full-player__meta {
