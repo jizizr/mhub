@@ -123,7 +123,10 @@ impl Quota {
 /// halved (2026-11-09), and download/lyrics tightened again after replaying
 /// the shadow log: a scraper at ~7 songs a minute now runs dry within about
 /// five minutes, while no other client of that evening came near a limit.
-/// The download burst went down to 20 once enforced (2026-11-09).
+/// The download burst went down to 20 once enforced (2026-11-09). A week
+/// of enforcement showed listeners sampling new songs at two or three a
+/// minute, so downloads refill at three a minute (2026-11-16); the scraper
+/// at seven a minute still runs dry in about five minutes.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -147,7 +150,7 @@ impl Default for Settings {
             trusted_proxies: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
             max_wait_ms: 3000,
             // Ordinary peak: 59 playback starts in ten minutes.
-            download: Quota::new(20.0, 1.0),
+            download: Quota::new(20.0, 3.0),
             // Ordinary peak: 40 searches in ten minutes, 27 in one.
             search: Quota::new(20.0, 2.0),
             // A match request carries 25 songs and up to two searches each;
