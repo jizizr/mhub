@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import {
   deviceIdentity, getAuthConfig, getMe, logout as logoutRequest, readSyncMeta, writeSyncMeta,
 } from "../services/account.js";
+import { createHandoffMark, handoffField, takeoverFrom } from "../services/handoff-signal.js";
 import { usePlaylistStore } from "./playlists.js";
 import { useQueueStore, trackIdentity } from "./queue.js";
 import { useStatusStore } from "./status.js";
@@ -22,6 +23,8 @@ let replica = null;
 let modules = null;
 let refreshQueued = false;
 let playbackTimer = 0;
+let handoffMark = null;
+const handledHandoffs = new Set();
 
 const makeId = () => globalThis.crypto?.randomUUID?.() || `playlist-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -40,6 +43,8 @@ export const useAccountStore = defineStore("account", {
     dialogView: "login",
     pendingMerge: null,
     handoffs: {},
+    /** Set when another device continued this device's playback. */
+    takeover: null,
   }),
   getters: {
     deviceId: () => deviceIdentity().id,
@@ -98,7 +103,10 @@ export const useAccountStore = defineStore("account", {
           if (state === "expired") this.expire();
         },
         onChange: () => this.queueRefresh(),
-        onPlayback: (session) => { this.handoffs = { ...this.handoffs, [session.device_id]: session }; },
+        onPlayback: (session) => {
+          this.handoffs = { ...this.handoffs, [session.device_id]: session };
+          this.noteHandoff(session);
+        },
       });
       await replica.loaded;
       usePlaylistStore().attachCloud(replica.doc, modules.library);
@@ -187,6 +195,7 @@ export const useAccountStore = defineStore("account", {
       this.mode = "guest";
       this.sync = "idle";
       this.handoffs = {};
+      handoffMark = null;
       this.dialogOpen = false;
       useStatusStore().toast(clearLocal ? "已退出登录，并清除了此设备上的云端歌单副本" : "已退出登录");
     },
@@ -201,7 +210,28 @@ export const useAccountStore = defineStore("account", {
         if (!response.ok) return;
         const { sessions } = await response.json();
         this.handoffs = Object.fromEntries((sessions || []).map((session) => [session.device_id, session]));
+        for (const session of sessions || []) this.noteHandoff(session);
       } catch { /* Hand-off is optional. */ }
+    },
+
+    /** This device is about to continue `deviceId`'s playback. */
+    markHandoff(deviceId) {
+      handoffMark = createHandoffMark(deviceId, makeId());
+    },
+
+    /**
+     * Another device's session named this device as the one it took over
+     * from: stop playing here, once per hand-off. A signal seen while not
+     * playing is spent too, so playing here again is never interrupted.
+     */
+    noteHandoff(session) {
+      const status = useStatusStore();
+      const takeover = takeoverFrom(session, {
+        ownDeviceId: deviceIdentity().id,
+        handled: handledHandoffs,
+        wantsPlay: status.isPlaying || status.trackLoading,
+      });
+      if (takeover) this.takeover = takeover;
     },
 
     playbackSnapshot(limit = HANDOFF_QUEUE_LIMIT) {
@@ -227,11 +257,12 @@ export const useAccountStore = defineStore("account", {
         shuffle: status.shuffleMode === "on",
         repeat: status.repeatMode,
         source_playlist: queue.sourcePlaylist?.name || "",
+        ...handoffField(handoffMark),
       };
     },
 
     /** Debounced report of this device's queue; `flush` sends now (page hide). */
-    publishPlayback({ flush = false } = {}) {
+    publishPlayback({ flush = false, immediate = false } = {}) {
       if (this.mode !== "linked") return;
       window.clearTimeout(playbackTimer);
       const send = () => {
@@ -247,7 +278,7 @@ export const useAccountStore = defineStore("account", {
           body: JSON.stringify(snapshot),
         }).then((response) => { if (response.status === 401) this.expire(); }).catch(() => {});
       };
-      if (flush) send();
+      if (flush || immediate) send();
       else playbackTimer = window.setTimeout(send, PLAYBACK_DEBOUNCE_MS);
     },
   },

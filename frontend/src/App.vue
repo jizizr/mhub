@@ -32,6 +32,7 @@ import { createRenderClockWatch } from "./core/player/render-clock";
 import { createMediaSessionController } from "./core/player/media-session";
 import { createMediaCompanion } from "./core/player/media-companion";
 import { needsMediaCompanion } from "./core/player/playback-platform";
+import { createTabExclusivity } from "./core/player/tab-exclusivity";
 import { createPlaybackLifecycle } from "./core/player/playback-lifecycle";
 import { getCachedLoudness, warmLoudness } from "./services/loudness";
 import { loadTrackLyrics, lyricIdentity } from "./services/lyrics";
@@ -1604,6 +1605,7 @@ onMounted(() => {
     outputFactory: { prepare: prepareOutput, prepareSession: preparePlaybackSession, createNative: createNativeOutput, retire: retireOutputContext, renderClock: createRenderClockWatch() },
     mediaSessionFactory: createMediaSessionController,
     mediaCompanionFactory: needsMediaCompanion() ? createMediaCompanion : null,
+    exclusivityFactory: createTabExclusivity,
     lifecycleFactory: createPlaybackLifecycle,
     lookupLoudness: getCachedLoudness,
     warmLoudness,
@@ -1707,6 +1709,19 @@ onMounted(() => void openIncomingShare());
 watch(
   () => status.queueOpen,
   syncQueueHistory,
+);
+
+// Another device continued this device's playback: stop here.
+watch(
+  () => account.takeover?.id,
+  (id) => {
+    const takeover = account.takeover;
+    if (!id || !takeover) return;
+    account.takeover = null;
+    if (!status.isPlaying && !status.trackLoading) return;
+    player.pause();
+    status.toast(`已在「${takeover.device_name}」上继续播放，这里已暂停`);
+  },
 );
 
 // Report this device's queue for hand-off whenever what plays changes.

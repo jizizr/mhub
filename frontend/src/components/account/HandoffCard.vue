@@ -27,6 +27,8 @@ async function continueHere() {
   const tracks = source.queue.map((item) => trackFromSearch({
     platform: item.platform, id: item.source_id, song: item.title, singer: item.artist, cover: item.cover,
   }, "high"));
+  // The other device pauses when it sees this device's next report.
+  account.markHandoff(source.device_id);
   // keepStart: this device's shuffle setting must not replace the song being
   // continued with a random one.
   const started = await player.playFrom(tracks, source.play_index, {
@@ -36,6 +38,7 @@ async function continueHere() {
   }, { keepStart: true });
   const position = estimatedPosition(source);
   if (started && position > 3000) player.seek(position);
+  account.publishPlayback({ immediate: true });
 }
 
 // A playing device reports every 15 s; continue from where it is now. The cap

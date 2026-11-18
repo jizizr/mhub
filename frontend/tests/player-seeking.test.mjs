@@ -437,3 +437,45 @@ test('a drifted ALAC render clock rebuilds the output and resumes the song at it
   h.status.state = 'playing'; h.player.tickPlaybackTime(); await tick();
   assert.equal(retired.length, 1);
 });
+
+test('an unmuted song the browser starts on an inactive element is paused; a muted pre-roll plays on', async (t) => {
+  const h = await prerollHarness(t);
+  const [next] = h.created;
+  assert.equal(next.src, 'blob:cached-two');
+  // A system play command or the end of system sleep resumes the element.
+  next.paused = false; next.emit('play');
+  assert.equal(next.paused, true, 'the preloaded next song never sounds beside the current one');
+  assert.equal(h.audio.paused, false, 'the current song keeps playing');
+  h.audio.time = 119.2; h.audio.emit('timeupdate');
+  assert.equal(next.muted, true);
+  assert.equal(next.paused, false, "the muted pre-roll is the player's own");
+  next.emit('playing');
+  assert.equal(next.paused, false);
+});
+
+test('a superseded load releases the preloaded element it was given', async () => {
+  const h = await harness();
+  const prepared = new NativeAudio(); prepared.src = 'blob:pre'; prepared.paused = false; prepared.muted = true;
+  const first = h.player.load('blob:pre', true, h.tracks[1], { element: prepared });
+  const second = h.player.load('test:two', true, h.tracks[1]);
+  await Promise.all([first, second]);
+  assert.equal(prepared.paused, true, 'no stray pre-roll keeps playing');
+  assert.equal(prepared.src, '');
+  assert.equal(h.audio.src, 'test:two');
+});
+
+test('another MHub tab starting playback pauses this one', async () => {
+  let hooks; const syncs = [];
+  const h = await harness({ options: { exclusivityFactory: (options) => { hooks = options; return { sync: value => syncs.push(value), dispose() {} }; } } });
+  await h.player.play();
+  assert.equal(syncs.at(-1), true, 'this tab reports that it wants playback');
+  hooks.onOtherTabStarted({ tab: 'other' });
+  assert.equal(h.status.state, 'paused');
+  assert.equal(h.audio.paused, true);
+  assert.equal(syncs.at(-1), false);
+  assert.match(h.status.notice, /另一个 MHub 标签页/);
+  const plays = h.audio.plays;
+  hooks.onOtherTabStarted({ tab: 'other' });
+  assert.equal(h.audio.plays, plays, 'a paused tab ignores later announcements');
+  assert.equal(h.status.state, 'paused');
+});

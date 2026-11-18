@@ -42,6 +42,8 @@ let systemMedia = null;
 // Android only: a silent looping element that keeps the system media session
 // owned while Web Audio (WASM ALAC) produces the sound (media-companion.js).
 let mediaCompanion = null;
+// Pauses this tab when another MHub tab of the browser starts playing.
+let tabExclusivity = null;
 let playbackLifecycle = null;
 let recoveringAudio = false;
 let recoveryReady = true;
@@ -1022,12 +1024,14 @@ function updateMediaSession(track = useMediaStore().track, { activate = false } 
   if (activate && systemMedia?.activate) systemMedia.activate(track);
   else systemMedia?.update(track);
   mediaCompanion?.sync(wantsSystemPlayback());
+  tabExclusivity?.sync(wantsSystemPlayback());
   playbackLifecycle?.update();
 }
 
 function syncMediaSessionPosition(force = false) {
   systemMedia?.syncPosition({ force });
   mediaCompanion?.sync(wantsSystemPlayback());
+  tabExclusivity?.sync(wantsSystemPlayback());
 }
 
 function activeAudioContext() {
@@ -1093,6 +1097,13 @@ function setupSystemPlayback(options) {
     // when the browser resumes it.
     onExternalPause: () => { if (wantsSystemPlayback()) pause(); },
     onExternalPlay: () => { void play(); },
+  }) || null;
+  tabExclusivity = options.exclusivityFactory?.({
+    onOtherTabStarted: () => {
+      if (!wantsSystemPlayback()) return;
+      pause();
+      toast("已在另一个 MHub 标签页播放，这里已暂停");
+    },
   }) || null;
   playbackLifecycle = options.lifecycleFactory?.({
     getSnapshot: () => ({ context: activeAudioContext(), token: trackToken,
@@ -1169,9 +1180,24 @@ function syncDuration() {
   syncMediaSessionPosition();
 }
 
+// The browser can start a media element on its own: a system play command,
+// the end of an interruption or of system sleep. On an element the player is
+// not using (the next song preloaded on a second element, a retained source
+// during a load) that song would sound beside the current one unnoticed,
+// since inactive elements' events are otherwise ignored. Besides the active
+// element, only a muted pre-roll and a starting or fading crossfade deck may
+// play.
+function stopUnownedPlayback(element) {
+  if (element.paused || element.muted) return;
+  if (transitionStarting?.audio === element || (retiringDeck?.audio === element && !retiringDeck.usingAlac)) return;
+  element.pause();
+}
+
 function attachAudioEvents(element = audio) {
   if (!element) return;
   const active = () => element === audio && !usingAlacPlayer && Boolean(useStatusStore().currentSource);
+  element.addEventListener("play", () => { if (!active()) stopUnownedPlayback(element); });
+  element.addEventListener("playing", () => { if (!active()) stopUnownedPlayback(element); });
   element.addEventListener("timeupdate", () => {
     if (!active()) return;
     const pos = Math.round(audio.currentTime * 1000);
@@ -1543,6 +1569,7 @@ export async function load(source, autoPlay = true, track = useMediaStore().trac
   seekTarget = null;
   playback.setSeeking(false);
   resetForLoad(track?.duration || 0);
+  let adopted = false;
   try {
     const alacOutcome = await tryLoadAlacPlayer(source, autoPlay, track, trackToken);
     if (token !== loadToken) return { ok: false };
@@ -1550,7 +1577,7 @@ export async function load(source, autoPlay = true, track = useMediaStore().trac
       consecutiveFailures = 0;
       return alacOutcome;
     }
-    const adopted = preparedElement && preparedElement !== audio && (preparedElement.currentSrc || preparedElement.src) === source;
+    adopted = Boolean(preparedElement && preparedElement !== audio && (preparedElement.currentSrc || preparedElement.src) === source);
     if (adopted) {
       // The preloaded element may already be rendering muted. Promote it,
       // rewind to the first frame and only then let it be heard. The ended
@@ -1564,7 +1591,7 @@ export async function load(source, autoPlay = true, track = useMediaStore().trac
       } else audio.muted = false;
       releaseElement(previous);
       if (previousSource?.startsWith("blob:")) URL.revokeObjectURL(previousSource);
-    } else if (preparedElement) releaseElement(preparedElement);
+    }
     audio.volume = status.volume;
     audio.playbackRate = status.speed;
     if (!adopted) {
@@ -1599,6 +1626,9 @@ export async function load(source, autoPlay = true, track = useMediaStore().trac
     }
     return { ok: false, error };
   } finally {
+    // A preloaded element that was not promoted (superseded load, ALAC
+    // source, other URL) may be pre-rolling: never leave it playing.
+    if (preparedElement && !adopted && preparedElement !== audio) releaseElement(preparedElement);
     if (token === loadToken) { status.trackLoading = false; applyPendingSeek(); updateMediaSession(); }
   }
 }
@@ -2025,6 +2055,7 @@ export function stop() {
   status.position = 0;
   playback.reset();
   systemMedia?.clear();
+  tabExclusivity?.sync(false);
   playbackLifecycle?.update();
 }
 
@@ -2033,8 +2064,9 @@ export function destroyPlayer() {
   stop();
   systemMedia?.dispose();
   mediaCompanion?.dispose();
+  tabExclusivity?.dispose();
   playbackLifecycle?.dispose();
-  systemMedia = mediaCompanion = playbackLifecycle = null;
+  systemMedia = mediaCompanion = tabExclusivity = playbackLifecycle = null;
   void alacPlayer?.destroy?.();
   alacPlayer = null;
   audio = null;
@@ -2327,6 +2359,7 @@ async function onQueueEnded() {
   status.position = status.duration;
   recoveringAudio = false;
   systemMedia?.clear();
+  tabExclusivity?.sync(false);
   playbackLifecycle?.update();
 }
 

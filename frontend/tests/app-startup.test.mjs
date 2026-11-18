@@ -45,7 +45,7 @@ function harness() {
   };
   for (const name of ["handlePopstate", "handleDocumentPointerDown", "handleDocumentKeydown", "handleAudioGesture",
     "trustedMediaOrigins", "resolveTrackSource", "resolveCachedTrackSource", "dropCachedTrackSource", "prepareOutput", "preparePlaybackSession",
-    "createNativeOutput", "retireOutputContext", "createRenderClockWatch", "createMediaSessionController", "createMediaCompanion", "needsMediaCompanion", "createPlaybackLifecycle", "getCachedLoudness", "warmLoudness",
+    "createNativeOutput", "retireOutputContext", "createRenderClockWatch", "createMediaSessionController", "createMediaCompanion", "needsMediaCompanion", "createTabExclusivity", "createPlaybackLifecycle", "getCachedLoudness", "warmLoudness",
     "waitForCompletedSource", "prefetchTrackSource", "cacheActiveTrackSource", "loadLyricsForTrack", "getContinuationRecommendations",
     "canUseAlacPlayback", "canRequestAlacPlayback", "loadAlacModule", "handlePageHide", "handleVisibility", "scheduleAutoSync"]) context[name] = () => {};
   vm.createContext(context);
