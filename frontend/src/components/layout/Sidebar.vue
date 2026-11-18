@@ -29,7 +29,8 @@ const library = [
   { key: "cache", label: "本地缓存", icon: HardDrive },
 ];
 
-const isActive = (item) => (item.active || [item.key]).includes(status.activeView)
+// Album and artist pages belong to the tab they were opened from.
+const isActive = (item) => (item.active || [item.key]).includes(status.activeView === "catalog" ? status.catalogOrigin : status.activeView)
   && !(item.key === "playlists" && status.activePlaylistId);
 </script>
 

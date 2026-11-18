@@ -364,6 +364,8 @@ pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
         singer: soda_artists(&track),
         album: track.album.name.clone(),
         cover: soda_cover_url(&track.album.url_cover),
+        album_id: String::new(),
+        artist_id: String::new(),
     })
 }
 

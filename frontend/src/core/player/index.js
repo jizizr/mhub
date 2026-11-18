@@ -588,7 +588,7 @@ function normalizeTrackForQuality(track) {
       cover: track.cover || track.cover_url || "",
     },
     quality,
-  ), ...(track.autoplayRecommended ? { autoplayRecommended: true } : {}) };
+  ), ...(track.album ? { album: track.album } : {}), ...(track.autoplayRecommended ? { autoplayRecommended: true } : {}) };
 }
 
 function replaceQueuedTrackWithQuality(index, track) {

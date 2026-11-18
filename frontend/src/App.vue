@@ -1,6 +1,6 @@
 <script setup>
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Ban, ChevronLeft, ChevronRight, Disc3, FolderOpen, HardDrive, Heart, ListMusic, ListPlus, ListStart, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, RefreshCw, Search, Share, Trash2, X } from "lucide-vue-next";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
+import { Ban, ChevronLeft, ChevronRight, Disc3, FolderOpen, HardDrive, Heart, ListMusic, ListPlus, ListStart, MicVocal, MoreHorizontal, Pencil, Play, Plus, RefreshCcw, RefreshCw, Search, Share, Trash2, X } from "lucide-vue-next";
 import {
   audioUrl,
   createPlayback,
@@ -8,9 +8,11 @@ import {
   getPlatforms,
   getRecommendationHome,
   getContinuationRecommendations,
+  getAlbum,
   getTrackInfo,
   playbackFailure,
   resolveCollection,
+  searchCatalog,
   searchTracks,
 } from "./apis/music";
 import { trustedMediaOrigins } from "./apis/media-routing.js";
@@ -19,6 +21,9 @@ import PageHeader from "./components/layout/PageHeader.vue";
 import SongList from "./components/list/SongList.vue";
 import PlaylistDetail from "./components/list/PlaylistDetail.vue";
 import RecommendationFeed from "./components/discovery/RecommendationFeed.vue";
+import CatalogSearchResults from "./components/catalog/CatalogSearchResults.vue";
+import ArtistPage from "./components/catalog/ArtistPage.vue";
+import { albumSummary, formatReleaseDate, loadCatalogPage, pageForItem, pageForTrack, pageKey, platformHas } from "./services/catalog";
 import PlayerBar from "./components/player/PlayerBar.vue";
 import QueuePanel from "./components/player/QueuePanel.vue";
 import * as player from "./core/player";
@@ -55,7 +60,7 @@ import { canShareTrack, parseShareParams, stripShareParams } from "./utils/share
 import { useStatusStore } from "./stores/status";
 import { formatSize } from "./utils/format";
 import { createThemeController } from "./utils/theme.js";
-import { trackFromPlayback, trackFromSearch } from "./utils/track";
+import { trackFromCatalog, trackFromPlayback, trackFromSearch } from "./utils/track";
 import { canSyncPlaylist } from "./services/playlist-sync";
 
 const audioRef = ref(null);
@@ -63,6 +68,14 @@ const platforms = ref([]);
 const query = ref("");
 const searchedQuery = ref("");
 const results = ref([]);
+// The whole catalog answer (sections, best results, albums…); `results`
+// holds its songs as tracks.
+const searchResult = ref(null);
+const searchSection = ref("top");
+// Album, artist and searched-playlist pages, pushed like a navigation stack
+// over whichever view opened the first one.
+const catalogPages = ref([]);
+const catalogPending = ref("");
 const recommendationTracks = ref([]);
 const recommendationLoading = ref(false);
 const recommendationError = ref("");
@@ -129,6 +142,10 @@ let recommendationReturnFocus = null;
 let recommendationReturnId = "";
 let pendingPageScroll = null;
 let pendingUiHistoryBack = 0;
+let catalogReturn = null;
+let catalogHistoryDepth = 0;
+let catalogPageSeq = 0;
+let leavingCatalog = false;
 // A remote detail is transient; a reload returns to its browsable parent.
 if (status.activeView === "recommendation") {
   status.activeView = "discover";
@@ -136,8 +153,10 @@ if (status.activeView === "recommendation") {
     window.history.replaceState({ ...window.history.state, musicUi: null }, "");
   }
 }
+// Catalog pages need their data again; a reload returns to the feed.
+if (status.activeView === "catalog") status.activeView = "discover";
 // Search results are transient too; a reload always starts at the feed.
-if (window.history.state?.musicUi === "search") {
+if (["search", "catalog"].includes(window.history.state?.musicUi)) {
   window.history.replaceState({ ...window.history.state, musicUi: null }, "");
 }
 // De-duplicate concurrent playback-task creation for the same track and
@@ -222,7 +241,12 @@ const activePlaylist = computed(() =>
 );
 // Detail pages are washed with their artwork, as Apple Music tints a playlist
 // page with the cover's colour; the blurred cover needs no CORS access.
+const catalogPage = computed(() => catalogPages.value[catalogPages.value.length - 1] || null);
 const pageTint = computed(() => {
+  if (status.activeView === "catalog") {
+    const page = catalogPage.value;
+    return page && page.kind !== "artist" ? page.data?.cover || page.cover || page.data?.tracks?.find((track) => track.cover)?.cover || "" : "";
+  }
   const playlist = status.activeView === "recommendation" ? recommendationDetail.value
     : status.activeView === "playlists" ? activePlaylist.value : null;
   if (!playlist) return "";
@@ -250,10 +274,13 @@ async function runSearch() {
   status.activeView = "search";
   status.activePlaylistId = null;
   status.persist();
+  searchResult.value = null;
   try {
-    const items = await searchTracks({ platform, q: keyword, limit: 20, signal: controller.signal });
+    const found = await searchCatalog({ platform, q: keyword, limit: 20, signal: controller.signal });
     if (controller.signal.aborted || searchAbort !== controller || platform !== status.searchPlatform) return;
-    results.value = items.map((item) => trackFromSearch(item, status.quality));
+    searchResult.value = found;
+    searchSection.value = "top";
+    results.value = (found?.songs || []).map((item) => trackFromCatalog(item, status.quality));
   } catch (error) {
     if (!controller.signal.aborted) searchError.value = error?.message || "搜索失败";
   } finally {
@@ -269,6 +296,7 @@ function clearSearchState() {
   query.value = "";
   searchedQuery.value = "";
   results.value = [];
+  searchResult.value = null;
 }
 
 // Top-level destinations are tabs: switching keeps each one's state (search
@@ -297,6 +325,199 @@ function focusSearch() {
 function handleSearchInput() {
   if (!query.value.trim() && searchedQuery.value) clearSearchState();
 }
+
+// Album, artist and playlist pages. The first one remembers the view under
+// it; each page owns one history entry, so Back (button, gesture or browser)
+// returns one page at a time. From the full player or queue drawer the
+// overlay's own history entry becomes the page's.
+const VIEW_LABELS = { discover: "主页", search: "搜索", playlists: "资料库", queue: "播放队列", cache: "本地缓存", recommendation: "主页" };
+
+function catalogSupports(platform, section) {
+  return platformHas(platforms.value, platform, section);
+}
+
+function openCatalogPage(entry) {
+  if (!entry?.platform || !(entry.id || entry.trackId || entry.url)) return;
+  closePlaylistMenu();
+  const top = catalogPage.value;
+  if (status.activeView === "catalog" && top && pageKey(top) === pageKey(entry)) {
+    media.expanded = false;
+    return;
+  }
+  if (status.activeView === "catalog" && top) top.scroll = window.scrollY;
+  else {
+    catalogReturn = { view: status.activeView, playlistId: status.activePlaylistId, scroll: window.scrollY };
+    status.catalogOrigin = status.activeView;
+  }
+  const overlay = window.history.state?.musicUi;
+  if (status.queueOpen && queueHistoryActive && overlay === "queue") {
+    queueHistoryActive = false;
+    window.history.replaceState({ ...window.history.state, musicUi: "catalog" }, "");
+  } else if (media.expanded && fullPlayerHistoryActive && overlay === "full-player") {
+    fullPlayerHistoryActive = false;
+    window.history.replaceState({ ...window.history.state, musicUi: "catalog" }, "");
+  } else {
+    pushUiHistory("catalog");
+  }
+  catalogHistoryDepth += 1;
+  status.queueOpen = false;
+  media.expanded = false;
+  const page = { ...entry, seq: ++catalogPageSeq, data: null, loading: true, error: "", scroll: 0 };
+  catalogPages.value = [...catalogPages.value, page];
+  pendingPageScroll = 0;
+  status.activeView = "catalog";
+  status.persist();
+  void loadCatalog(page);
+}
+
+function updateCatalogPage(seq, patch) {
+  catalogPages.value = catalogPages.value.map((page) => (page.seq === seq ? { ...page, ...patch } : page));
+}
+
+async function loadCatalog(page) {
+  updateCatalogPage(page.seq, { loading: true, error: "" });
+  try {
+    const data = await loadCatalogPage(page, { quality: status.quality });
+    updateCatalogPage(page.seq, { data, loading: false, ...(data.title || data.name ? { title: data.title || data.name } : {}) });
+  } catch (error) {
+    updateCatalogPage(page.seq, { loading: false, error: error?.message || "暂时无法打开，请重试" });
+  }
+}
+
+function leaveCatalogPage({ fromPopstate = false } = {}) {
+  if (status.activeView !== "catalog") return;
+  if (!fromPopstate && catalogHistoryDepth > 0 && window.history.state?.musicUi === "catalog") backUiHistory();
+  catalogHistoryDepth = Math.max(0, catalogHistoryDepth - 1);
+  const pages = catalogPages.value.slice(0, -1);
+  if (pages.length) {
+    catalogPages.value = pages;
+    pendingPageScroll = pages[pages.length - 1].scroll || 0;
+    return;
+  }
+  leavingCatalog = true;
+  const back = catalogReturn || { view: "search", playlistId: null, scroll: 0 };
+  status.activeView = back.view === "catalog" ? "search" : back.view;
+  status.activePlaylistId = back.playlistId;
+  pendingPageScroll = back.scroll || 0;
+  status.persist();
+  catalogPages.value = [];
+  catalogReturn = null;
+  void nextTick(() => { leavingCatalog = false; });
+}
+
+const catalogBackLabel = computed(() => {
+  const pages = catalogPages.value;
+  if (pages.length > 1) return pages[pages.length - 2].title || "返回";
+  return VIEW_LABELS[catalogReturn?.view] || "返回";
+});
+
+function catalogSource(page, data) {
+  return {
+    // A playlist reopens through its link; albums and artists by id.
+    id: page.kind === "playlist" ? page.url || data?.source_url || page.id : data?.id || page.id,
+    name: data?.title || data?.name || page.title,
+    type: page.kind,
+    platform: page.platform,
+    // Albums play gaplessly in order, without crossfades.
+    ...(page.kind === "album" ? { resource_type: "albums" } : {}),
+  };
+}
+
+// An album or artist plays from the song picked, the rest following it, as
+// Apple Music does; shuffle keeps the picked song first.
+async function playCatalogTracks(page, tracks, index = 0, keepStart = true) {
+  if (!tracks?.length) return;
+  status.queueOpen = false;
+  await player.playFrom(tracks.map(trackForCurrentQuality), index, catalogSource(page, page.data), { keepStart });
+}
+
+function catalogPlaylist(page) {
+  const data = page?.data;
+  return {
+    id: data?.id || page?.id,
+    name: data?.title || data?.name || page?.title || "",
+    tracks: page?.kind === "artist" ? data?.top_songs || [] : data?.tracks || [],
+  };
+}
+
+function saveCatalogPage(page) {
+  const data = page?.data;
+  if (!data?.tracks?.length) return;
+  const album = page.kind === "album";
+  const playlist = playlists.create({
+    name: album && data.artist ? `${data.title} - ${data.artist}` : data.title || page.title,
+    tracks: data.tracks.map(trackForCurrentQuality),
+    platform: page.platform,
+    sourceId: data.id || page.id,
+    sourceUrl: album ? data.url : data.source_url || page.url,
+    sourcePlatform: page.platform,
+    sourceKeys: data.tracks.map(trackIdentity),
+  });
+  status.toast(`已添加“${playlist.name}”，共 ${playlist.tracks.length} 首`);
+}
+
+const albumFooter = computed(() => {
+  const page = catalogPage.value;
+  if (page?.kind !== "album" || !page.data) return [];
+  return [formatReleaseDate(page.data.release_date), albumSummary(page.data.tracks), page.data.copyright].filter(Boolean);
+});
+
+const albumMeta = computed(() => {
+  const page = catalogPage.value;
+  if (page?.kind !== "album") return "";
+  if (page.loading) return "正在读取";
+  if (page.error) return "未加载";
+  return [page.data?.genre, String(page.data?.release_date || "").slice(0, 4)].filter(Boolean).join(" · ") || `${page.data?.tracks?.length || 0} 首歌曲`;
+});
+
+function openAlbumArtist(page) {
+  const data = page?.data;
+  if (!data?.artist_id) return;
+  openCatalogPage({ kind: "artist", platform: page.platform, id: data.artist_id, title: data.artist });
+}
+
+// The round play button on an album or playlist card plays it in place.
+async function playCatalogItem(item) {
+  if (!item) return;
+  const key = `${item.type}:${item.id}`;
+  if (item.type === "song") {
+    await playTrack(trackFromCatalog(item, status.quality));
+    return;
+  }
+  if (catalogPending.value) return;
+  catalogPending.value = key;
+  try {
+    const page = pageForItem(item);
+    const data = await loadCatalogPage(page, { quality: status.quality });
+    const tracks = data.tracks || [];
+    if (!tracks.length) {
+      status.toast(`“${item.title}”暂时没有可播放的歌曲`);
+      return;
+    }
+    await playCatalogTracks({ ...page, data }, tracks, 0, false);
+  } catch (error) {
+    status.toast(error?.message || "暂时无法播放，请重试");
+  } finally {
+    catalogPending.value = "";
+  }
+}
+
+function openCatalogItem(item) {
+  if (item?.type === "song") void playCatalogItem(item);
+  else if (item) openCatalogPage(pageForItem(item));
+}
+
+function openTrackPage(kind, track) {
+  if (!track?.platform) return;
+  openCatalogPage(pageForTrack(kind, track));
+}
+
+provide("catalog", {
+  supports: catalogSupports,
+  openAlbumOf: (track) => openTrackPage("album", track),
+  openArtistOf: (track) => openTrackPage("artist", track),
+  open: openCatalogPage,
+});
 
 async function waitForReady(task, { allowAlacStream = false } = {}) {
   let current = task;
@@ -639,16 +860,21 @@ function trackForCurrentQuality(track) {
     (typeof track.id === "string" && track.id.includes("--")
       ? track.id.split("--").slice(1, -1).join("--")
       : track.id);
-  return trackFromSearch(
-    {
-      platform: track.platform,
-      id: sourceId,
-      song: track.title,
-      singer: track.artist,
-      cover: track.cover,
-    },
-    status.quality,
-  );
+  // The album name stays so the full player can link it before the
+  // playback task names it.
+  return {
+    ...trackFromSearch(
+      {
+        platform: track.platform,
+        id: sourceId,
+        song: track.title,
+        singer: track.artist,
+        cover: track.cover,
+      },
+      status.quality,
+    ),
+    album: track.album || "",
+  };
 }
 
 function recordRecentTrack(track) {
@@ -1024,7 +1250,8 @@ function openSongMenu({ event, track, recommend = false }, playlistId = "") {
   closePlaylistMenu();
   songMenu.value = {
     open: true,
-    ...menuPosition(event, 230, 228 + Math.min(targets, 6) * 38 + (playlistId ? 44 : 0) + (recommend ? 86 : 0)),
+    ...menuPosition(event, 230, 228 + Math.min(targets, 6) * 38 + (playlistId ? 44 : 0) + (recommend ? 86 : 0)
+      + (catalogSupports(track.platform, "albums") ? 38 : 0) + (catalogSupports(track.platform, "artists") ? 38 : 0)),
     track,
     playlistId,
     recommend,
@@ -1055,6 +1282,8 @@ function runSongMenu(action, targetId = "") {
   if (action === "next") queueTrackNext(track);
   if (action === "queue") queueTrack(track);
   if (action === "share") status.shareTrack = track;
+  if (action === "album") openTrackPage("album", track);
+  if (action === "artist") openTrackPage("artist", track);
   if (action === "like") likeRecommendation(track);
   if (action === "less") suggestLessRecommendation(track);
   if (action === "add") {
@@ -1261,6 +1490,8 @@ function handlePopstate(event) {
     fullPlayerHistoryActive = false;
   } else if (status.activeView === "recommendation" && event.state?.musicUi !== "recommendation") {
     leaveRecommendedPlaylist();
+  } else if (status.activeView === "catalog" && catalogPages.value.length) {
+    leaveCatalogPage({ fromPopstate: true });
   }
   closingFromPopstate = false;
 }
@@ -1280,6 +1511,15 @@ watch(
     playlistActionVersion += 1;
     playlistActionBusy.value = false;
     playlistActionNotice.value = "";
+    if (previous === "catalog" && view !== "catalog" && !leavingCatalog) {
+      // Left through a tab: the pages close and their entries stop counting.
+      catalogPages.value = [];
+      catalogReturn = null;
+      catalogHistoryDepth = 0;
+      if (window.history.state?.musicUi === "catalog") {
+        window.history.replaceState({ ...window.history.state, musicUi: null }, "");
+      }
+    }
     if (previous !== "recommendation" || view === "recommendation") return;
     recommendationDetailVersion += 1;
     recommendationDetailLoading.value = false;
@@ -1296,8 +1536,9 @@ watch(
   () => status.quality,
   () => {
     player.onQualityChanged();
-    results.value = results.value.map((track) =>
-      trackFromSearch(
+    results.value = results.value.map((track) => ({
+      ...track,
+      ...trackFromSearch(
         {
           platform: track.platform,
           id: track.source_id || track.selected_id,
@@ -1307,7 +1548,9 @@ watch(
         },
         status.quality,
       ),
-    );
+      album: track.album || "",
+      duration: track.duration || 0,
+    }));
     status.persist();
   },
 );
@@ -1531,24 +1774,22 @@ watch(
           >{{ item.label }}</button>
         </div>
         <div v-if="searchError" class="error-banner">{{ searchError }}</div>
-        <template v-if="searchedQuery">
-          <div class="search-results__head">
-            <p>{{ searchLoading ? "正在搜索…" : `${results.length} 首` }}</p>
-            <div>
-              <button class="ghost-action" :disabled="!results.length" @click="saveResultsAsPlaylist">存为歌单</button>
-              <button class="primary-action" :disabled="!results.length" @click="playAllResults"><Play :size="15" />播放</button>
-            </div>
-          </div>
-          <SongList
-            :items="results"
-            :loading="searchLoading"
-            empty-text="没有找到匹配的歌曲"
-            @play="playTrack"
-            @queue="queueTrack"
-            @queue-next="queueTrackNext"
-            @menu="openSongMenu"
-          />
-        </template>
+        <CatalogSearchResults
+          v-if="searchedQuery"
+          v-model:section="searchSection"
+          :result="searchResult"
+          :songs="results"
+          :loading="searchLoading"
+          :pending="catalogPending"
+          @play="playTrack"
+          @queue="queueTrack"
+          @queue-next="queueTrackNext"
+          @menu="openSongMenu"
+          @open="openCatalogItem"
+          @play-item="playCatalogItem"
+          @play-all="playAllResults"
+          @save="saveResultsAsPlaylist"
+        />
         <p v-else class="search-hint">在 {{ platformLabel }} 中搜索</p>
       </section>
 
@@ -1569,6 +1810,55 @@ watch(
           @append="appendPlaylistQueue(recommendationDetail)"
           @next="nextPlaylistQueue(recommendationDetail)"
           @play="playTrack"
+          @queue="queueTrack"
+          @queue-next="queueTrackNext"
+          @menu="openSongMenu"
+        />
+      </section>
+
+      <section v-else-if="status.activeView === 'catalog' && catalogPage" class="content" :key="`catalog:${catalogPage.seq}`">
+        <ArtistPage
+          v-if="catalogPage.kind === 'artist'"
+          :page="catalogPage"
+          :back-label="catalogBackLabel"
+          :shuffle="status.shuffleMode === 'on'"
+          :pending="catalogPending"
+          @back="leaveCatalogPage()"
+          @retry="loadCatalog(catalogPage)"
+          @play="(track, index) => playCatalogTracks(catalogPage, catalogPage.data?.top_songs, index)"
+          @play-all="playCatalogTracks(catalogPage, catalogPage.data?.top_songs, 0, false)"
+          @queue="queueTrack"
+          @queue-next="queueTrackNext"
+          @menu="openSongMenu"
+          @open="openCatalogItem"
+          @play-item="playCatalogItem"
+        />
+        <PlaylistDetail
+          v-else
+          :playlist="{ id: catalogPage.data?.id || catalogPage.id, name: catalogPage.data?.title || catalogPage.title, cover: catalogPage.data?.cover || catalogPage.cover, platform: catalogPage.platform, resource_type: catalogPage.kind === 'album' ? 'albums' : 'playlists', tracks: catalogPage.data?.tracks || [] }"
+          :kind="catalogPage.kind"
+          :loading="catalogPage.loading"
+          :error="catalogPage.error"
+          :back-label="catalogBackLabel"
+          :subtitle="catalogPage.kind === 'album' ? catalogPage.data?.artist || catalogPage.subtitle : catalogPage.subtitle || platformOptions.find((item) => item.id === catalogPage.platform)?.label || ''"
+          :subtitle-link="catalogPage.kind === 'album' && Boolean(catalogPage.data?.artist_id) && catalogSupports(catalogPage.platform, 'artists')"
+          :meta="albumMeta"
+          :numbered="catalogPage.kind === 'album'"
+          :footer="albumFooter"
+          savable
+          :shuffle="status.shuffleMode === 'on'"
+          :queue-length="queue.queueLength"
+          :current-track="status.currentTrack"
+          :busy="playlistActionBusy"
+          :notice="playlistActionNotice"
+          @back="leaveCatalogPage()"
+          @retry="loadCatalog(catalogPage)"
+          @subtitle="openAlbumArtist(catalogPage)"
+          @save="saveCatalogPage(catalogPage)"
+          @replace="playCatalogTracks(catalogPage, catalogPage.data?.tracks, 0, false)"
+          @append="appendPlaylistQueue(catalogPlaylist(catalogPage))"
+          @next="nextPlaylistQueue(catalogPlaylist(catalogPage))"
+          @play="(track, index) => catalogPage.kind === 'album' ? playCatalogTracks(catalogPage, catalogPage.data?.tracks, index) : playTrack(track)"
           @queue="queueTrack"
           @queue-next="queueTrackNext"
           @menu="openSongMenu"
@@ -1713,6 +2003,8 @@ watch(
         <button type="button" role="menuitem" @click="runSongMenu('next')"><ListStart :size="16" />下一首播放</button>
         <button type="button" role="menuitem" @click="runSongMenu('queue')"><ListPlus :size="16" />加入播放队列</button>
         <button v-if="canShareTrack(songMenu.track)" type="button" role="menuitem" @click="runSongMenu('share')"><Share :size="16" />分享…</button>
+        <button v-if="catalogSupports(songMenu.track?.platform, 'albums')" type="button" role="menuitem" @click="runSongMenu('album')"><Disc3 :size="16" />前往专辑</button>
+        <button v-if="catalogSupports(songMenu.track?.platform, 'artists')" type="button" role="menuitem" @click="runSongMenu('artist')"><MicVocal :size="16" />前往艺人</button>
         <template v-if="songMenu.recommend">
           <div class="context-menu__divider"></div>
           <button type="button" role="menuitem" @click="runSongMenu('like')"><Heart :size="16" />喜欢</button>

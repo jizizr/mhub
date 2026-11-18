@@ -41,6 +41,10 @@ lazy_static! {
     ];
 }
 
+#[path = "tencent_catalog.rs"]
+mod catalog_api;
+pub(super) use catalog_api::{album_detail, catalog_search};
+
 pub static TENCENT_PROVIDER: TencentProvider = TencentProvider;
 
 pub struct TencentProvider;
@@ -58,6 +62,14 @@ impl MusicProvider for TencentProvider {
                 Err(_) => native_result,
             },
         }
+    }
+
+    async fn collection(
+        &self,
+        keyword: &str,
+        limit: usize,
+    ) -> Result<Option<super::provider::MusicCollection>, BotError> {
+        catalog_api::collection(keyword, limit).await
     }
 
     async fn resolve(
@@ -708,6 +720,8 @@ pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
                 singer: singers_to_string(&detail.singer),
                 album: detail.album.name.clone(),
                 cover: build_track_cover_url(&detail.album.mid),
+                album_id: detail.album.mid.trim().to_string(),
+                artist_id: String::new(),
             })
         }
         Err(native_error) if vkeys_enabled() => {
@@ -724,6 +738,9 @@ pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
                 singer,
                 album: detail.album.clone(),
                 cover: detail.cover.clone(),
+                // vkeys names the album without its mid.
+                album_id: String::new(),
+                artist_id: String::new(),
             })
         }
         Err(error) => Err(error),

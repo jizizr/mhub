@@ -10,6 +10,9 @@ const props = defineProps({
   items: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   emptyText: { type: String, default: "没有结果" },
+  // Album pages number their tracks instead of repeating the same cover.
+  numbered: { type: Boolean, default: false },
+  showAlbum: { type: Boolean, default: true },
 });
 
 const emit = defineEmits(["play", "queue", "queue-next", "menu"]);
@@ -17,7 +20,7 @@ const media = useMediaStore();
 const status = useStatusStore();
 const rows = computed(() => props.items);
 // Apple Music only adds the album column when the list carries albums.
-const hasAlbums = computed(() => rows.value.some((track) => track?.album));
+const hasAlbums = computed(() => props.showAlbum && rows.value.some((track) => track?.album));
 const hasDurations = computed(() => rows.value.some((track) => track?.duration));
 
 function isActiveTrack(track) {
@@ -27,17 +30,17 @@ function isActiveTrack(track) {
 
 // As in Apple Music: a mouse click selects the row and a double click plays
 // it; on touch screens a tap plays straight away. Neither opens the full player.
-function handleRowClick(event, track) {
+function handleRowClick(event, track, index) {
   const touch = event.pointerType === "touch" || event.pointerType === "pen"
     || (!event.pointerType && window.matchMedia?.("(hover: none)").matches);
-  if (touch) emit("play", track);
+  if (touch) emit("play", track, index);
 }
 
-function handleRowKey(event, track) {
+function handleRowKey(event, track, index) {
   if (event.target !== event.currentTarget) return;
   if (event.key === "Enter") {
     event.preventDefault();
-    emit("play", track);
+    emit("play", track, index);
   } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     const next = event.key === "ArrowDown" ? event.currentTarget.nextElementSibling : event.currentTarget.previousElementSibling;
     if (next?.classList.contains("song-row")) {
@@ -49,7 +52,7 @@ function handleRowKey(event, track) {
 </script>
 
 <template>
-  <div class="song-list" :class="{ 'song-list--albums': hasAlbums }">
+  <div class="song-list" :class="{ 'song-list--albums': hasAlbums, 'song-list--numbered': numbered }">
 
     <Transition name="list-state" mode="out-in">
       <div v-if="loading" key="loading" class="list-state">正在搜索...</div>
@@ -71,13 +74,14 @@ function handleRowKey(event, track) {
             tabindex="0"
             :aria-label="`${track.title} - ${track.artist || '未知艺人'}`"
             :aria-current="isActiveTrack(track) ? 'true' : undefined"
-            @click="handleRowClick($event, track)"
-            @dblclick="emit('play', track)"
-            @keydown="handleRowKey($event, track)"
+            @click="handleRowClick($event, track, index)"
+            @dblclick="emit('play', track, index)"
+            @keydown="handleRowKey($event, track, index)"
             @contextmenu.prevent="emit('menu', { event: $event, track })"
           >
-            <button class="song-row__art" type="button" title="播放" :aria-label="`播放 ${track.title}`" @click.stop="emit('play', track)" @dblclick.stop>
-              <span class="cover-thumb">
+            <button class="song-row__art" type="button" title="播放" :aria-label="`播放 ${track.title}`" @click.stop="emit('play', track, index)" @dblclick.stop>
+              <span v-if="numbered" class="song-row__number">{{ track.track_number || index + 1 }}</span>
+              <span v-else class="cover-thumb">
                 <img v-if="track.cover" :src="track.cover" alt="" loading="lazy" />
               </span>
               <span v-if="isActiveTrack(track)" class="now-playing-bars" :class="{ 'is-paused': !status.isPlaying }" aria-hidden="true"><i></i><i></i><i></i><i></i></span>

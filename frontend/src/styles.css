@@ -708,6 +708,11 @@ button.artwork-card__play:hover { background: rgba(255, 255, 255, .86); color: v
 .song-row:hover .song-row__art-play, .song-row__art:focus-visible .song-row__art-play { opacity: 1; }
 .song-row:hover .now-playing-bars { opacity: 0; }
 .now-playing-bars { display: flex; align-items: flex-end; justify-content: center; gap: 2px; padding-bottom: 13px; }
+/* Album pages: the track number sits where the cover would; playing and
+   hovering swap it for the bars or a play glyph in the key colour. */
+.song-row__number { display: grid; place-items: center; width: 40px; height: 40px; color: var(--text-muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.song-list--numbered .song-row__art-play, .song-list--numbered .now-playing-bars { background: transparent; color: var(--accent); }
+.song-list--numbered .song-row:hover .song-row__number, .song-list--numbered .song-row.is-playing .song-row__number { opacity: 0; }
 .now-playing-bars i { width: 3px; height: 14px; border-radius: 1.5px; background: currentColor; transform-origin: bottom; animation: now-playing-bar 1s var(--ease-standard) infinite alternate; }
 .now-playing-bars i:nth-child(2) { animation-duration: .8s; animation-delay: -.5s; }
 .now-playing-bars i:nth-child(3) { animation-duration: 1.15s; animation-delay: -.25s; }
@@ -1461,6 +1466,23 @@ button.artwork-card__play:hover { background: rgba(255, 255, 255, .86); color: v
   margin: 8px 0 0;
   color: rgba(255, 255, 255, 0.62);
   font-size: clamp(15px, 1.35vw, 20px);
+}
+
+/* Artist and album open their pages, as Apple Music's player links them. */
+.full-player__link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.full-player__link:hover,
+.full-player__link:focus-visible {
+  color: rgba(255, 255, 255, 0.9);
+  text-decoration: underline;
 }
 
 .full-player__lyrics {

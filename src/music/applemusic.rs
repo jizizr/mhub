@@ -165,8 +165,11 @@ struct CachedWrapperLiteTemplate {
     template: Arc<temari::rounds::Template>,
 }
 
+#[path = "applemusic_catalog.rs"]
+mod catalog_api;
 #[path = "applemusic_recommendations.rs"]
 mod recommendations;
+pub(super) use catalog_api::{album_detail, artist_detail, catalog_search};
 pub use recommendations::{
     continuation_recommendations, personal_recommendation_home, personal_recommendations,
 };
@@ -845,17 +848,7 @@ struct WebPlaybackMetadata {
 }
 
 pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
-    ensure_apple_enabled()?;
-    let song = get_apple_song(id).await?;
-    let attrs = song.attributes;
-    Ok(super::TrackInfo {
-        platform: MusicPlatform::AppleMusic.id(),
-        id: song.id,
-        song: attrs.name,
-        singer: attrs.artist_name,
-        album: attrs.album_name,
-        cover: format_artwork_url(attrs.artwork.as_ref(), DEFAULT_ARTWORK_SIZE),
-    })
+    catalog_api::track_info(id).await
 }
 
 async fn get_apple_song(id: &str) -> Result<AppleMusicResource, BotError> {

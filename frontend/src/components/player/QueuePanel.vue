@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from "vue";
 import { ArrowUpRight, GripVertical, Infinity as InfinityIcon, ListMusic, LoaderCircle, Trash2, X } from "lucide-vue-next";
 import * as player from "../../core/player";
 import { trackIdentity, useQueueStore } from "../../stores/queue";
@@ -24,8 +24,10 @@ let dragFrame = 0;
 let lastLayoutOrder = "";
 const rowPositions = new WeakMap();
 const sourcePlaylist = computed(() => queue.sourcePlaylist);
+const SOURCE_PREFIX = { recommendation: "来自推荐：", album: "来自专辑：", artist: "来自艺人：" };
 const sourceLabel = computed(() => sourcePlaylist.value
-  ? `${sourcePlaylist.value.type === "recommendation" ? "来自推荐：" : "来自歌单："}${sourcePlaylist.value.name}` : "");
+  ? `${SOURCE_PREFIX[sourcePlaylist.value.type] || "来自歌单："}${sourcePlaylist.value.name}` : "");
+const catalog = inject("catalog", null);
 // The queue page is laid out as an Apple Music song table; it only adds an
 // album column when the queue carries albums.
 const hasAlbums = computed(() => queue.queue.some((track) => track?.album));
@@ -217,6 +219,11 @@ function openQueuePage() {
 
 function openSourcePlaylist() {
   if (!sourcePlaylist.value?.id) return;
+  const { type, platform, id, name } = sourcePlaylist.value;
+  if (catalog && platform && ["album", "artist", "playlist"].includes(type)) {
+    catalog.open({ kind: type, platform, id, url: type === "playlist" ? id : "", title: name });
+    return;
+  }
   if (sourcePlaylist.value.type === "recommendation") {
     status.activeView = "discover";
     status.activePlaylistId = null;

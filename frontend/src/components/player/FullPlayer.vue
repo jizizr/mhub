@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ChevronDown, Download, Languages, LoaderCircle, Share } from "lucide-vue-next";
 import { coverUrl } from "../../apis/music";
 import * as player from "../../core/player";
@@ -23,6 +23,10 @@ import VolumeControl from "./VolumeControl.vue";
 const emit = defineEmits(["chrome-color"]);
 const media = useMediaStore();
 const status = useStatusStore();
+// Artist and album open their catalog pages where the platform has them.
+const catalog = inject("catalog", null);
+const canOpenArtist = computed(() => Boolean(catalog && media.track && catalog.supports(media.track.platform, "artists")));
+const canOpenAlbum = computed(() => Boolean(catalog && media.track?.album && catalog.supports(media.track.platform, "albums")));
 const draft = ref(null);
 const isMobileLayout = ref(false);
 const lyricScriptOverride = ref("");
@@ -166,7 +170,15 @@ onBeforeUnmount(() => {
         <div class="full-player__meta">
           <div class="full-player__meta-text">
             <h1>{{ media.track.title }}</h1>
-            <p>{{ media.track.artist || "未知艺人" }}</p>
+            <p>
+              <button v-if="canOpenArtist" class="full-player__link" type="button" title="前往艺人" @click="catalog.openArtistOf(media.track)">{{ media.track.artist || "未知艺人" }}</button>
+              <template v-else>{{ media.track.artist || "未知艺人" }}</template>
+              <template v-if="media.track.album">
+                <span aria-hidden="true"> — </span>
+                <button v-if="canOpenAlbum" class="full-player__link" type="button" title="前往专辑" @click="catalog.openAlbumOf(media.track)">{{ media.track.album }}</button>
+                <template v-else>{{ media.track.album }}</template>
+              </template>
+            </p>
           </div>
           <button
             v-if="canDownload"

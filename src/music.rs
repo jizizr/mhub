@@ -2,6 +2,7 @@
 
 mod applemusic;
 mod bilibili;
+pub mod catalog;
 mod kugou;
 mod lyric_credits;
 mod netease;
@@ -72,6 +73,9 @@ pub struct PlatformInfo {
     pub id: &'static str,
     pub label: &'static str,
     pub aliases: &'static [&'static str],
+    /// Catalog search sections (`top`, `artists`, `albums`, `songs`,
+    /// `playlists`); only `songs` where the platform has no album pages.
+    pub catalog: &'static [&'static str],
 }
 
 /// What a share link needs to show a song: catalog metadata looked up by
@@ -84,6 +88,10 @@ pub struct TrackInfo {
     pub singer: String,
     pub album: String,
     pub cover: String,
+    /// Opens the album page; empty when the platform has none.
+    pub album_id: String,
+    /// Opens the artist page; empty when the platform has none.
+    pub artist_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +165,7 @@ pub fn platforms() -> Vec<PlatformInfo> {
             id: platform.id(),
             label: platform.label(),
             aliases: platform.aliases(),
+            catalog: catalog::sections(platform),
         })
         .collect()
 }
@@ -400,6 +409,83 @@ pub async fn track_info(platform: MusicPlatform, id: &str) -> ApiResult<TrackInf
         MusicPlatform::Tencent => tencent::track_info(id).await,
         MusicPlatform::Soda => soda::track_info(id).await,
         _ => Err(ApiError::Custom("该平台暂不支持分享链接".to_string())),
+    }
+}
+
+/// Songs, albums, artists and playlists for a search box. Platforms
+/// without album pages answer with their song search alone.
+pub async fn catalog_search(
+    platform: MusicPlatform,
+    keyword: &str,
+    limit: usize,
+) -> ApiResult<catalog::CatalogSearch> {
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        return Err(ApiError::Custom("搜索内容不能为空".to_string()));
+    }
+    let limit = limit.clamp(1, 25);
+    let result = match platform {
+        MusicPlatform::AppleMusic => applemusic::catalog_search(keyword, limit).await,
+        MusicPlatform::Netease => netease::catalog_search(keyword, limit).await,
+        MusicPlatform::Tencent => tencent::catalog_search(keyword, limit).await,
+        _ => Err(ApiError::Custom(String::new())),
+    };
+    match result {
+        Ok(found) => Ok(found.tidy()),
+        // Songs alone still answer the search box: a platform without the
+        // other sections, or a catalog that is failing or throttling this
+        // server while the song search (with its fallbacks) still works.
+        Err(error) => {
+            if catalog::has_albums(platform) {
+                tracing::warn!("{} 分类搜索失败，仅返回歌曲：{error}", platform.label());
+            }
+            let songs = search(platform, keyword, limit).await?;
+            let mut found = catalog::CatalogSearch::new(platform);
+            found.songs = songs.into_iter().map(catalog_song).collect();
+            if catalog::has_albums(platform) {
+                found.top = found.songs.iter().take(4).cloned().collect();
+                found.partial = true;
+            }
+            Ok(found.tidy())
+        }
+    }
+}
+
+fn catalog_song(item: MusicSearchItem) -> catalog::CatalogItem {
+    catalog::CatalogItem::new(catalog::CatalogKind::Song, item.platform, item.id)
+        .title(item.song)
+        .subtitle(item.singer)
+        .cover(item.cover)
+}
+
+pub async fn album(platform: MusicPlatform, id: &str) -> ApiResult<catalog::AlbumDetail> {
+    let id = id.trim();
+    if !catalog::valid_id(id) {
+        return Err(ApiError::Custom("专辑 ID 无效".to_string()));
+    }
+    match platform {
+        MusicPlatform::AppleMusic => applemusic::album_detail(id).await,
+        MusicPlatform::Netease => netease::album_detail(id).await,
+        MusicPlatform::Tencent => tencent::album_detail(id).await,
+        _ => Err(ApiError::Custom(format!(
+            "{}暂不支持专辑页",
+            platform.label()
+        ))),
+    }
+}
+
+pub async fn artist(platform: MusicPlatform, id: &str) -> ApiResult<catalog::ArtistDetail> {
+    let id = id.trim();
+    if !catalog::valid_id(id) {
+        return Err(ApiError::Custom("艺人 ID 无效".to_string()));
+    }
+    match platform {
+        MusicPlatform::AppleMusic => applemusic::artist_detail(id).await,
+        MusicPlatform::Netease => netease::artist_detail(id).await,
+        _ => Err(ApiError::Custom(format!(
+            "{}暂不支持艺人页",
+            platform.label()
+        ))),
     }
 }
 

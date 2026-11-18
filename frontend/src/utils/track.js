@@ -35,6 +35,17 @@ export function trackFromSearch(item, quality = "high") {
   };
 }
 
+/** A catalog song (search section, album or artist page) as a track. */
+export function trackFromCatalog(item, quality = "high") {
+  return {
+    ...trackFromSearch({ platform: item.platform, id: item.id, song: item.title, singer: item.subtitle, cover: item.cover }, quality),
+    album: item.album || "",
+    duration: Number(item.duration_ms) > 0 ? Number(item.duration_ms) : 0,
+    track_number: Number(item.track_number) > 0 ? Number(item.track_number) : 0,
+    disc_number: Number(item.disc_number) > 0 ? Number(item.disc_number) : 0,
+  };
+}
+
 export function trackFromPlayback(task, fallback = {}) {
   const durationMs = Number.isFinite(task?.duration) ? task.duration * 1000 : fallback.duration || 0;
   // Transport is negotiated by the backend. A response without streaming

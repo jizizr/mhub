@@ -64,6 +64,8 @@ export const useStatusStore = defineStore("status", {
     theme: "system",
     activeView: "discover",
     activePlaylistId: null,
+    // The view an album or artist page was opened from; its tab stays lit.
+    catalogOrigin: "",
     searchOpen: false,
     queueOpen: false,
     notice: "搜索或选择一首音乐",

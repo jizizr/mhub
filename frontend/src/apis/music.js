@@ -142,6 +142,21 @@ export function getContinuationRecommendations({ platform = "applemusic", seedId
   }).then((res) => res.json());
 }
 
+// Songs, albums, artists and playlists in the sections the platform has
+// (`sections`); platforms without album pages answer with songs alone.
+export function searchCatalog({ platform, q, limit = 20, signal }) {
+  const params = new URLSearchParams({ platform, q, limit: String(limit) });
+  return request(`${API}/catalog/search?${params}`, { signal }).then((res) => res.json());
+}
+
+export function getAlbum({ platform, id, signal }) {
+  return request(`${API}/albums/${encodeURIComponent(platform)}/${encodeURIComponent(id)}`, { signal }).then((res) => res.json());
+}
+
+export function getArtist({ platform, id, signal }) {
+  return request(`${API}/artists/${encodeURIComponent(platform)}/${encodeURIComponent(id)}`, { signal }).then((res) => res.json());
+}
+
 // Catalog metadata for a shared song, looked up by platform and id only.
 export function getTrackInfo({ platform, id, signal }) {
   return request(`${API}/tracks/${encodeURIComponent(platform)}/${encodeURIComponent(id)}`, { signal }).then((res) => res.json());

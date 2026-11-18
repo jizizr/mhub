@@ -82,7 +82,9 @@ export const useQueueStore = defineStore("queue", {
       this.originalQueue = null;
       this.sourcePlaylist = sourcePlaylist
         ? { id: sourcePlaylist.id, name: sourcePlaylist.name, type: sourcePlaylist.type || "playlist",
-            ...(sourcePlaylist.resource_type ? { resource_type: sourcePlaylist.resource_type } : {}) }
+            ...(sourcePlaylist.resource_type ? { resource_type: sourcePlaylist.resource_type } : {}),
+            // Album, artist and searched playlists reopen their catalog page.
+            ...(sourcePlaylist.platform ? { platform: sourcePlaylist.platform } : {}) }
         : null;
       this.save();
     },

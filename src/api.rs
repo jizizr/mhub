@@ -517,6 +517,9 @@ fn app_with_state(state: AppState, serve_web: bool) -> Router {
         .route("/api/v1/collections/match", post(match_collection))
         .route("/api/v1/lyrics", get(lyrics))
         .route("/api/v1/tracks/:platform/:id", get(track_info))
+        .route("/api/v1/catalog/search", get(catalog_search))
+        .route("/api/v1/albums/:platform/:id", get(album_detail))
+        .route("/api/v1/artists/:platform/:id", get(artist_detail))
         .route("/api/v1/playbacks", post(create_download))
         .route("/api/v1/playbacks/:id", get(get_download))
         .route("/api/v1/playbacks/:id/audio", get(download_file))
@@ -684,6 +687,96 @@ async fn track_info(
         [(header::CACHE_CONTROL, "public, max-age=3600")],
         Json(info),
     ))
+}
+
+lazy_static::lazy_static! {
+    // Only answers that leave these caches cost the client's quota, as with
+    // the song search cache: retyping a query or reopening a page is free.
+    static ref CATALOG_SEARCHES: music::catalog::TtlCache<music::catalog::CatalogSearch> =
+        music::catalog::TtlCache::new(Duration::from_secs(30 * 60), 4000);
+    static ref CATALOG_ALBUMS: music::catalog::TtlCache<music::catalog::AlbumDetail> =
+        music::catalog::TtlCache::new(Duration::from_secs(6 * 60 * 60), 2000);
+    static ref CATALOG_ARTISTS: music::catalog::TtlCache<music::catalog::ArtistDetail> =
+        music::catalog::TtlCache::new(Duration::from_secs(6 * 60 * 60), 1000);
+}
+
+type CatalogJson<T> = ([(header::HeaderName, &'static str); 1], Json<T>);
+
+/// The cached answer for `key`, else `load` metered as `kind` and kept.
+async fn cached_catalog<T, F>(
+    cache: &music::catalog::TtlCache<T>,
+    key: String,
+    kind: upstream_limit::Kind,
+    max_age: &'static str,
+    load: F,
+    keep: impl FnOnce(&T) -> bool,
+) -> ApiResult<CatalogJson<T>>
+where
+    T: Clone,
+    F: std::future::Future<Output = ApiResult<T>>,
+{
+    if let Some(value) = cache.get(&key) {
+        return Ok(([(header::CACHE_CONTROL, max_age)], Json(value)));
+    }
+    let value = upstream_limit::metered(kind, load).await?;
+    if !keep(&value) {
+        return Ok(([(header::CACHE_CONTROL, "no-store")], Json(value)));
+    }
+    cache.put(key, value.clone());
+    Ok(([(header::CACHE_CONTROL, max_age)], Json(value)))
+}
+
+/// Search results by section (best results, artists, albums, songs,
+/// playlists), as Apple Music's search page shows them.
+async fn catalog_search(
+    Query(params): Query<SearchParams>,
+) -> ApiResult<CatalogJson<music::catalog::CatalogSearch>> {
+    let platform = music::parse_platform(&params.platform)?;
+    let limit = params.limit.clamp(1, 25);
+    let key = format!(
+        "{}\n{}\n{limit}",
+        platform.id(),
+        params.q.trim().to_lowercase()
+    );
+    cached_catalog(
+        &CATALOG_SEARCHES,
+        key,
+        upstream_limit::Kind::Search,
+        "public, max-age=600",
+        music::catalog_search(platform, &params.q, limit),
+        |found| !found.partial,
+    )
+    .await
+}
+
+async fn album_detail(
+    Path((platform, id)): Path<(String, String)>,
+) -> ApiResult<CatalogJson<music::catalog::AlbumDetail>> {
+    let platform = music::parse_platform(&platform)?;
+    cached_catalog(
+        &CATALOG_ALBUMS,
+        format!("{}\n{}", platform.id(), id.trim()),
+        upstream_limit::Kind::Metadata,
+        "public, max-age=3600",
+        music::album(platform, &id),
+        |_| true,
+    )
+    .await
+}
+
+async fn artist_detail(
+    Path((platform, id)): Path<(String, String)>,
+) -> ApiResult<CatalogJson<music::catalog::ArtistDetail>> {
+    let platform = music::parse_platform(&platform)?;
+    cached_catalog(
+        &CATALOG_ARTISTS,
+        format!("{}\n{}", platform.id(), id.trim()),
+        upstream_limit::Kind::Metadata,
+        "public, max-age=3600",
+        music::artist(platform, &id),
+        |_| true,
+    )
+    .await
 }
 
 // Recommendation responses are newly sampled even when the upstream pool is

@@ -8,6 +8,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+#[path = "netease_catalog.rs"]
+mod catalog_api;
+pub(super) use catalog_api::{album_detail, artist_detail, catalog_search};
+
 pub static NETEASE_PROVIDER: NeteaseProvider = NeteaseProvider;
 
 pub struct NeteaseProvider;
@@ -294,6 +298,9 @@ struct NeteaseAlbumInfo {
     id: serde_json::Value,
     name: String,
     artist: Option<NeteaseArtist>,
+    /// Anonymous answers list the songs here rather than beside the album.
+    #[serde(default)]
+    songs: Vec<NeteaseSong>,
 }
 
 #[derive(Deserialize)]
@@ -474,20 +481,7 @@ async fn get_vkeys_netease_lyrics(id: &str) -> Result<Option<MusicLyrics>, BotEr
 }
 
 pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
-    if !id.chars().all(|c| c.is_ascii_digit()) {
-        return Err(BotError::Custom("网易云歌曲 ID 无效".to_string()));
-    }
-    let song = get_netease_song(id).await?;
-    let singer = netease_artists(&song);
-    let album = song.album.unwrap_or_default();
-    Ok(super::TrackInfo {
-        platform: MusicPlatform::Netease.id(),
-        id: id.to_string(),
-        song: song.name,
-        singer,
-        album: album.name,
-        cover: album.pic_url.unwrap_or_default(),
-    })
+    catalog_api::track_info(id).await
 }
 
 async fn get_netease_song(id: &str) -> Result<NeteaseSong, BotError> {
@@ -808,13 +802,18 @@ fn songs_in_playlist_order(
 
 async fn get_netease_album_collection(id: &str, limit: usize) -> Result<MusicCollection, BotError> {
     let url = format!(
-        "https://music.163.com/api/album/{}",
+        "https://music.163.com/api/v1/album/{}",
         urlencoding::encode(id)
     );
     let response: NeteaseAlbumResponse = get_netease_json(&url).await?;
-    let album = response
+    let mut album = response
         .album
         .ok_or_else(|| BotError::Custom("没有找到网易云专辑".to_string()))?;
+    let songs = if response.songs.is_empty() {
+        std::mem::take(&mut album.songs)
+    } else {
+        response.songs
+    };
     let artist = album
         .artist
         .as_ref()
@@ -823,8 +822,7 @@ async fn get_netease_album_collection(id: &str, limit: usize) -> Result<MusicCol
     let title = artist
         .map(|artist| format!("{} - {}", album.name, artist))
         .unwrap_or(album.name);
-    let items = response
-        .songs
+    let items = songs
         .into_iter()
         .take(limit.max(1))
         .map(netease_song_to_item)

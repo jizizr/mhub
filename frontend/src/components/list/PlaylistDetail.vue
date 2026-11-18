@@ -1,7 +1,8 @@
 <script setup>
 import { computed } from "vue";
-import { ChevronLeft, ListPlus, ListStart, LoaderCircle, Music2, Play, RefreshCcw, RefreshCw, Shuffle, Trash2 } from "lucide-vue-next";
+import { ChevronLeft, ListPlus, ListStart, LoaderCircle, Music2, Play, Plus, RefreshCcw, RefreshCw, Shuffle, Trash2 } from "lucide-vue-next";
 import { canSyncPlaylist } from "../../services/playlist-sync";
+import { discGroups } from "../../services/catalog";
 import SongList from "./SongList.vue";
 
 const props = defineProps({
@@ -16,9 +17,31 @@ const props = defineProps({
   notice: { type: String, default: "" },
   currentTrack: { type: Object, default: null },
   syncing: { type: Boolean, default: false },
+  // Catalog pages (albums, searched playlists) name where Back returns to,
+  // what the page is and who made it, and can be saved to the library.
+  backLabel: { type: String, default: "" },
+  kind: { type: String, default: "playlist" },
+  subtitle: { type: String, default: "" },
+  // The subtitle opens the artist's page.
+  subtitleLink: { type: Boolean, default: false },
+  meta: { type: String, default: "" },
+  numbered: { type: Boolean, default: false },
+  footer: { type: Array, default: () => [] },
+  savable: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "queue-next", "menu", "delete", "sync"]);
+const emit = defineEmits(["back", "replace", "append", "next", "retry", "play", "queue", "queue-next", "menu", "delete", "sync", "subtitle", "save"]);
+const kindLabel = computed(() => (props.kind === "album" ? "专辑" : "歌单"));
+// Discs get their own numbered lists; a row's index stays album-wide.
+const groups = computed(() => {
+  if (!props.numbered) return [{ disc: 0, tracks: tracks.value, offset: 0 }];
+  let offset = 0;
+  return discGroups(tracks.value).map((group) => {
+    const entry = { ...group, offset };
+    offset += group.tracks.length;
+    return entry;
+  });
+});
 const syncable = computed(() => props.local && canSyncPlaylist(props.playlist));
 const syncedLabel = computed(() => {
   const at = props.playlist?.synced_at;
@@ -35,6 +58,7 @@ const cover = computed(() => props.playlist?.cover || props.playlist?.cover_url 
 // A detail page never needs an account name or personal curator metadata.
 // Use only the public platform label, including when the API includes more fields.
 const source = computed(() => {
+  if (props.subtitle) return props.subtitle;
   if (!props.local) return "Apple Music";
   return ({ applemusic: "Apple Music", netease: "网易云音乐", tencent: "QQ 音乐", soda: "汽水音乐" })[props.playlist?.platform] || "本地歌单";
 });
@@ -50,9 +74,12 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
   <div class="playlist-detail" :aria-busy="loading || busy">
     <nav class="playlist-detail__nav" aria-label="歌单导航">
       <button type="button" class="page-back" @click="emit('back')">
-        <ChevronLeft :size="20" aria-hidden="true" />{{ local ? "资料库" : "主页" }}
+        <ChevronLeft :size="20" aria-hidden="true" />{{ backLabel || (local ? "资料库" : "主页") }}
       </button>
       <div class="playlist-detail__tools">
+        <button v-if="savable" type="button" class="ghost-action playlist-detail__sync" :disabled="loading || !tracks.length" title="把这些歌曲存为资料库中的歌单" @click="emit('save')">
+          <Plus :size="15" aria-hidden="true" />添加到资料库
+        </button>
         <button v-if="syncable" type="button" class="ghost-action playlist-detail__sync" :disabled="syncing" title="与原歌单同步：加入新增的歌，移除原歌单已删的歌" @click="emit('sync')">
           <RefreshCw :size="15" :class="{ 'is-spinning': syncing }" aria-hidden="true" />{{ syncing ? "同步中…" : "同步" }}
         </button>
@@ -69,11 +96,13 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
       </div>
       <div class="playlist-detail__heading">
         <h1>{{ title }}</h1>
-        <p class="playlist-detail__source">{{ source }}</p>
+        <button v-if="subtitleLink && source" type="button" class="playlist-detail__source playlist-detail__source--link" @click="emit('subtitle')">{{ source }}</button>
+        <p v-else class="playlist-detail__source">{{ source }}</p>
         <p class="playlist-detail__meta">
-          {{ loading ? "正在读取" : error ? "未加载" : `${tracks.length} 首歌曲` }}<template v-if="syncedLabel"> · {{ syncedLabel }}</template>
+          <template v-if="meta">{{ meta }}</template>
+          <template v-else>{{ loading ? "正在读取" : error ? "未加载" : `${tracks.length} 首歌曲` }}</template><template v-if="syncedLabel"> · {{ syncedLabel }}</template>
         </p>
-        <div class="playlist-detail__actions" role="group" aria-label="歌单播放方式">
+        <div class="playlist-detail__actions" role="group" :aria-label="`${kindLabel}播放方式`">
           <button type="button" class="playlist-detail__action playlist-detail__action--primary" :disabled="unavailable" :title="replaceHint" @click="emit('replace')">
             <Shuffle v-if="shuffle" :size="17" aria-hidden="true" />
             <Play v-else :size="17" aria-hidden="true" />
@@ -95,7 +124,7 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
     </p>
 
     <Transition name="playlist-detail-state" mode="out-in">
-      <div v-if="loading" key="loading" class="playlist-detail__loading" role="status" aria-label="正在加载歌单曲目">
+      <div v-if="loading" key="loading" class="playlist-detail__loading" role="status" :aria-label="`正在加载${kindLabel}曲目`">
         <div v-for="row in 6" :key="row" class="playlist-detail__skeleton" aria-hidden="true">
           <span class="playlist-detail__skeleton-cover"></span>
           <span class="playlist-detail__skeleton-lines"><i></i><i></i></span>
@@ -103,24 +132,32 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
       </div>
       <div v-else-if="error" key="error" class="playlist-detail__state" role="alert">
         <Music2 :size="30" :stroke-width="1.5" aria-hidden="true" />
-        <strong>暂时无法打开这份歌单</strong>
+        <strong>暂时无法打开这个{{ kindLabel }}</strong>
         <p>{{ error }}</p>
         <button type="button" class="ghost-action" @click="emit('retry')"><RefreshCcw :size="15" aria-hidden="true" />重新加载</button>
       </div>
       <div v-else-if="!tracks.length" key="empty" class="playlist-detail__state" role="status">
         <Music2 :size="30" :stroke-width="1.5" aria-hidden="true" />
-        <strong>歌单里暂时没有歌曲</strong>
+        <strong>{{ kindLabel }}里暂时没有歌曲</strong>
                 <button v-if="!local" type="button" class="ghost-action" @click="emit('retry')"><RefreshCcw :size="15" aria-hidden="true" />重新加载</button>
       </div>
-      <SongList
-        v-else
-        key="tracks"
-        :items="tracks"
-        @play="emit('play', $event)"
-        @queue="emit('queue', $event)"
-        @queue-next="emit('queue-next', $event)"
-        @menu="emit('menu', $event)"
-      />
+      <div v-else key="tracks" class="playlist-detail__tracks">
+        <template v-for="group in groups" :key="group.disc">
+          <h2 v-if="group.disc" class="playlist-detail__disc">碟 {{ group.disc }}</h2>
+          <SongList
+            :items="group.tracks"
+            :numbered="numbered"
+            :show-album="!numbered"
+            @play="(track, index) => emit('play', track, group.offset + (index ?? 0))"
+            @queue="emit('queue', $event)"
+            @queue-next="emit('queue-next', $event)"
+            @menu="emit('menu', $event)"
+          />
+        </template>
+        <footer v-if="footer.length" class="playlist-detail__footer">
+          <p v-for="line in footer" :key="line">{{ line }}</p>
+        </footer>
+      </div>
     </Transition>
   </div>
 </template>
@@ -143,6 +180,11 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
    11px semibold meta line, then 36px key-colour pills. */
 .playlist-detail__heading h1 { margin: 0; color: var(--am-primary); font-size: 26px; font-weight: 700; line-height: 30px; letter-spacing: 0; overflow-wrap: anywhere; }
 .playlist-detail__source { margin: 0; color: var(--accent); font-size: 26px; line-height: 30px; }
+.playlist-detail__source--link { display: block; max-width: 100%; padding: 0; border: 0; background: transparent; font: inherit; font-size: 26px; text-align: inherit; overflow-wrap: anywhere; cursor: pointer; }
+.playlist-detail__source--link:hover { text-decoration: underline; }
+.playlist-detail__disc { margin: 18px 0 4px; color: var(--text-muted); font-size: 13px; font-weight: 600; }
+.playlist-detail__footer { margin-top: 22px; color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+.playlist-detail__footer p { margin: 0; }
 .playlist-detail__meta { margin: 6px 0 0; color: var(--am-secondary); font-size: 11px; font-weight: 600; line-height: 14px; text-transform: uppercase; }
 .playlist-detail__actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
 .playlist-detail__action { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 130px; min-height: 36px; padding: 0 12px; border: 0; border-radius: 24px; background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; line-height: 20px; white-space: nowrap; cursor: pointer; }
@@ -174,7 +216,8 @@ const nextHint = computed(() => props.currentTrack ? "接在当前歌曲之后�
   .playlist-detail__cover { width: min(62vw, 260px); }
   .playlist-detail__heading { width: 100%; }
   .playlist-detail__heading h1 { font-size: 22px; }
-  .playlist-detail__source { font-size: 20px; }
+  .playlist-detail__source, .playlist-detail__source--link { font-size: 20px; }
+  .playlist-detail__source--link { margin-inline: auto; }
   .playlist-detail__meta { margin-top: 4px; }
   .playlist-detail__actions { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 8px; margin-top: 16px; }
   .playlist-detail__action { min-width: 0; min-height: 42px; padding: 0 10px; font-size: 14px; }
