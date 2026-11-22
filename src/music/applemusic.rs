@@ -57,6 +57,8 @@ const APPLE_WRAPPER_M3U8_TIMEOUT: Duration = Duration::from_secs(5);
 const APPLE_WRAPPER_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLE_WRAPPER_LITE_TIMEOUT: Duration = Duration::from_secs(10);
 const APPLE_WRAPPER_LITE_MEDIA_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// One decrypt batch takes well under a second; a minute means it is stuck.
+const APPLE_DECRYPT_TIMEOUT: Duration = Duration::from_secs(60);
 const APPLE_WRAPPER_LITE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
 
@@ -1502,15 +1504,7 @@ where
                 .iter()
                 .map(|job| job.payload.clone())
                 .collect::<Vec<_>>();
-            let template = Arc::clone(&template);
-            let plaintexts = tokio::task::spawn_blocking(move || {
-                let samples = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
-                decrypt_par(template.as_ref(), &samples)
-            })
-            .await
-            .map_err(|error| {
-                BotError::Custom(format!("Apple Music wrapper-lite 解密任务失败：{error}"))
-            })?;
+            let plaintexts = decrypt_samples_blocking(Arc::clone(&template), payloads).await?;
             if plaintexts.len() != jobs.len() {
                 return Err(BotError::Custom(
                     "Apple Music wrapper-lite 解密结果数量异常".to_string(),
@@ -2077,15 +2071,7 @@ async fn decrypt_wrapper_lite_fragment(
             .iter()
             .map(|job| job.payload.clone())
             .collect::<Vec<_>>();
-        let template = Arc::clone(&template);
-        let plaintexts = tokio::task::spawn_blocking(move || {
-            let samples = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
-            decrypt_par(template.as_ref(), &samples)
-        })
-        .await
-        .map_err(|error| {
-            BotError::Custom(format!("Apple Music wrapper-lite 解密任务失败：{error}"))
-        })?;
+        let plaintexts = decrypt_samples_blocking(Arc::clone(&template), payloads).await?;
         if plaintexts.len() != jobs.len() {
             return Err(BotError::Custom(
                 "Apple Music wrapper-lite 解密结果数量异常".to_string(),
@@ -2334,6 +2320,32 @@ async fn wrapper_lite_template(
         );
     }
     Ok(template)
+}
+
+/// Decrypts one batch on the blocking pool. The deadline turns a stuck
+/// decrypt into an error, so the task fails and releases its wrapper-lite
+/// slot instead of holding it (and queueing every later song) forever.
+async fn decrypt_samples_blocking(
+    template: Arc<temari::rounds::Template>,
+    payloads: Vec<Vec<u8>>,
+) -> Result<Vec<Vec<u8>>, BotError> {
+    let task = tokio::task::spawn_blocking(move || {
+        let samples = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        decrypt_par(template.as_ref(), &samples)
+    });
+    match tokio::time::timeout(APPLE_DECRYPT_TIMEOUT, task).await {
+        Ok(Ok(plaintexts)) => Ok(plaintexts),
+        Ok(Err(error)) => Err(BotError::Custom(format!(
+            "Apple Music wrapper-lite 解密任务失败：{error}"
+        ))),
+        Err(_) => {
+            tracing::error!(
+                timeout_s = APPLE_DECRYPT_TIMEOUT.as_secs(),
+                "Apple Music decrypt batch timed out"
+            );
+            Err(BotError::Custom("Apple Music 解密超时".to_string()))
+        }
+    }
 }
 
 async fn wrapper_lite_get_json<T: DeserializeOwned>(

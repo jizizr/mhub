@@ -74,3 +74,8 @@ tokio-tungstenite = "0.24"
 [profile.release]
 lto = true
 panic = "abort"
+
+# temari 0.3.1 can deadlock decrypt_par (lost wake-up in its worker pool);
+# crates/temari carries the fix until upstream releases one.
+[patch.crates-io]
+temari = { path = "crates/temari" }

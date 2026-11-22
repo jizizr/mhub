@@ -1,0 +1,19 @@
+# Patched copy of temari 0.3.1 (MIT, https://github.com/WorldObservationLog/Temari),
+# wired in through `[patch.crates-io]` in the root manifest. Only
+# `src/pool.rs` differs from the published crate: its worker pool could lose
+# the completion wake-up and block `decrypt_par` (and every later caller)
+# forever. Drop this crate once upstream ships the fix.
+[package]
+name = "temari"
+version = "0.3.1"
+edition = "2021"
+description = "Apple Music FairPlay SAMPLE-AES sample decryption library (MHub-patched)"
+license = "MIT"
+repository = "https://github.com/WorldObservationLog/Temari"
+publish = false
+
+[lib]
+name = "temari"
+path = "src/lib.rs"
+
+[dependencies]
