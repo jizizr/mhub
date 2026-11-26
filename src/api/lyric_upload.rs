@@ -16,6 +16,7 @@ use crate::{
     lyric_tags::{self, LYRICS_TAGGED},
 };
 use lazy_static::lazy_static;
+use music_gateway::LyricsState;
 use std::{sync::Mutex, time::Instant};
 use tokio::sync::{Semaphore, watch};
 
@@ -251,6 +252,59 @@ async fn retag(cache: &MusicCache) -> ApiResult<Outcome> {
     } else {
         embed_text(cache, audio, text).await
     };
+    store_retagged(cache, prepared).await
+}
+
+/// Lyrics in a cached upload, checked in the file itself rather than
+/// trusted from its row: a row tagged when the song had no lyrics yet gets
+/// another try. Returns the row as it now stands and what the file holds.
+pub(super) async fn ensure_embedded(cache: &MusicCache) -> ApiResult<(MusicCache, LyricsState)> {
+    let audio =
+        telegram_cache::read_file(&cache.file_id, Some(cache.music_size.max(0) as u64)).await?;
+    if lyric_tags::Container::sniff(&audio).is_none() {
+        return Ok((cache.clone(), LyricsState::Unavailable));
+    }
+    let mark_tagged = || async {
+        if is_tagged(cache) {
+            return Ok::<_, ApiError>(cache.clone());
+        }
+        let mut updated = cache.clone();
+        updated.lyrics_tag = LYRICS_TAGGED;
+        Ok(
+            if replace_music_cache_file(&cache.file_id, &updated).await? {
+                updated
+            } else {
+                cache.clone()
+            },
+        )
+    };
+    if lyric_tags::has_lyrics(&audio) {
+        return Ok((mark_tagged().await?, LyricsState::Embedded));
+    }
+    match fetch_text(cache).await {
+        Fetched::Nothing => Ok((mark_tagged().await?, LyricsState::Unavailable)),
+        Fetched::Unavailable => Ok((cache.clone(), LyricsState::Pending)),
+        Fetched::Text(text) => {
+            let prepared = embed_text(cache, audio, text).await;
+            let state = if prepared.embedded {
+                LyricsState::Embedded
+            } else {
+                LyricsState::Unavailable
+            };
+            match store_retagged(cache, prepared).await? {
+                Some(updated) => Ok((updated, state)),
+                // Swapped meanwhile by another writer, which tags too.
+                None => Ok((cache.clone(), state)),
+            }
+        }
+    }
+}
+
+/// Uploads a re-tagged file when its bytes changed and points the row at
+/// it, unless the row moved on meanwhile (`None`).
+async fn store_retagged(cache: &MusicCache, prepared: PreparedAudio) -> ApiResult<Outcome> {
+    let mut updated = cache.clone();
+    updated.lyrics_tag = LYRICS_TAGGED;
     if prepared.embedded {
         // A thumbnail cannot be sent by file_id; upload the old one again.
         let thumbnail = match cache.thumb_file_id.trim() {

@@ -24,6 +24,8 @@ pub mod paths {
     pub const CACHE_INVALIDATE: &str = "/v1/cache/invalidate";
     /// `GET`: how many songs the shared Telegram cache holds per platform.
     pub const CACHE_STATS: &str = "/v1/cache/stats";
+    /// `POST`: adds a song file someone sent the client to the shared cache.
+    pub const CACHE_CONTRIBUTE: &str = "/v1/cache/contribute";
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -293,6 +295,72 @@ pub struct QualityCacheStats {
     pub tracks: u64,
 }
 
+/// What a forwarded post says about its song, for when MHub cannot look the
+/// song up itself (a region-locked Apple Music song, for one).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrackHint {
+    pub song: String,
+    pub singer: String,
+    pub album: String,
+}
+
+/// Offers a song file a user sent the client (forwarded from another bot,
+/// say) to the shared cache, for songs MHub's own accounts cannot download.
+/// `file_id` must be usable with the gateway's bot token. MHub checks the
+/// file against the song (duration, codec), keeps a better copy it already
+/// has, writes lyrics in when the file lacks them, and uploads its own copy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContributeRequest {
+    /// A song link or `platform:id`; several separated by whitespace (every
+    /// link in a post) are fine, MHub takes the first that names a song.
+    pub link: String,
+    #[serde(default)]
+    pub hint: TrackHint,
+    pub file_id: String,
+    /// What Telegram reported, as a fallback when the file's own header
+    /// does not say.
+    #[serde(default)]
+    pub file_size: Option<u64>,
+    #[serde(default)]
+    pub duration: Option<u32>,
+    #[serde(default)]
+    pub thumb_file_id: Option<String>,
+    /// Telegram user who sent the file, kept with the cache entry.
+    #[serde(default)]
+    pub user_id: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContributeOutcome {
+    /// The file is now the cached copy of the song at `media.quality`.
+    Added,
+    /// The cache already held this song at the same or a better tier;
+    /// `media` is that copy and the file was not kept.
+    AlreadyCached,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LyricsState {
+    /// The cached file carries lyrics.
+    Embedded,
+    /// The song has no lyrics, or its file cannot hold them.
+    Unavailable,
+    /// Lyrics could not be fetched in time; a later request retries.
+    Pending,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ContributeResult {
+    pub outcome: ContributeOutcome,
+    pub media: Media,
+    pub lyrics: LyricsState,
+    /// The tier MHub judged the offered file to be.
+    pub offered: Quality,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub protocol: u32,
@@ -392,6 +460,25 @@ mod tests {
         assert!(request.include_cover);
         assert_eq!(request.quality, Quality::Lossless);
         assert_eq!(request.selected_id, None);
+    }
+
+    #[test]
+    fn contribute_requests_default_their_optional_fields() {
+        let request: ContributeRequest = serde_json::from_str(
+            r#"{"link":"https://music.apple.com/tr/album/x/1?i=2","file_id":"f"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.hint, TrackHint::default());
+        assert_eq!(request.duration, None);
+        assert_eq!(request.user_id, 0);
+        assert_eq!(
+            serde_json::to_value(ContributeOutcome::AlreadyCached).unwrap(),
+            serde_json::json!("already_cached")
+        );
+        assert_eq!(
+            serde_json::to_value(LyricsState::Pending).unwrap(),
+            serde_json::json!("pending")
+        );
     }
 
     #[test]

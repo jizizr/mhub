@@ -412,6 +412,123 @@ pub async fn track_info(platform: MusicPlatform, id: &str) -> ApiResult<TrackInf
     }
 }
 
+/// The song a link (or `platform:id`) names. Only song pages count: an
+/// album link without a song in it names no song.
+pub fn parse_track_link(text: &str) -> Option<(MusicPlatform, String)> {
+    let text = text.trim();
+    if let Some((prefix, id)) = text.split_once(':')
+        && !prefix.eq_ignore_ascii_case("http")
+        && !prefix.eq_ignore_ascii_case("https")
+    {
+        let platform = MusicPlatform::from_alias(prefix)?;
+        let id = id.trim();
+        let valid = !id.is_empty()
+            && id.len() <= 64
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+        return valid.then(|| (platform, id.to_string()));
+    }
+    let platform = MusicPlatform::from_link(text)?;
+    let id = match platform {
+        MusicPlatform::AppleMusic => applemusic::parse_apple_track_id(text),
+        MusicPlatform::Netease => netease::parse_netease_id(text),
+        MusicPlatform::Tencent => tencent::parse_qq_track_id(text),
+        MusicPlatform::Bilibili => bilibili::parse_bilibili_id(text),
+        MusicPlatform::YouTubeMusic => youtubemusic::parse_youtube_music_id(text),
+        MusicPlatform::Kugou | MusicPlatform::Soda => None,
+    }?;
+    Some((platform, id))
+}
+
+/// The storefront an Apple Music link points into (`/tr/album/…` → `tr`).
+pub fn apple_link_storefront(link: &str) -> Option<String> {
+    let url = url::Url::parse(link.trim()).ok()?;
+    let first = url.path_segments()?.next()?;
+    (first.len() == 2 && first.chars().all(|c| c.is_ascii_alphabetic()))
+        .then(|| first.to_ascii_lowercase())
+}
+
+/// What MHub can find out about a song without downloading it: catalog
+/// details and, where the platform lists it, the length in seconds.
+#[derive(Clone, Debug, Default)]
+pub struct SongDetails {
+    pub song: String,
+    pub singer: String,
+    pub album: String,
+    pub cover: String,
+    pub link: String,
+    pub duration: Option<u32>,
+}
+
+/// Looks a song up by ID. Apple Music songs are also tried in the
+/// storefront the link came from, since the configured one may not carry
+/// them; other platforms fall back from a full resolve (which may be
+/// refused for the account) to their catalog details.
+pub async fn song_details(platform: MusicPlatform, id: &str, link: &str) -> ApiResult<SongDetails> {
+    ensure_online(platform)?;
+    let from_info = |info: TrackInfo, duration: Option<u32>| SongDetails {
+        song: info.song,
+        singer: info.singer,
+        album: info.album,
+        cover: info.cover,
+        link: String::new(),
+        duration,
+    };
+    if platform == MusicPlatform::AppleMusic {
+        let mut storefronts = vec![applemusic_storefront()];
+        if let Some(linked) = apple_link_storefront(link)
+            && !storefronts.contains(&linked)
+        {
+            storefronts.push(linked);
+        }
+        let mut last = None;
+        for storefront in storefronts {
+            match applemusic::track_info_in(&storefront, id).await {
+                Ok((info, duration)) => {
+                    let mut details = from_info(info, duration);
+                    details.link = format!("https://music.apple.com/{storefront}/song/{id}");
+                    return Ok(details);
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        return Err(
+            last.unwrap_or_else(|| ApiError::Custom("没有找到 Apple Music 歌曲详情".to_string()))
+        );
+    }
+    let resolved = resolve(ResolveOptions {
+        platform,
+        query: id.to_string(),
+        selected_id: Some(id.to_string()),
+        quality: Some("standard".to_string()),
+    })
+    .await;
+    match resolved {
+        Ok(track) => Ok(SongDetails {
+            song: track.song,
+            singer: track.singer,
+            album: track.album,
+            cover: track.cover,
+            link: track.link,
+            duration: track.duration,
+        }),
+        Err(error) => match track_info(platform, id).await {
+            Ok(info) => Ok(from_info(info, None)),
+            Err(_) => Err(error),
+        },
+    }
+}
+
+fn applemusic_storefront() -> String {
+    let configured = crate::settings::SETTINGS.music.applemusic.storefront.trim();
+    if configured.is_empty() {
+        "us".to_string()
+    } else {
+        configured.to_ascii_lowercase()
+    }
+}
+
 /// Songs, albums, artists and playlists for a search box. Platforms
 /// without album pages answer with their song search alone.
 pub async fn catalog_search(
@@ -575,6 +692,14 @@ pub fn alac_transport_from_progressive(data: &[u8]) -> ApiResult<Vec<u8>> {
     applemusic::alac_transport_from_progressive(data)
 }
 
+/// The image at a cover URL; empty when there is none or it fails.
+pub async fn download_cover_url(url: &str) -> Vec<u8> {
+    if url.trim().is_empty() {
+        return Vec::new();
+    }
+    provider::download_url(url).await.unwrap_or_default()
+}
+
 pub async fn download_cover(track: &MusicTrack) -> ApiResult<Vec<u8>> {
     if track.cover.trim().is_empty() {
         return Ok(Vec::new());
@@ -624,6 +749,37 @@ fn provider_for(platform: MusicPlatform) -> &'static dyn MusicProvider {
         MusicPlatform::Soda => &soda::SODA_PROVIDER,
         MusicPlatform::Tencent => &tencent::TENCENT_PROVIDER,
         MusicPlatform::YouTubeMusic => &youtubemusic::YOUTUBE_MUSIC_PROVIDER,
+    }
+}
+
+#[cfg(test)]
+mod track_link_tests {
+    use super::*;
+
+    #[test]
+    fn song_links_and_platform_ids_name_one_song() {
+        let apple =
+            "https://music.apple.com/tr/album/k%E6%AD%8C%E4%B9%8B%E7%8E%8B/651449675?i=651449679";
+        assert_eq!(
+            parse_track_link(apple),
+            Some((MusicPlatform::AppleMusic, "651449679".to_string()))
+        );
+        assert_eq!(apple_link_storefront(apple).as_deref(), Some("tr"));
+        assert_eq!(
+            parse_track_link("https://music.163.com/#/song?id=186016"),
+            Some((MusicPlatform::Netease, "186016".to_string()))
+        );
+        assert_eq!(
+            parse_track_link("qq:0039MnYb0qxYhV"),
+            Some((MusicPlatform::Tencent, "0039MnYb0qxYhV".to_string()))
+        );
+        // An album link names no song; neither does an unknown site.
+        assert_eq!(
+            parse_track_link("https://music.apple.com/tr/album/x/651449675"),
+            None
+        );
+        assert_eq!(parse_track_link("https://example.com/song?id=1"), None);
+        assert_eq!(parse_track_link("qq:../../etc"), None);
     }
 }
 

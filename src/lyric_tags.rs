@@ -75,6 +75,34 @@ fn skip_id3v2(audio: &[u8]) -> &[u8] {
     audio.get(10 + size + footer..).unwrap_or_default()
 }
 
+/// Whether `audio` already carries lyrics in any tag lofty reads (ID3v2
+/// `USLT`, MP4 `©lyr`, the Vorbis `LYRICS` comment). A file lofty cannot
+/// parse counts as having none.
+pub fn has_lyrics(audio: &[u8]) -> bool {
+    use lofty::{file::TaggedFileExt, probe::Probe, tag::ItemKey};
+    let Ok(probe) = Probe::new(Cursor::new(audio)).guess_file_type() else {
+        return false;
+    };
+    let Ok(file) = probe
+        .options(
+            ParseOptions::new()
+                .read_properties(false)
+                .read_cover_art(false),
+        )
+        .read()
+    else {
+        return false;
+    };
+    file.tags().iter().any(|tag| {
+        tag.get_string(&ItemKey::Lyrics).is_some_and(|text| {
+            text.lines()
+                .filter(|line| is_real_line(line) && !is_meta(line))
+                .count()
+                >= 3
+        })
+    })
+}
+
 /// The LRC text to embed: the original lines, each followed by its
 /// translation under the same timestamp (how both clients show bilingual
 /// lyrics). Untimed lyrics are embedded as plain text. `None` when there is
@@ -703,6 +731,11 @@ mod tests {
         let text = String::from_utf8_lossy(&twice);
         assert!(text.contains("LYRICS=[00:01.00]新"));
         assert!(!text.contains("旧"));
+
+        assert!(!has_lyrics(&flac));
+        assert!(!has_lyrics(&once), "a single line is not a song's lyrics");
+        let full = embed(&flac, "[ti:歌]\n[00:01.00]一\n[00:02.00]二\n[00:03.00]三").unwrap();
+        assert!(has_lyrics(&full));
     }
 
     #[test]

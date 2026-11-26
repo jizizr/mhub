@@ -1004,7 +1004,7 @@ fn netease_artists(song: &NeteaseSong) -> String {
     }
 }
 
-fn parse_netease_id(text: &str) -> Option<String> {
+pub(super) fn parse_netease_id(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
         return Some(trimmed.to_string());

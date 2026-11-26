@@ -10,9 +10,10 @@ use crate::cache::{delete_music_cache_file, find_music_cache_by_file_id, music_c
 use axum::extract::rejection::JsonRejection;
 use music_gateway::{
     CacheInvalidateRequest, CacheLookupRequest, CacheStats, CachedTrack, Capabilities, Collection,
-    CollectionRequest, ErrorBody, ErrorCode, JobState, Lyrics, LyricsRequest, Media, MediaJob,
-    MediaLookup, MediaPollQuery, MediaRequest, PROTOCOL_HEADER, PROTOCOL_VERSION, Platform,
-    PlatformCapability, Quality, ResolveRequest, SearchItem, SearchRequest, Track, protocol::paths,
+    CollectionRequest, ContributeRequest, ContributeResult, ErrorBody, ErrorCode, JobState, Lyrics,
+    LyricsRequest, Media, MediaJob, MediaLookup, MediaPollQuery, MediaRequest, PROTOCOL_HEADER,
+    PROTOCOL_VERSION, Platform, PlatformCapability, Quality, ResolveRequest, SearchItem,
+    SearchRequest, Track, protocol::paths,
 };
 use sha2::{Digest, Sha256};
 
@@ -49,6 +50,7 @@ pub(super) fn router(state: AppState, token: &str) -> Router {
         .route(paths::CACHE_LOOKUP, post(lookup_cache))
         .route(paths::CACHE_INVALIDATE, post(invalidate_cache))
         .route(paths::CACHE_STATS, get(cache_stats))
+        .route(paths::CACHE_CONTRIBUTE, post(contribute))
         .route_layer(middleware::from_fn_with_state(gateway.clone(), authorize))
         .fallback(|| async {
             Failure::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "接口不存在")
@@ -386,13 +388,20 @@ async fn invalidate_cache(
     Ok(Json(deleted))
 }
 
+async fn contribute(
+    payload: Result<Json<ContributeRequest>, JsonRejection>,
+) -> Result<Json<ContributeResult>, Failure> {
+    let Json(request) = payload?;
+    Ok(Json(super::contribute::contribute(request).await?))
+}
+
 async fn cache_stats() -> Result<Json<CacheStats>, Failure> {
     Ok(Json(music_cache_stats().await?))
 }
 
 /// `music_cache` quality keys a gateway client may have a file under, the
 /// shared one first.
-fn cache_keys(platform: Platform, quality: &str) -> Vec<String> {
+pub(super) fn cache_keys(platform: Platform, quality: &str) -> Vec<String> {
     let mut keys = vec![quality.to_string()];
     if platform == Platform::AppleMusic {
         keys.push(format!("{quality}{LEGACY_BOT_APPLE_SUFFIX}"));

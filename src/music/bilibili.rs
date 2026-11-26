@@ -408,7 +408,7 @@ fn ensure_bilibili_ok(code: i64, message: &str) -> Result<(), BotError> {
     }
 }
 
-fn parse_bilibili_id(text: &str) -> Option<String> {
+pub(super) fn parse_bilibili_id(text: &str) -> Option<String> {
     BILIBILI_BV_RE
         .captures(text.trim())
         .and_then(|captures| captures.get(1))

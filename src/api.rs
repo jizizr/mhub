@@ -464,6 +464,7 @@ pub struct LyricsResponse {
     pub credits: Vec<String>,
 }
 
+mod contribute;
 mod gateway;
 mod lyric_upload;
 

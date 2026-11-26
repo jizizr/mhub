@@ -278,61 +278,200 @@ pub fn needs_browser_lossless_derivative(
     matches!(format.as_str(), "m4a" | "mp4" | "alac") || content_type.contains("mp4")
 }
 
+/// The MP4 boxes between `start` and `end`: `(start, type, end)`.
+fn mp4_boxes(
+    data: &[u8],
+    start: usize,
+    end: usize,
+) -> impl Iterator<Item = (usize, [u8; 4], usize)> + '_ {
+    let mut pos = start;
+    std::iter::from_fn(move || {
+        if pos + 8 > end {
+            return None;
+        }
+        let size = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        let typ: [u8; 4] = data[pos + 4..pos + 8].try_into().ok()?;
+        let (header_len, size) = match size {
+            1 => {
+                let large = u64::from_be_bytes(data.get(pos + 8..pos + 16)?.try_into().ok()?);
+                (16, usize::try_from(large).ok()?)
+            }
+            0 => (8, end - pos),
+            size => (8, size),
+        };
+        if size < header_len || pos + size > end {
+            return None;
+        }
+        let item = (pos, typ, pos + size);
+        pos += size;
+        Some(item)
+    })
+}
+
+fn mp4_child(data: &[u8], start: usize, end: usize, want: &[u8; 4]) -> Option<(usize, usize)> {
+    mp4_boxes(data, start, end)
+        .find(|(_, typ, _)| typ == want)
+        .map(|(pos, _, end)| (pos, end))
+}
+
 /// Older Apple Music downloads labelled decrypted AAC as `alac` in the MP4
 /// sample entry. Chromium decodes from `esds` regardless; Safari/CoreAudio
 /// trust the fourcc and reject the file. Returns the byte offset of such a
 /// mislabelled fourcc inside `header` (which must start at the file's first
 /// byte and contain the whole `moov`), or `None` when the file is fine.
 pub fn mislabeled_aac_entry_offset(header: &[u8]) -> Option<usize> {
-    fn boxes(
-        data: &[u8],
-        start: usize,
-        end: usize,
-    ) -> impl Iterator<Item = (usize, [u8; 4], usize)> + '_ {
-        let mut pos = start;
-        std::iter::from_fn(move || {
-            if pos + 8 > end {
-                return None;
-            }
-            let size = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
-            let typ: [u8; 4] = data[pos + 4..pos + 8].try_into().ok()?;
-            let (header_len, size) = match size {
-                1 => {
-                    let large = u64::from_be_bytes(data.get(pos + 8..pos + 16)?.try_into().ok()?);
-                    (16, usize::try_from(large).ok()?)
-                }
-                0 => (8, end - pos),
-                size => (8, size),
-            };
-            if size < header_len || pos + size > end {
-                return None;
-            }
-            let item = (pos, typ, pos + size);
-            pos += size;
-            Some(item)
-        })
-    }
-    fn child(data: &[u8], start: usize, end: usize, want: &[u8; 4]) -> Option<(usize, usize)> {
-        boxes(data, start, end)
-            .find(|(_, typ, _)| typ == want)
-            .map(|(pos, _, end)| (pos, end))
-    }
-    let (moov, moov_end) = child(header, 0, header.len(), b"moov")?;
-    for (trak, typ, trak_end) in boxes(header, moov + 8, moov_end) {
+    let (moov, moov_end) = mp4_child(header, 0, header.len(), b"moov")?;
+    for (trak, typ, trak_end) in mp4_boxes(header, moov + 8, moov_end) {
         if &typ != b"trak" {
             continue;
         }
-        let Some(stsd) = child(header, trak + 8, trak_end, b"mdia")
-            .and_then(|(mdia, end)| child(header, mdia + 8, end, b"minf"))
-            .and_then(|(minf, end)| child(header, minf + 8, end, b"stbl"))
-            .and_then(|(stbl, end)| child(header, stbl + 8, end, b"stsd"))
+        let Some(stsd) = mp4_child(header, trak + 8, trak_end, b"mdia")
+            .and_then(|(mdia, end)| mp4_child(header, mdia + 8, end, b"minf"))
+            .and_then(|(minf, end)| mp4_child(header, minf + 8, end, b"stbl"))
+            .and_then(|(stbl, end)| mp4_child(header, stbl + 8, end, b"stsd"))
         else {
             continue;
         };
-        for (entry, typ, entry_end) in boxes(header, stsd.0 + 16, stsd.1) {
+        for (entry, typ, entry_end) in mp4_boxes(header, stsd.0 + 16, stsd.1) {
             // Audio sample entries carry 28 bytes of fixed fields.
-            if &typ == b"alac" && child(header, entry + 36, entry_end, b"esds").is_some() {
+            if &typ == b"alac" && mp4_child(header, entry + 36, entry_end, b"esds").is_some() {
                 return Some(entry + 4);
+            }
+        }
+    }
+    None
+}
+
+/// How a song file is encoded, read from its own header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Codec {
+    Mp3,
+    Flac,
+    Aac,
+    Alac,
+}
+
+impl Codec {
+    pub fn is_lossless(self) -> bool {
+        matches!(self, Codec::Flac | Codec::Alac)
+    }
+
+    pub fn file_ext(self) -> &'static str {
+        match self {
+            Codec::Mp3 => "mp3",
+            Codec::Flac => "flac",
+            Codec::Aac | Codec::Alac => "m4a",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AudioProbe {
+    pub codec: Codec,
+    pub sample_rate: Option<u32>,
+    pub bits_per_sample: Option<u16>,
+    pub duration_ms: Option<u64>,
+}
+
+/// Codec, format and length of an MP3, FLAC or M4A file. `None` for
+/// anything else, including an M4A without an audio track MHub plays.
+pub fn probe(audio: &[u8]) -> Option<AudioProbe> {
+    match crate::lyric_tags::Container::sniff(audio)? {
+        crate::lyric_tags::Container::Mp3 => Some(AudioProbe {
+            codec: Codec::Mp3,
+            sample_rate: None,
+            bits_per_sample: None,
+            duration_ms: None,
+        }),
+        crate::lyric_tags::Container::Flac => probe_flac(audio),
+        crate::lyric_tags::Container::Mp4 => probe_mp4(audio),
+    }
+}
+
+fn probe_flac(audio: &[u8]) -> Option<AudioProbe> {
+    let start = audio.windows(4).take(1 << 20).position(|w| w == b"fLaC")?;
+    // The first metadata block is STREAMINFO (type 0), 34 bytes.
+    let header = audio.get(start + 4..start + 8)?;
+    if header[0] & 0x7F != 0 {
+        return None;
+    }
+    let info = audio.get(start + 8..start + 8 + 34)?;
+    let sample_rate =
+        (u32::from(info[10]) << 12) | (u32::from(info[11]) << 4) | (u32::from(info[12]) >> 4);
+    let bits = (u16::from(info[12] & 1) << 4 | u16::from(info[13] >> 4)) + 1;
+    let samples = (u64::from(info[13] & 0x0F) << 32)
+        | u64::from(u32::from_be_bytes(info[14..18].try_into().ok()?));
+    Some(AudioProbe {
+        codec: Codec::Flac,
+        sample_rate: (sample_rate > 0).then_some(sample_rate),
+        bits_per_sample: Some(bits),
+        duration_ms: (sample_rate > 0 && samples > 0)
+            .then(|| samples * 1000 / u64::from(sample_rate)),
+    })
+}
+
+fn probe_mp4(audio: &[u8]) -> Option<AudioProbe> {
+    let (moov, moov_end) = mp4_child(audio, 0, audio.len(), b"moov")?;
+    let duration_ms = mp4_child(audio, moov + 8, moov_end, b"mvhd").and_then(|(mvhd, _)| {
+        let body = mvhd + 8;
+        let version = *audio.get(body)?;
+        let (scale, duration) = if version == 1 {
+            let scale = u32::from_be_bytes(audio.get(body + 20..body + 24)?.try_into().ok()?);
+            let duration = u64::from_be_bytes(audio.get(body + 24..body + 32)?.try_into().ok()?);
+            (scale, duration)
+        } else {
+            let scale = u32::from_be_bytes(audio.get(body + 12..body + 16)?.try_into().ok()?);
+            let duration = u32::from_be_bytes(audio.get(body + 16..body + 20)?.try_into().ok()?);
+            (scale, u64::from(duration))
+        };
+        (scale > 0).then(|| duration.saturating_mul(1000) / u64::from(scale))
+    });
+    for (trak, typ, trak_end) in mp4_boxes(audio, moov + 8, moov_end) {
+        if &typ != b"trak" {
+            continue;
+        }
+        let Some(stsd) = mp4_child(audio, trak + 8, trak_end, b"mdia")
+            .and_then(|(mdia, end)| mp4_child(audio, mdia + 8, end, b"minf"))
+            .and_then(|(minf, end)| mp4_child(audio, minf + 8, end, b"stbl"))
+            .and_then(|(stbl, end)| mp4_child(audio, stbl + 8, end, b"stsd"))
+        else {
+            continue;
+        };
+        for (entry, typ, entry_end) in mp4_boxes(audio, stsd.0 + 16, stsd.1) {
+            let field = |offset: usize, len: usize| audio.get(entry + offset..entry + offset + len);
+            let bits = field(26, 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+            let rate = field(32, 2).map(|b| u32::from(u16::from_be_bytes([b[0], b[1]])));
+            let has_esds = mp4_child(audio, entry + 36, entry_end, b"esds").is_some();
+            match &typ {
+                // An `alac` entry carrying `esds` is mislabelled AAC.
+                b"alac" if !has_esds => {
+                    // ALACSpecificConfig: the 16.16 entry rate overflows
+                    // above 65535 Hz, so read the real one from it.
+                    let config = mp4_child(audio, entry + 36, entry_end, b"alac")
+                        .and_then(|(config, _)| audio.get(config + 12..config + 36));
+                    let (bits, rate) = match config {
+                        Some(config) => (
+                            Some(u16::from(config[5])),
+                            Some(u32::from_be_bytes(config[20..24].try_into().ok()?)),
+                        ),
+                        None => (bits, rate),
+                    };
+                    return Some(AudioProbe {
+                        codec: Codec::Alac,
+                        sample_rate: rate.filter(|rate| *rate > 0),
+                        bits_per_sample: bits.filter(|bits| *bits > 0),
+                        duration_ms,
+                    });
+                }
+                b"mp4a" | b"alac" => {
+                    return Some(AudioProbe {
+                        codec: Codec::Aac,
+                        sample_rate: rate.filter(|rate| *rate > 0),
+                        bits_per_sample: None,
+                        duration_ms,
+                    });
+                }
+                _ => {}
             }
         }
     }
@@ -515,6 +654,78 @@ mod tests {
             test_box(b"mdat", &[1, 2, 3]),
         ]
         .concat()
+    }
+
+    fn movie(entry: Vec<u8>, mvhd: Vec<u8>) -> Vec<u8> {
+        let stsd = test_box(b"stsd", &[vec![0, 0, 0, 0, 0, 0, 0, 1], entry].concat());
+        let stbl = test_box(b"stbl", &stsd);
+        let minf = test_box(b"minf", &stbl);
+        let mdia = test_box(b"mdia", &minf);
+        let trak = test_box(b"trak", &mdia);
+        let moov = test_box(b"moov", &[test_box(b"mvhd", &mvhd), trak].concat());
+        [
+            test_box(b"ftyp", b"M4A \0\0\0\x01"),
+            moov,
+            test_box(b"mdat", &[1, 2, 3]),
+        ]
+        .concat()
+    }
+
+    fn mvhd_v0(timescale: u32, duration: u32) -> Vec<u8> {
+        let mut body = vec![0u8; 100];
+        body[12..16].copy_from_slice(&timescale.to_be_bytes());
+        body[16..20].copy_from_slice(&duration.to_be_bytes());
+        body
+    }
+
+    #[test]
+    fn probes_alac_depth_rate_and_length() {
+        let mut fixed = vec![0u8; 28];
+        fixed[18..20].copy_from_slice(&16u16.to_be_bytes());
+        let mut config = vec![0u8; 28];
+        config[4 + 5] = 24;
+        config[4 + 20..4 + 24].copy_from_slice(&96_000u32.to_be_bytes());
+        let entry = test_box(b"alac", &[fixed, test_box(b"alac", &config)].concat());
+        let probed = probe(&movie(entry, mvhd_v0(1000, 216_500))).unwrap();
+        assert_eq!(probed.codec, Codec::Alac);
+        assert_eq!(probed.bits_per_sample, Some(24));
+        assert_eq!(probed.sample_rate, Some(96_000));
+        assert_eq!(probed.duration_ms, Some(216_500));
+    }
+
+    #[test]
+    fn probes_aac_including_mislabelled_alac() {
+        let aac = test_box(
+            b"mp4a",
+            &[vec![0u8; 28], test_box(b"esds", &[0u8; 12])].concat(),
+        );
+        assert_eq!(
+            probe(&movie(aac, mvhd_v0(44_100, 441_000))).unwrap().codec,
+            Codec::Aac
+        );
+        let probed = probe(&movie_with_entry(b"alac", b"esds")).unwrap();
+        assert_eq!(probed.codec, Codec::Aac);
+    }
+
+    #[test]
+    fn probes_flac_streaminfo() {
+        let mut info = [0u8; 34];
+        // 44100 Hz, 2 channels, 16 bits, 44100 * 200 samples.
+        let rate = 44_100u32;
+        let samples = 44_100u64 * 200;
+        info[10] = (rate >> 12) as u8;
+        info[11] = (rate >> 4) as u8;
+        // Channels - 1 in bits 3..1; the top bit of bits-per-sample - 1 (15) is 0.
+        info[12] = ((rate & 0x0F) << 4) as u8 | (1 << 1);
+        info[13] = ((15 & 0x0F) << 4) as u8 | ((samples >> 32) & 0x0F) as u8;
+        info[14..18].copy_from_slice(&(samples as u32).to_be_bytes());
+        let flac = [b"fLaC".as_slice(), &[0x80, 0, 0, 34], &info].concat();
+        let probed = probe(&flac).unwrap();
+        assert_eq!(probed.codec, Codec::Flac);
+        assert_eq!(probed.sample_rate, Some(44_100));
+        assert_eq!(probed.bits_per_sample, Some(16));
+        assert_eq!(probed.duration_ms, Some(200_000));
+        assert!(probe(b"not audio at all").is_none());
     }
 
     #[tokio::test]

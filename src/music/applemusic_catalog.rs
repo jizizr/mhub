@@ -370,6 +370,26 @@ pub(in crate::music) async fn track_info(id: &str) -> Result<TrackInfo, BotError
     Ok(track_info_from_song(song))
 }
 
+/// [`track_info`] as listed in another storefront, with the song's length.
+pub(in crate::music) async fn track_info_in(
+    storefront: &str,
+    id: &str,
+) -> Result<(TrackInfo, Option<u32>), BotError> {
+    ensure_apple_enabled()?;
+    let response: Response =
+        apple_get_json(&super::apple_song_url_in(storefront, id), true).await?;
+    let song = response
+        .data
+        .into_iter()
+        .next()
+        .ok_or_else(|| BotError::Custom("没有找到 Apple Music 歌曲详情".to_string()))?;
+    let duration = song
+        .attributes
+        .duration_in_millis
+        .map(|millis| ((millis + 500) / 1000) as u32);
+    Ok((track_info_from_song(song), duration))
+}
+
 fn track_info_from_song(song: Resource) -> TrackInfo {
     let (album_id, artist_id) = links_from_song(&song);
     let attributes = song.attributes;

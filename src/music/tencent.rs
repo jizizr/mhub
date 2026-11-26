@@ -1127,7 +1127,7 @@ fn decode_base64_text(value: &str) -> String {
         .unwrap_or_else(|_| value.to_string())
 }
 
-fn parse_qq_track_id(text: &str) -> Option<String> {
+pub(super) fn parse_qq_track_id(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
         return None;

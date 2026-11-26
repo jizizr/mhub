@@ -1,9 +1,9 @@
 use crate::Platform;
 use crate::protocol::{
     CacheInvalidateRequest, CacheLookupRequest, CacheStats, CachedTrack, Capabilities, Collection,
-    CollectionRequest, ErrorBody, ErrorCode, JobState, Lyrics, LyricsRequest, Media, MediaJob,
-    MediaLookup, MediaRequest, PROTOCOL_HEADER, PROTOCOL_VERSION, ResolveRequest, SearchItem,
-    SearchRequest, Track, paths,
+    CollectionRequest, ContributeRequest, ContributeResult, ErrorBody, ErrorCode, JobState, Lyrics,
+    LyricsRequest, Media, MediaJob, MediaLookup, MediaRequest, PROTOCOL_HEADER, PROTOCOL_VERSION,
+    ResolveRequest, SearchItem, SearchRequest, Track, paths,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, header::AUTHORIZATION};
 use serde::{Serialize, de::DeserializeOwned};
@@ -15,6 +15,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// also how often a downloading job reports fresh byte counts.
 const POLL_WAIT: Duration = Duration::from_secs(3);
 const DEFAULT_MEDIA_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// Fetching the offered file back from Telegram, adding lyrics and uploading
+/// MHub's copy.
+const CONTRIBUTE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
@@ -226,6 +229,21 @@ impl GatewayClient {
         self.post::<_, serde::de::IgnoredAny>(paths::CACHE_INVALIDATE, request)
             .await
             .map(|_| ())
+    }
+
+    /// Offers a song file a user sent to the shared cache; see
+    /// [`ContributeRequest`]. A file MHub rejects (not the song, not audio)
+    /// is a `BadRequest` error whose message is written for the user.
+    pub async fn contribute(
+        &self,
+        request: &ContributeRequest,
+    ) -> Result<ContributeResult, GatewayError> {
+        self.send(
+            self.request(Method::POST, paths::CACHE_CONTRIBUTE)
+                .json(request),
+            CONTRIBUTE_TIMEOUT,
+        )
+        .await
     }
 
     /// Songs the shared Telegram cache holds, per platform.

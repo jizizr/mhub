@@ -17,10 +17,11 @@ mod client;
 pub use platform::Platform;
 pub use protocol::{
     CacheInvalidateRequest, CacheLookupRequest, CacheStats, CachedTrack, Capabilities, Collection,
-    CollectionRequest, ErrorBody, ErrorCode, JobState, Lyrics, LyricsRequest, Media, MediaJob,
-    MediaLookup, MediaPollQuery, MediaRequest, PROTOCOL_HEADER, PROTOCOL_VERSION,
-    PlatformCacheStats, PlatformCapability, QualityCacheStats, ResolveRequest, SearchItem,
-    SearchRequest, Track,
+    CollectionRequest, ContributeOutcome, ContributeRequest, ContributeResult, ErrorBody,
+    ErrorCode, JobState, Lyrics, LyricsRequest, LyricsState, Media, MediaJob, MediaLookup,
+    MediaPollQuery, MediaRequest, PROTOCOL_HEADER, PROTOCOL_VERSION, PlatformCacheStats,
+    PlatformCapability, QualityCacheStats, ResolveRequest, SearchItem, SearchRequest, Track,
+    TrackHint,
 };
 pub use quality::Quality;
 

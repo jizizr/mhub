@@ -130,6 +130,41 @@ impl Platform {
             .find(|platform| platform.aliases().contains(&alias.as_str()))
     }
 
+    /// The platform a song page link belongs to, judged by its host alone.
+    /// MHub reads the song ID out of the link itself.
+    pub fn from_link(link: &str) -> Option<Self> {
+        let (scheme, rest) = link.trim().split_once("://")?;
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return None;
+        }
+        let authority = rest.split(['/', '?', '#']).next()?;
+        let host = authority.rsplit('@').next()?.split(':').next()?;
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let on = |domain: &str| {
+            host == domain
+                || host
+                    .strip_suffix(domain)
+                    .is_some_and(|sub| sub.ends_with('.'))
+        };
+        if on("music.apple.com") {
+            Some(Platform::AppleMusic)
+        } else if on("music.youtube.com") || on("youtube.com") || on("youtu.be") {
+            Some(Platform::YouTubeMusic)
+        } else if on("music.163.com") {
+            Some(Platform::Netease)
+        } else if on("y.qq.com") {
+            Some(Platform::Tencent)
+        } else if on("bilibili.com") {
+            Some(Platform::Bilibili)
+        } else if on("kugou.com") {
+            Some(Platform::Kugou)
+        } else if on("qishui.douyin.com") {
+            Some(Platform::Soda)
+        } else {
+            None
+        }
+    }
+
     /// One-letter code for size-limited payloads such as Telegram callbacks.
     pub fn callback_code(self) -> &'static str {
         match self {
@@ -207,6 +242,51 @@ mod tests {
             for alias in platform.aliases() {
                 assert!(seen.insert(*alias), "duplicate alias {alias}");
             }
+        }
+    }
+
+    #[test]
+    fn song_links_name_their_platform() {
+        let cases = [
+            (
+                "https://music.apple.com/tr/album/x/651449675?i=651449679",
+                Some(Platform::AppleMusic),
+            ),
+            (
+                "https://music.163.com/#/song?id=186016",
+                Some(Platform::Netease),
+            ),
+            (
+                "https://y.music.163.com/m/song?id=1",
+                Some(Platform::Netease),
+            ),
+            (
+                "https://y.qq.com/n/ryqq/songDetail/0039MnYb0qxYhV",
+                Some(Platform::Tencent),
+            ),
+            (
+                "https://i.y.qq.com/v8/playsong.html?songmid=1",
+                Some(Platform::Tencent),
+            ),
+            (
+                "https://music.youtube.com/watch?v=abc",
+                Some(Platform::YouTubeMusic),
+            ),
+            (
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                Some(Platform::Bilibili),
+            ),
+            (
+                "HTTPS://MUSIC.APPLE.COM:443/us/song/1",
+                Some(Platform::AppleMusic),
+            ),
+            ("https://notmusic.apple.com.evil.example/song", None),
+            ("https://evilmusic.163.com/song?id=1", None),
+            ("ftp://music.apple.com/x", None),
+            ("music.apple.com/x", None),
+        ];
+        for (link, platform) in cases {
+            assert_eq!(Platform::from_link(link), platform, "{link}");
         }
     }
 

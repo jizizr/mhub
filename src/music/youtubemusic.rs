@@ -636,7 +636,7 @@ fn find_lyrics_text(node: &Value) -> Option<String> {
     }
 }
 
-fn parse_youtube_music_id(text: &str) -> Option<String> {
+pub(super) fn parse_youtube_music_id(text: &str) -> Option<String> {
     let text = text.trim();
     if is_youtube_video_id(text) {
         return Some(text.to_string());

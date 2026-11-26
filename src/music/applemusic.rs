@@ -853,6 +853,15 @@ pub(super) async fn track_info(id: &str) -> Result<super::TrackInfo, BotError> {
     catalog_api::track_info(id).await
 }
 
+/// A song's catalog details and length (seconds) as listed in `storefront`,
+/// for songs the configured storefront does not carry.
+pub(super) async fn track_info_in(
+    storefront: &str,
+    id: &str,
+) -> Result<(super::TrackInfo, Option<u32>), BotError> {
+    catalog_api::track_info_in(storefront, id).await
+}
+
 async fn get_apple_song(id: &str) -> Result<AppleMusicResource, BotError> {
     let url = apple_song_url(id);
     let response: AppleMusicResponse = apple_get_json(&url, true).await?;
@@ -3371,9 +3380,12 @@ fn apple_search_url(keyword: &str, limit: usize) -> String {
 }
 
 fn apple_song_url(id: &str) -> String {
+    apple_song_url_in(&apple_storefront(), id)
+}
+
+fn apple_song_url_in(storefront: &str, id: &str) -> String {
     let mut url = Url::parse(&format!(
-        "{APPLE_MUSIC_API}/v1/catalog/{}/songs/{id}",
-        apple_storefront()
+        "{APPLE_MUSIC_API}/v1/catalog/{storefront}/songs/{id}"
     ))
     .unwrap();
     url.query_pairs_mut()
@@ -3559,7 +3571,7 @@ fn parse_apple_web_search_results(
     Ok(items)
 }
 
-fn parse_apple_track_id(text: &str) -> Option<String> {
+pub(super) fn parse_apple_track_id(text: &str) -> Option<String> {
     let text = text.trim();
     if text.chars().all(|c| c.is_ascii_digit()) && text.len() >= 6 {
         return Some(text.to_string());
