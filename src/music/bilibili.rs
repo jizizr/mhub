@@ -1,4 +1,6 @@
-use super::provider::{CLIENT, MusicPlatform, MusicProvider, MusicSearchItem, MusicTrack};
+use super::provider::{
+    CLIENT, MusicLyrics, MusicPlatform, MusicProvider, MusicSearchItem, MusicTrack,
+};
 use crate::BotError;
 use async_trait::async_trait;
 use lazy_static::lazy_static;
@@ -189,6 +191,201 @@ impl MusicProvider for BilibiliProvider {
     ) -> Result<MusicTrack, BotError> {
         resolve_with_quality(keyword, selected_id, "high").await
     }
+
+    /// The video's subtitles (uploaded, else AI-generated) as timed lyrics.
+    /// Bilibili lists subtitles to signed-in viewers only, so this needs the
+    /// configured login Cookie.
+    async fn lyrics(&self, track_id: &str) -> Result<Option<MusicLyrics>, BotError> {
+        let Some(login) = login_cookie() else {
+            return Ok(None);
+        };
+        let Some(bvid) = parse_bilibili_id(track_id) else {
+            return Ok(None);
+        };
+        let view = get_video_view(&bvid).await?;
+        let cookie = match buvid_cookie(false).await {
+            device if device.is_empty() => login,
+            device => format!("{login}; {device}"),
+        };
+        let url = format!(
+            "https://api.bilibili.com/x/player/wbi/v2?bvid={}&cid={}&aid={}",
+            urlencoding::encode(&view.bvid),
+            view.cid,
+            view.aid
+        );
+        let player: BilibiliPlayerInfoResponse = get_with_cookie(&url, &cookie)
+            .await
+            .map_err(BilibiliError::into_bot)?;
+        ensure_bilibili_ok(player.code, &player.message)?;
+        let subtitles = player
+            .data
+            .map(|data| data.subtitle.subtitles)
+            .unwrap_or_default();
+        let Some(url) = pick_subtitle(&subtitles) else {
+            return Ok(None);
+        };
+        let body: BilibiliSubtitleBody = get_with_cookie(&url, "")
+            .await
+            .map_err(BilibiliError::into_bot)?;
+        let plain = subtitle_lrc(body.body);
+        Ok((!plain.is_empty()).then(|| MusicLyrics {
+            plain,
+            ..MusicLyrics::default()
+        }))
+    }
+}
+
+/// The login Cookie for lyrics, from `BILIBILI_COOKIE` or the config.
+fn login_cookie() -> Option<String> {
+    let configured = std::env::var("BILIBILI_COOKIE")
+        .ok()
+        .filter(|cookie| !cookie.trim().is_empty())
+        .unwrap_or_else(|| crate::settings::SETTINGS.music.bilibili.cookie.clone());
+    let cookie = configured.lines().next().unwrap_or_default().trim();
+    (!cookie.is_empty()).then(|| cookie.to_string())
+}
+
+#[derive(Deserialize)]
+struct BilibiliPlayerInfoResponse {
+    code: i64,
+    #[serde(default)]
+    message: String,
+    data: Option<BilibiliPlayerInfo>,
+}
+
+#[derive(Deserialize)]
+struct BilibiliPlayerInfo {
+    #[serde(default)]
+    subtitle: BilibiliSubtitleList,
+}
+
+#[derive(Default, Deserialize)]
+struct BilibiliSubtitleList {
+    #[serde(default)]
+    subtitles: Vec<BilibiliSubtitle>,
+}
+
+#[derive(Deserialize)]
+struct BilibiliSubtitle {
+    #[serde(default)]
+    lan: String,
+    #[serde(default)]
+    lan_doc: String,
+    #[serde(default)]
+    subtitle_url: String,
+    #[serde(default)]
+    subtitle_url_v2: String,
+    #[serde(default)]
+    ai_type: i64,
+}
+
+#[derive(Deserialize)]
+struct BilibiliSubtitleBody {
+    #[serde(default)]
+    body: Vec<BilibiliSubtitleLine>,
+}
+
+#[derive(Deserialize)]
+struct BilibiliSubtitleLine {
+    from: f64,
+    #[serde(default)]
+    content: String,
+}
+
+/// Uploaded Chinese subtitles first, then uploaded ones in other languages,
+/// then AI-generated ones. Two different subtitles at the best tier are not
+/// guessed between.
+fn pick_subtitle(subtitles: &[BilibiliSubtitle]) -> Option<String> {
+    let mut tiers: [Vec<String>; 3] = Default::default();
+    for subtitle in subtitles {
+        let url = [&subtitle.subtitle_url, &subtitle.subtitle_url_v2]
+            .into_iter()
+            .map(|url| url.trim())
+            .find(|url| !url.is_empty());
+        let Some(url) = url else { continue };
+        let url = if url.starts_with("//") {
+            format!("https:{url}")
+        } else {
+            url.to_string()
+        };
+        let tier = if subtitle.ai_type != 0 {
+            2
+        } else if is_chinese_subtitle(&subtitle.lan, &subtitle.lan_doc) {
+            0
+        } else {
+            1
+        };
+        if !tiers[tier].contains(&url) {
+            tiers[tier].push(url);
+        }
+    }
+    let best = tiers.into_iter().find(|tier| !tier.is_empty())?;
+    (best.len() == 1).then(|| best.into_iter().next()).flatten()
+}
+
+fn is_chinese_subtitle(lan: &str, lan_doc: &str) -> bool {
+    let lan = lan.trim().to_ascii_lowercase();
+    matches!(lan.as_str(), "zh-cn" | "zh-hans" | "zh")
+        || ["中文", "汉", "漢"]
+            .iter()
+            .any(|word| lan_doc.contains(word))
+}
+
+/// Subtitle lines as LRC, music-note decoration and wrapping brackets
+/// removed, and "music" placeholder lines dropped.
+fn subtitle_lrc(mut lines: Vec<BilibiliSubtitleLine>) -> String {
+    lines.sort_by(|a, b| a.from.total_cmp(&b.from));
+    lines
+        .into_iter()
+        .filter_map(|line| {
+            let text = clean_subtitle_text(&line.content);
+            if text.is_empty() || is_music_placeholder(&text) {
+                return None;
+            }
+            let ms = (line.from.max(0.0) * 1000.0).round() as u64;
+            Some(format!(
+                "[{:02}:{:02}.{:03}]{text}",
+                ms / 60_000,
+                ms / 1000 % 60,
+                ms % 1000
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const NOTES: &[char] = &['♪', '♫', '♬', '♩', '♭', '♮', '♯', '🎵', '🎶'];
+const WRAPPERS: [(&str, &str); 8] = [
+    ("(", ")"),
+    ("（", "）"),
+    ("[", "]"),
+    ("【", "】"),
+    ("<", ">"),
+    ("《", "》"),
+    ("「", "」"),
+    ("『", "』"),
+];
+
+fn clean_subtitle_text(raw: &str) -> String {
+    let trim = |text: &str| {
+        text.trim_matches(|c: char| c.is_whitespace() || NOTES.contains(&c))
+            .to_string()
+    };
+    let mut text = trim(raw);
+    while let Some(inner) = WRAPPERS.iter().find_map(|(left, right)| {
+        text.strip_prefix(left)
+            .and_then(|rest| rest.strip_suffix(right))
+    }) {
+        text = trim(inner);
+    }
+    text
+}
+
+fn is_music_placeholder(text: &str) -> bool {
+    matches!(
+        text.to_lowercase().as_str(),
+        "音乐" | "音樂" | "纯音乐" | "純音樂" | "music" | "bgm"
+    )
 }
 
 pub(super) async fn resolve_with_quality(
@@ -271,6 +468,8 @@ struct BilibiliViewResponse {
 #[derive(Deserialize)]
 struct BilibiliViewData {
     bvid: String,
+    #[serde(default)]
+    aid: i64,
     cid: i64,
     title: String,
     pic: String,
@@ -455,6 +654,49 @@ fn normalize_bilibili_image(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtitles_become_lrc_without_decoration_or_placeholders() {
+        let line = |from: f64, content: &str| BilibiliSubtitleLine {
+            from,
+            content: content.to_string(),
+        };
+        let lrc = subtitle_lrc(vec![
+            line(12.5, "♪ 听说白雪公主在逃跑 ♪"),
+            line(3.0, "（音乐）"),
+            line(65.004, "【小红帽有着…】"),
+        ]);
+        assert_eq!(lrc, "[00:12.500]听说白雪公主在逃跑\n[01:05.004]小红帽有着…");
+    }
+
+    #[test]
+    fn picks_uploaded_chinese_subtitles_over_ai_and_never_guesses() {
+        let subtitle = |lan: &str, url: &str, ai_type: i64| BilibiliSubtitle {
+            lan: lan.to_string(),
+            lan_doc: String::new(),
+            subtitle_url: url.to_string(),
+            subtitle_url_v2: String::new(),
+            ai_type,
+        };
+        assert_eq!(
+            pick_subtitle(&[
+                subtitle("ai-zh", "//a/ai.json", 1),
+                subtitle("zh-CN", "//a/zh.json", 0)
+            ]),
+            Some("https://a/zh.json".to_string())
+        );
+        assert_eq!(
+            pick_subtitle(&[subtitle("ai-zh", "//a/ai.json", 1)]),
+            Some("https://a/ai.json".to_string())
+        );
+        assert_eq!(
+            pick_subtitle(&[
+                subtitle("zh-CN", "//a/1.json", 0),
+                subtitle("zh-Hans", "//a/2.json", 0)
+            ]),
+            None
+        );
+    }
 
     #[test]
     fn prefers_upos_mirrors_over_akamai() {

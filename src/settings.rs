@@ -182,6 +182,8 @@ pub struct Music {
     #[serde(default)]
     pub netease: NeteaseMusic,
     #[serde(default)]
+    pub bilibili: BilibiliMusic,
+    #[serde(default)]
     pub inline_upload_chat_id: i64,
     /// Private channel the upload bot posts songs into. With the upload bot's
     /// token in `upload_bot_token_file`, uploads go through that bot (whose
@@ -205,6 +207,7 @@ impl Default for Music {
             vkeys: VkeysMusic::default(),
             tencent: TencentMusic::default(),
             netease: NeteaseMusic::default(),
+            bilibili: BilibiliMusic::default(),
             inline_upload_chat_id: 0,
             upload_channel_id: 0,
             upload_bot_token_file: default_upload_bot_token_file(),
@@ -236,6 +239,14 @@ impl Default for VkeysMusic {
             token: String::new(),
         }
     }
+}
+
+/// A logged-in Bilibili Cookie (`SESSDATA=…`). Only lyrics use it: video
+/// subtitles are listed to signed-in viewers only.
+#[derive(Debug, Default, Deserialize)]
+pub struct BilibiliMusic {
+    #[serde(default)]
+    pub cookie: String,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -58,6 +58,11 @@ cookie = ""
 [music.soda]
 cookie = ""
 
+# A logged-in Bilibili Cookie (SESSDATA=...), used only to read video
+# subtitles as lyrics; Bilibili lists subtitles to signed-in viewers only.
+[music.bilibili]
+cookie = ""
+
 [music.vkeys]
 enabled = true
 base_url = "https://api.vkeys.cn"
