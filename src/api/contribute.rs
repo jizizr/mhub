@@ -96,10 +96,21 @@ pub(super) async fn contribute(request: ContributeRequest) -> ApiResult<Contribu
         .ok_or_else(|| rejected("读不出文件时长"))?;
     check_duration(duration, details.duration)?;
     let offered = tier(&probe, audio.len() as u64, duration);
+    let (source, audio) = tokio::task::spawn_blocking(move || (audio_sha256(&audio), audio))
+        .await
+        .map_err(|error| ApiError::Custom(error.to_string()))?;
 
     if let Some(existing) = best_cached(platform, &track_id).await?
         && row_quality(&existing).is_some_and(|cached| rank(cached) >= rank(offered))
     {
+        // The same file handed in again, for instance one saved before
+        // handed-in songs were marked: mark it now so search finds it.
+        if let Ok(Some(same)) = find_music_cache_by_source(platform.id(), &source).await
+            && same.track_id == track_id
+            && let Err(error) = mark_contributed(platform.id(), &same.track_id, &same.quality).await
+        {
+            tracing::warn!(platform = %platform, track_id = %track_id, "marking a handed-in song failed: {error}");
+        }
         let (row, lyrics) = match lyric_upload::ensure_embedded(&existing).await {
             Ok(checked) => checked,
             Err(error) => {
@@ -139,9 +150,6 @@ pub(super) async fn contribute(request: ContributeRequest) -> ApiResult<Contribu
         lyrics_tag: 0,
     };
 
-    let (source, audio) = tokio::task::spawn_blocking(move || (audio_sha256(&audio), audio))
-        .await
-        .map_err(|error| ApiError::Custom(error.to_string()))?;
     // The same bytes were already uploaded, for this song or another ID.
     if let Ok(Some(existing)) = find_music_cache_by_source(platform.id(), &source).await {
         let cache = reuse_upload(cache, &existing);
