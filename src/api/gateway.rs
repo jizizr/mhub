@@ -233,6 +233,17 @@ async fn lookup_media(
             }
         }
     }
+    // A song someone handed in is served at the quality it came in: the
+    // platform would not give it to this server at any.
+    let mut served = quality;
+    if row.is_none()
+        && live.is_none()
+        && let Ok(Some((cache, tier))) =
+            super::contribute::best_contributed(request.platform, &track_id).await
+    {
+        served = tier.as_str();
+        row = Some(cache);
+    }
     // An upload from before lyrics were embedded gets them, before it is
     // sent when the client asks to wait and it does not take too long.
     if let Some(cache) = &row
@@ -241,7 +252,7 @@ async fn lookup_media(
         row = Some(updated);
     }
     let from_row = |cache: MusicCache| {
-        let mut task = task_from_cache(&id, request.platform.id(), &track_id, quality, &cache);
+        let mut task = task_from_cache(&id, request.platform.id(), &track_id, served, &cache);
         task.cover_url = resolved.as_ref().map(|track| track.cover.clone());
         task
     };

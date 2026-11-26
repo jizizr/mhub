@@ -1260,7 +1260,16 @@ async fn start_download(state: &AppState, request: DownloadRequest) -> ApiResult
     // worker. This turns the common warm-cache path into one request instead
     // of create -> poll -> complete, which is especially noticeable when the
     // browser is starting a song over a high-latency connection.
-    let cached = find_music_cache(platform.id(), &track_id, &quality).await?;
+    let mut cached = find_music_cache(platform.id(), &track_id, &quality)
+        .await?
+        .filter(|cache| !cache.file_id.trim().is_empty());
+    // A song someone handed in plays at the quality it came in: the platform
+    // would not give it to this server at any.
+    if cached.is_none()
+        && let Ok(Some((cache, _))) = contribute::best_contributed(platform, &track_id).await
+    {
+        cached = Some(cache);
+    }
     let cache_hit = cached
         .as_ref()
         .is_some_and(|cache| !cache.file_id.trim().is_empty());

@@ -11,7 +11,7 @@
 use super::*;
 use crate::{
     audio::{self, AudioProbe, Codec},
-    cache::{find_music_cache_by_source, upsert_music_cache},
+    cache::{find_contributed, find_music_cache_by_source, mark_contributed, upsert_music_cache},
     lyric_tags::{self, LYRICS_TAGGED},
 };
 use music_gateway::{
@@ -145,7 +145,7 @@ pub(super) async fn contribute(request: ContributeRequest) -> ApiResult<Contribu
     // The same bytes were already uploaded, for this song or another ID.
     if let Ok(Some(existing)) = find_music_cache_by_source(platform.id(), &source).await {
         let cache = reuse_upload(cache, &existing);
-        upsert_music_cache(&cache, Some(&source)).await?;
+        save(&cache, &source).await?;
         let (row, lyrics) = lyric_upload::ensure_embedded(&cache)
             .await
             .unwrap_or((cache, LyricsState::Pending));
@@ -193,7 +193,7 @@ pub(super) async fn contribute(request: ContributeRequest) -> ApiResult<Contribu
     cache.thumb_file_id = uploaded.thumb_file_id.unwrap_or_default();
     cache.music_size = uploaded_len.min(i64::MAX as usize) as i64;
     cache.lyrics_tag = prepared.lyrics_tag;
-    upsert_music_cache(&cache, Some(&source)).await?;
+    save(&cache, &source).await?;
     tracing::info!(
         platform = %platform,
         track_id = %track_id,
@@ -325,6 +325,25 @@ fn rank(quality: Quality) -> usize {
         .iter()
         .position(|tier| *tier == quality)
         .unwrap_or(0)
+}
+
+/// Saves the row and marks it as handed in, so search finds the song.
+async fn save(cache: &MusicCache, source: &str) -> ApiResult<()> {
+    upsert_music_cache(cache, Some(source)).await?;
+    mark_contributed(&cache.platform, &cache.track_id, &cache.quality).await
+}
+
+/// The best handed-in upload of a song and its tier. The platform would not
+/// give this server the song, so it stands in for any quality asked for.
+pub(super) async fn best_contributed(
+    platform: Platform,
+    track_id: &str,
+) -> ApiResult<Option<(MusicCache, Quality)>> {
+    Ok(find_contributed(platform.id(), track_id)
+        .await?
+        .into_iter()
+        .filter_map(|row| row_quality(&row).map(|quality| (row, quality)))
+        .max_by_key(|(_, quality)| rank(*quality)))
 }
 
 /// The best tier the song is cached at, legacy bot keys included.

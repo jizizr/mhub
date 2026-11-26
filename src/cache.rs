@@ -154,6 +154,92 @@ pub async fn upsert_music_cache(cache: &MusicCache, source_sha256: Option<&str>)
     Ok(())
 }
 
+/// Marks a row as a song someone handed in themselves (the platform would not
+/// give it to this server), so search finds it and any quality request can
+/// fall back to it.
+pub async fn mark_contributed(platform: &str, track_id: &str, quality: &str) -> ApiResult<()> {
+    let pool = pool().await?;
+    ensure_schema(pool).await?;
+    sqlx::query(
+        "UPDATE music_cache SET contributed = 1 \
+         WHERE platform = ? AND track_id = ? AND quality = ?",
+    )
+    .bind(platform)
+    .bind(track_id)
+    .bind(quality)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The handed-in uploads of one song, at whatever quality they came in.
+pub async fn find_contributed(platform: &str, track_id: &str) -> ApiResult<Vec<MusicCache>> {
+    let pool = pool().await?;
+    ensure_schema(pool).await?;
+    let rows = sqlx::query_as::<_, MusicCache>(
+        r#"
+        SELECT platform, track_id, quality, song, singer, album, link, file_ext,
+               music_size, bitrate, duration, file_id, thumb_file_id,
+               from_user_id, from_chat_id, lyrics_tag
+        FROM music_cache
+        WHERE platform = ? AND track_id = ? AND contributed = 1 AND file_id <> ''
+        "#,
+    )
+    .bind(platform)
+    .bind(track_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Handed-in uploads on `platform` whose title, artist and album together
+/// contain every term, newest first. One row per quality, so a song can
+/// appear more than once.
+pub async fn search_contributed(
+    platform: &str,
+    terms: &[String],
+    limit: usize,
+) -> ApiResult<Vec<MusicCache>> {
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pool = pool().await?;
+    ensure_schema(pool).await?;
+    let mut sql = String::from(
+        r#"
+        SELECT platform, track_id, quality, song, singer, album, link, file_ext,
+               music_size, bitrate, duration, file_id, thumb_file_id,
+               from_user_id, from_chat_id, lyrics_tag
+        FROM music_cache
+        WHERE platform = ? AND contributed = 1 AND file_id <> ''
+        "#,
+    );
+    for _ in terms {
+        sql.push_str(" AND CONCAT_WS(' ', song, singer, album) LIKE ? ESCAPE '!'");
+    }
+    sql.push_str(" ORDER BY id DESC LIMIT ?");
+    let mut query = sqlx::query_as::<_, MusicCache>(&sql).bind(platform);
+    for term in terms {
+        query = query.bind(like_pattern(term));
+    }
+    let rows = query.bind(limit.min(200) as i64).fetch_all(pool).await?;
+    Ok(rows)
+}
+
+/// `%term%` with LIKE's wildcards in `term` taken literally.
+fn like_pattern(term: &str) -> String {
+    let mut pattern = String::with_capacity(term.len() + 2);
+    pattern.push('%');
+    for c in term.chars() {
+        if matches!(c, '%' | '_' | '!') {
+            pattern.push('!');
+        }
+        pattern.push(c);
+    }
+    pattern.push('%');
+    pattern
+}
+
 /// Swaps in a re-uploaded file (or only a new `lyrics_tag` when the file is
 /// unchanged) on every row still holding `old_file_id` (the qualities and
 /// track IDs sharing one upload), so a replacement made in the meantime
@@ -315,10 +401,12 @@ async fn ensure_schema(pool: &MySqlPool) -> ApiResult<()> {
                     from_chat_id BIGINT NOT NULL,
                     lyrics_tag TINYINT NOT NULL DEFAULT 0,
                     source_sha256 CHAR(64) NULL,
+                    contributed TINYINT NOT NULL DEFAULT 0,
                     UNIQUE KEY uniq_music_cache_track (platform, track_id, quality),
                     KEY idx_music_cache_file_id (file_id),
                     KEY idx_music_cache_platform_quality (platform, quality),
-                    KEY idx_music_cache_source (platform, source_sha256)
+                    KEY idx_music_cache_source (platform, source_sha256),
+                    KEY idx_music_cache_contributed (platform, contributed)
                 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                 "#,
             )
@@ -337,6 +425,14 @@ async fn ensure_schema(pool: &MySqlPool) -> ApiResult<()> {
                 sqlx::query(
                     "ALTER TABLE music_cache ADD COLUMN source_sha256 CHAR(64) NULL, \
                      ADD KEY idx_music_cache_source (platform, source_sha256)",
+                )
+                .execute(pool)
+                .await?;
+            }
+            if !has_column(pool, "contributed").await? {
+                sqlx::query(
+                    "ALTER TABLE music_cache ADD COLUMN contributed TINYINT NOT NULL DEFAULT 0, \
+                     ADD KEY idx_music_cache_contributed (platform, contributed)",
                 )
                 .execute(pool)
                 .await?;
@@ -383,6 +479,12 @@ async fn pool() -> ApiResult<&'static MySqlPool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn like_patterns_take_wildcards_literally() {
+        assert_eq!(like_pattern("100%_!"), "%100!%!_!!%");
+        assert_eq!(like_pattern("K歌之王"), "%K歌之王%");
+    }
 
     #[test]
     fn stats_join_platform_rows_and_sort_by_song_count() {

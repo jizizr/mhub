@@ -199,8 +199,102 @@ lazy_static::lazy_static! {
         search_gate::SearchGate::new(search_gate::Tuning::default());
 }
 
-/// A search for someone waiting on the search box.
+/// A search for someone waiting on the search box. Songs people handed in
+/// that match come first: the platform's own search may not list them in
+/// this server's region, and they are certain to play.
 pub async fn search(
+    platform: MusicPlatform,
+    keyword: &str,
+    limit: usize,
+) -> ApiResult<Vec<MusicSearchItem>> {
+    let terms = contributed_terms(keyword);
+    let (found, contributed) = tokio::join!(platform_search(platform, keyword, limit), async {
+        if terms.is_empty() {
+            return Vec::new();
+        }
+        crate::cache::search_contributed(platform.id(), &terms, 40)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(platform = %platform, "contributed song search failed: {error}");
+                Vec::new()
+            })
+    });
+    let contributed = contributed_items(platform, contributed, limit.min(CONTRIBUTED_MAX));
+    match found {
+        Ok(items) => Ok(merge_contributed(contributed, items, limit)),
+        Err(_) if !contributed.is_empty() => Ok(contributed),
+        Err(error) => Err(error),
+    }
+}
+
+/// At most this many handed-in songs lead a search page.
+const CONTRIBUTED_MAX: usize = 5;
+
+/// The words of a keyword search, or none for a link or an ID, which the
+/// platform resolves itself.
+fn contributed_terms(keyword: &str) -> Vec<String> {
+    let keyword = keyword.trim();
+    if keyword.contains("://") || parse_track_link(keyword).is_some() {
+        return Vec::new();
+    }
+    let separators = |c: char| {
+        c.is_whitespace() || matches!(c, '-' | '–' | '—' | '·' | '/' | '|' | ',' | '，' | '、')
+    };
+    let mut terms: Vec<String> = keyword
+        .split(separators)
+        .filter(|term| !term.is_empty())
+        .map(str::to_string)
+        .collect();
+    terms.dedup();
+    terms.truncate(8);
+    terms
+}
+
+fn contributed_items(
+    platform: MusicPlatform,
+    rows: Vec<crate::cache::MusicCache>,
+    max: usize,
+) -> Vec<MusicSearchItem> {
+    let mut seen = std::collections::HashSet::new();
+    rows.into_iter()
+        .filter(|row| seen.insert(row.track_id.clone()))
+        .take(max)
+        .map(|row| MusicSearchItem {
+            platform,
+            id: row.track_id,
+            song: row.song,
+            singer: row.singer,
+            cover: String::new(),
+        })
+        .collect()
+}
+
+/// Handed-in songs first, then the platform's results without them, cut to
+/// `limit`. A handed-in song the platform also lists keeps its cover.
+fn merge_contributed(
+    contributed: Vec<MusicSearchItem>,
+    found: Vec<MusicSearchItem>,
+    limit: usize,
+) -> Vec<MusicSearchItem> {
+    let mut merged: Vec<MusicSearchItem> = contributed
+        .into_iter()
+        .map(|mut item| {
+            if let Some(listed) = found.iter().find(|listed| listed.id == item.id) {
+                item.cover = listed.cover.clone();
+            }
+            item
+        })
+        .collect();
+    for item in found {
+        if !merged.iter().any(|kept| kept.id == item.id) {
+            merged.push(item);
+        }
+    }
+    merged.truncate(limit);
+    merged
+}
+
+async fn platform_search(
     platform: MusicPlatform,
     keyword: &str,
     limit: usize,
@@ -755,6 +849,38 @@ fn provider_for(platform: MusicPlatform) -> &'static dyn MusicProvider {
 #[cfg(test)]
 mod track_link_tests {
     use super::*;
+
+    fn item(id: &str, cover: &str) -> MusicSearchItem {
+        MusicSearchItem {
+            platform: MusicPlatform::AppleMusic,
+            id: id.to_string(),
+            song: "K歌之王".to_string(),
+            singer: "陈奕迅".to_string(),
+            cover: cover.to_string(),
+        }
+    }
+
+    #[test]
+    fn keyword_searches_split_into_terms_and_links_into_none() {
+        assert_eq!(
+            contributed_terms(" 陈奕迅 – K歌之王 "),
+            vec!["陈奕迅".to_string(), "K歌之王".to_string()]
+        );
+        assert!(contributed_terms("https://music.apple.com/hk/song/x/651449679").is_empty());
+        assert!(contributed_terms("   ").is_empty());
+    }
+
+    #[test]
+    fn handed_in_songs_lead_without_duplicates() {
+        let merged = merge_contributed(
+            vec![item("2", "")],
+            vec![item("1", "a"), item("2", "b"), item("3", "c")],
+            3,
+        );
+        let ids: Vec<_> = merged.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["2", "1", "3"]);
+        assert_eq!(merged[0].cover, "b");
+    }
 
     #[test]
     fn song_links_and_platform_ids_name_one_song() {
