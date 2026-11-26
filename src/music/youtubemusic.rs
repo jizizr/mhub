@@ -103,6 +103,10 @@ impl MusicProvider for YouTubeMusicProvider {
     }
 }
 
+/// YouTube Music's own order first: the top result and the songs and videos
+/// of the unfiltered search, which is where uploads that are not catalog
+/// songs (lyric videos, covers) show up. The songs-only search follows, since
+/// the unfiltered one can leave out the official recording.
 async fn search_youtube_music(
     keyword: &str,
     limit: usize,
@@ -111,35 +115,141 @@ async fn search_youtube_music(
         return Ok(Vec::new());
     }
     let limit = limit.max(1);
+    let (ordered, songs) = tokio::join!(
+        search_request(keyword, None),
+        search_request(keyword, Some(SONGS_ONLY))
+    );
+    let ordered = match ordered {
+        Ok(root) => ordered_tracks(&root),
+        Err(err) => {
+            tracing::debug!(%err, "YouTube Music unfiltered search failed");
+            Vec::new()
+        }
+    };
+    let songs = match songs {
+        Ok(root) => collect_music_list_items(&root)
+            .into_iter()
+            .filter_map(track_from_list_item)
+            .collect(),
+        Err(err) if ordered.is_empty() => return Err(err),
+        Err(_) => Vec::new(),
+    };
+    let mut seen = HashMap::new();
+    Ok(ordered
+        .into_iter()
+        .chain(songs)
+        .filter(|track| seen.insert(track.id.clone(), ()).is_none())
+        .take(limit)
+        .collect())
+}
+
+/// The search filter for songs only.
+const SONGS_ONLY: &str = "EgWKAQIIAWoMEAMQBBAJEAoQBRAV";
+
+async fn search_request(keyword: &str, params: Option<&str>) -> Result<Value, BotError> {
     let payload = SearchRequest {
         context: web_context(),
         query: keyword.to_string(),
-        params: Some("EgWKAQIIAWoMEAMQBBAJEAoQBRAV".to_string()),
+        params: params.map(str::to_string),
     };
-    let root = post_innertube(
+    post_innertube(
         INNER_TUBE_BASE_MUSIC,
         "search",
         &payload,
         DEFAULT_USER_AGENT,
         None,
     )
-    .await?;
-    let mut seen = HashMap::new();
-    let mut tracks = Vec::new();
-    for item in collect_music_list_items(&root) {
-        let Some(track) = track_from_list_item(item) else {
-            continue;
-        };
-        if seen.insert(track.id.clone(), ()).is_some() {
-            continue;
-        }
-        tracks.push(track);
-        if tracks.len() >= limit {
-            break;
+    .await
+}
+
+/// The playable songs and videos of an unfiltered search, top result first,
+/// in the order YouTube Music shows them. Artists, albums, playlists and
+/// podcast episodes are left out.
+fn ordered_tracks(root: &Value) -> Vec<MusicSearchItem> {
+    fn walk(node: &Value, out: &mut Vec<MusicSearchItem>) {
+        match node {
+            Value::Object(map) => {
+                if let Some(card) = map.get("musicCardShelfRenderer") {
+                    out.extend(track_from_top_card(card));
+                } else if let Some(item) = map.get("musicResponsiveListItemRenderer") {
+                    if is_playable_music(item) {
+                        out.extend(track_from_list_item(item));
+                    }
+                    return;
+                }
+                for value in map.values() {
+                    walk(value, out);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    walk(value, out);
+                }
+            }
+            _ => {}
         }
     }
-    Ok(tracks)
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
 }
+
+/// Whether a result plays as music: a song or a video, not a podcast episode
+/// and not a page such as an artist or an album.
+fn is_playable_music(node: &Value) -> bool {
+    music_video_type(node).is_some_and(|kind| kind != "MUSIC_VIDEO_TYPE_PODCAST_EPISODE")
+}
+
+fn music_video_type(node: &Value) -> Option<&str> {
+    match node {
+        Value::Object(map) => map
+            .get("musicVideoType")
+            .and_then(Value::as_str)
+            .or_else(|| map.values().find_map(music_video_type)),
+        Value::Array(values) => values.iter().find_map(music_video_type),
+        _ => None,
+    }
+}
+
+/// The top result card, when it is a song or a video. Its subtitle reads
+/// "Video • Channel" or "Song • Artist • Album".
+fn track_from_top_card(card: &Value) -> Option<MusicSearchItem> {
+    let title = card.get("title")?;
+    if !is_playable_music(title) {
+        return None;
+    }
+    let id = find_video_id_deep(title).or_else(|| find_video_id_deep(card.get("onTap")?))?;
+    let song = runs_text(title).trim().to_string();
+    if song.is_empty() {
+        return None;
+    }
+    let subtitle = runs_text(card.get("subtitle").unwrap_or(&Value::Null));
+    Some(MusicSearchItem {
+        platform: MusicPlatform::YouTubeMusic,
+        id,
+        song,
+        singer: singer_from_subtitle(&subtitle).unwrap_or_else(|| "未知歌手".to_string()),
+        cover: find_thumbnail_url(card.get("thumbnail").unwrap_or(card)).unwrap_or_default(),
+    })
+}
+
+/// The first part of a "Kind • Artist • …" line that is neither the kind of
+/// result nor a duration or a view count.
+fn singer_from_subtitle(text: &str) -> Option<String> {
+    text.split('•')
+        .map(str::trim)
+        .find(|part| {
+            !part.is_empty()
+                && !RESULT_KINDS.contains(part)
+                && !looks_like_duration(part)
+                && !part.ends_with(" views")
+                && !part.ends_with(" plays")
+        })
+        .map(str::to_string)
+}
+
+/// The result kinds YouTube Music names first in a subtitle (`hl=en`).
+const RESULT_KINDS: [&str; 4] = ["Song", "Video", "Episode", "Podcast"];
 
 async fn resolve_youtube_music(
     keyword: &str,
@@ -500,11 +610,8 @@ fn track_from_list_item(item: &Value) -> Option<MusicSearchItem> {
             title = text;
             continue;
         }
-        for part in text.split('•').map(str::trim) {
-            if !part.is_empty() && !looks_like_duration(part) {
-                singer = part.to_string();
-                break;
-            }
+        if let Some(part) = singer_from_subtitle(&text) {
+            singer = part;
         }
         if !singer.is_empty() {
             break;
@@ -994,6 +1101,49 @@ struct Thumbnail {
 
 #[cfg(test)]
 mod tests {
+
+    fn list_item(id: &str, title: &str, subtitle: &str, kind: &str) -> serde_json::Value {
+        serde_json::json!({"musicResponsiveListItemRenderer": {
+            "playlistItemData": {"videoId": id},
+            "overlay": {"watchEndpoint": {"watchEndpointMusicSupportedConfigs": {
+                "watchEndpointMusicConfig": {"musicVideoType": kind}}}},
+            "flexColumns": [
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": title}]}}},
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": subtitle}]}}}
+            ]
+        }})
+    }
+
+    #[test]
+    fn unfiltered_search_keeps_youtube_music_order_of_songs_and_videos() {
+        let root = serde_json::json!({"contents": [
+            {"musicCardShelfRenderer": {
+                "title": {"runs": [{"text": "童話鎮 歌詞字幕", "navigationEndpoint": {"watchEndpoint": {
+                    "videoId": "Ap0huJwyT7g",
+                    "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"}}}}}]},
+                "subtitle": {"runs": [{"text": "Video"}, {"text": " • "}, {"text": "BELLA PING"}]}
+            }},
+            {"itemSectionRenderer": {"contents": [
+                list_item("wirUaLd3O98", "童话镇", "Video • 陳一發兒 • 344K views", "MUSIC_VIDEO_TYPE_OMV"),
+                list_item("XVOhygutivE", "播客", "Episode • Dec 5, 2025", "MUSIC_VIDEO_TYPE_PODCAST_EPISODE"),
+                list_item("9C5ThSSC9nQ", "童话镇", "Song • 那个女人 • 4:02", "MUSIC_VIDEO_TYPE_ATV")
+            ]}}
+        ]});
+        let tracks: Vec<_> = ordered_tracks(&root)
+            .into_iter()
+            .map(|track| (track.id, track.singer))
+            .collect();
+        assert_eq!(
+            tracks,
+            [
+                ("Ap0huJwyT7g".to_string(), "BELLA PING".to_string()),
+                ("wirUaLd3O98".to_string(), "陳一發兒".to_string()),
+                ("9C5ThSSC9nQ".to_string(), "那个女人".to_string()),
+            ]
+        );
+    }
+
     use super::{super::provider::download_track_media, *};
 
     #[test]
